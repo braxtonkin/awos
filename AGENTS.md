@@ -52,6 +52,21 @@ Never fix a repeated mistake only by rewording a prompt. Most rules below are en
 - **E2. Skills come from observed failures.** Write or change an agent skill only after watching an agent fail at something specific. Test the change with an eval before relying on it.
 - **E3. Autonomy is earned in steps.** Watched local agents come first, then background or cloud agents, then auto-merge. Move up a step only when verification (C1, C2) and the checks in the enforcement table are in place.
 
+## Stack
+
+Each tool below is the only approved tool for its job (A3). To replace one, or to add a second tool for the same job, change this list in its own PR.
+
+- **Language.** TypeScript on Node 24 LTS, with `strict`, `noUncheckedIndexedAccess`, and `exactOptionalPropertyTypes` on.
+- **Database.** Postgres. The schema lives in plain SQL migrations that `dbmate` runs. Invariants are schema constraints.
+- **Queries.** Kysely, with types that `kysely-codegen` generates from the database. No ORM.
+- **Outside data.** zod parses every payload, file, and environment variable where it enters.
+- **Secrets.** The app encrypts secrets with AES-256-GCM from `node:crypto` before they reach Postgres. The key comes from a Kubernetes Secret and never reaches the database.
+- **Tests.** Vitest against a real Postgres that Testcontainers starts. No database mocks.
+- **Dashboard.** Next.js App Router. Server components read Postgres, and server actions write to it.
+- **Connectors.** Octokit for GitHub. `fetch` and zod for Jira and Webex.
+- **Agent runtime.** The Codex CLI, run as `codex exec --json` inside the task's workspace.
+- **Deployment.** Kubernetes.
+
 ## Paved paths
 
 None yet. The first feature, command, or module of each kind defines its paved path; record it here in the same PR.
@@ -60,10 +75,10 @@ None yet. The first feature, command, or module of each kind defines its paved p
 
 | Rule | Enforced by today | Target |
 | --- | --- | --- |
-| A5 | this file | CI import-boundary check |
-| A7 | this file | strictest compiler and type-checker settings |
-| B1 | this file | lint rule rejecting comments |
-| B2 | this file | lint rule rejecting suppression directives |
+| A5 | this file | `dependency-cruiser` in CI |
+| A7 | this file | the `tsconfig` flags in [Stack](#stack) and typescript-eslint `strict-type-checked` |
+| B1 | this file | a custom ESLint rule that rejects comments |
+| B2 | this file | ESLint `linterOptions.noInlineConfig` and `@typescript-eslint/ban-ts-comment` |
 | C3 | this file | CI check that changes under `features/` also change the feature map |
 | All others | this file | promote when a check becomes possible |
 
