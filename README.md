@@ -1,6 +1,6 @@
 # autoworker-oss
 
-The open-source version of autoworker.
+AutoWorker takes a ticket all the way to a merged change without a person driving it. A person decides what should happen and reviews the result. The full behavior is specified in [docs/spec.md](docs/spec.md).
 
 ## Rules
 
