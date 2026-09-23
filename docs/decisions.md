@@ -57,7 +57,7 @@ Rejected options:
 
 ### The agent view lives inside running work
 
-Decided 23 Sep 2026. The live view of an agent, where a person watches each step and sends it messages, is a panel on the page of an in-progress routine or task. It is not the dashboard's first view or a page of its own.
+Decided 23 Sep 2026. The live view of an agent, where a person watches each step and sends it messages, is a panel on the page of an in-progress routine or task. It is not the dashboard's first view or a page of its own. Opening a task shows its own page, with that panel and how long the task took from start to merge.
 
 Rejected option:
 
@@ -110,13 +110,40 @@ Decided 23 Sep 2026. Attempts and evidence are kept for 180 days. Agent transcri
 
 Decided 23 Sep 2026. The UI and the backend deploy separately, as they do in the current AutoWorker.
 
+### Verify runs in an environment faithful to production
+
+Decided 23 Sep 2026. By default, Verify starts a pod that matches the product's real environment as closely as it can, reproduces the bug or exercises the feature there, and saves evidence such as a video. A repository can define its own way to verify, as it defines its own merge bar.
+
+### A request for help says exactly what to do
+
+Decided 23 Sep 2026. When AutoWorker needs a person, it says exactly what the person must do and what AutoWorker does once they have done it. This holds for parked tasks, the list of work that needs someone, and chat posts.
+
+### Stored tokens are write-only
+
+Decided 23 Sep 2026. A stored token can be replaced but is never shown back, so acting as someone else cannot reveal their token. The dashboard's database role has no read access to the token column. In the data model draft, that role replaced a token and was refused when it tried to read one. A replacement is recorded with who made it and when, and nobody is alerted. The owner is alerted when their token expires.
+
+Rejected option:
+
+- **Alert the owner on every replacement.** The record on the People page is enough, and an expired token is the case that needs action.
+
+### The dashboard uses the Graphite color scheme
+
+Decided 23 Sep 2026. The dashboard is neutral grey, and color marks only state: amber for work that needs a person, blue for running, green for landed, and red for failed. The build checks every color pair against contrast floors in light and dark mode.
+
+Rejected options:
+
+- **Cobalt.** Running work and clickable controls would share one blue.
+- **Plum.** It is the most a matter of taste.
+- **The original green.** The owner found it unpleasant.
+
 ## Open
 
 Each open question names the current lean or default. A lean is not a decision.
 
 - **What the dashboard's Overview shows first.** The lean is what needs the person picked, with the pipeline board and the history one click away.
 - **When AutoWorker posts to chat.** The default is to post when a task parks as waiting, when a routine is overdue, and once a day as a digest.
-- **Where the stage boundaries fall.** The default is to cut where the work changes hands. Specify ends with a written plan, implement with a pushed branch, verify with saved evidence, and land with a merged pull request.
-- **How stored credentials behave without sign-in.** The proposal is that a stored credential can be replaced but never shown back, so switching to someone else's identity cannot reveal their token.
+- **Where the stage boundaries fall.** The lean is to cut where the work changes hands, with Implement ending in a draft pull request so the repository's CI runs during Verify. When Verify finds the behavior still wrong, the task goes back to Implement with the evidence. When only the environment fails, Verify runs again. After 3 rounds without a pass, the task waits for a person.
+- **Who starts Verify's environment pod.** The lean is the engine, so attempt Jobs keep no Kubernetes API access.
+- **How much of each agent run to keep.** The lean is to keep streamed text only until its step finishes. On the lab's own event log, streamed fragments were 76% of stored events and added no content once their step finished.
 - **How the engine reaches the app server.** The lean is a small bridge inside the Job that runs the app server over its standard input and output and connects out to the engine. It numbers every event and resends any the engine has not stored, so an engine restart loses nothing, and the Job listens on no port. The prototype instead had the engine connect to a WebSocket port in the Job, guarded by a token made for that attempt. That needs traffic into Job pods, and reading the Codex source found no replay of events a disconnected client missed.
 - **Codex sign-in.** Parked for now. The app server ignores the `CODEX_API_KEY` variable that `codex exec` reads, so it signs in from `auth.json` or through a sign-in call in its protocol.
