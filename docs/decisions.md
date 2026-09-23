@@ -154,6 +154,31 @@ Rejected options:
 - **Lean.** It proves a property for every input, but each proof costs far more effort, and this design's risks are races between processes, which TLA+ checks directly.
 - **No formal methods.** The prototypes checked one run of each race. A model checks every ordering of steps within its bounds.
 
+### The engine checks and refreshes every credential
+
+Decided 23 Sep 2026. Each kind of connector comes with a check that proves a stored credential still works. The engine runs the checks where the credentials are stored, as the current AutoWorker does in its parent pod, and a Job inherits only what it needs. For Codex, the check runs `codex exec` on a cheap model with a prompt that must be answered `ack`. Codex refreshes its own login during a check when the access token has 5 minutes or less left, and the engine seals the refreshed login back. A Job gets a copy with the refresh token removed, so it can never refresh. Codex rereads its login file before it refreshes, so a running Job can pick up a newer copy from the engine. A check is claimed like an attempt, so two engine copies never refresh one login at once. Each person gives AutoWorker a login made for it, because a refresh by the engine signs out every other copy of the same login.
+
+The evidence comes from throwaway prototypes against Codex CLI 0.156.0:
+
+- A copy of a login with its refresh token blanked ran a full app server turn and was never rewritten.
+- The check replied `ack` in 16.7 s and sent 13,528 input tokens, 11,008 of them cached. On a copy with a broken signature it failed after 22.9 s with a 401.
+- Codex's source refreshes early only in the last 5 minutes, and rereads its file before it refreshes after a 401. That part was read, not run.
+
+Rejected options:
+
+- **A Job refreshes its own copy.** A refresh token works once, so a Job's refresh would sign out every other copy, and two Jobs refreshing at once would race.
+- **The engine calls OpenAI's refresh endpoint itself.** It is undocumented, and it would be a second implementation of Codex's login.
+
+### Every task works in one repository
+
+Decided 23 Sep 2026. A routine names the repository its work happens in, and each task copies that repository when the routine finds it. Every attempt then knows what to clone before its agent starts, and a task's repository never changes while it runs. The schema holds this as a rule and refuses a task with no repository. For now the only repository is AutoWorker's own. Repositories are rows of their own, since several routines will share one, and facts about a repository, such as its default branch, belong in one place.
+
+Rejected options:
+
+- **A setting in the engine's configuration.** It would be a second record beside Postgres, and it allows one repository per deployment.
+- **A repository found per task at intake.** Intake would have no default and nothing to enforce.
+- **The agent chooses.** The pod clones the repository before the agent starts.
+
 ## Open
 
 Each open question names the current lean or default. A lean is not a decision.
@@ -164,4 +189,8 @@ Each open question names the current lean or default. A lean is not a decision.
 - **Whether outbox rows need a claim.** The data model draft has no claim on outbox rows, and Jira comments and chat posts are not idempotent on the other side. The outbox's TLA+ model settles this before the outbox is built.
 - **How much of each agent run to keep.** The lean is to keep streamed text only until its step finishes. On the lab's own event log, streamed fragments were 76% of stored events and added no content once their step finished.
 - **How the engine reaches the app server.** The lean is a small bridge inside the Job that runs the app server over its standard input and output and connects out to the engine. It numbers every event and resends any the engine has not stored, so an engine restart loses nothing, and the Job listens on no port. The prototype instead had the engine connect to a WebSocket port in the Job, guarded by a token made for that attempt. That needs traffic into Job pods, and reading the Codex source found no replay of events a disconnected client missed.
-- **Codex sign-in.** Parked for now. The app server ignores the `CODEX_API_KEY` variable that `codex exec` reads, so it signs in from `auth.json` or through a sign-in call in its protocol.
+- **Whose credentials a run uses.** The spec names the ticket's assignee, and the owner described the person who launched the run. A scheduled run has no launcher, so a routine needs an owner either way. The lean is that a routine's runs use its owner's credentials, and a task starts owned by its routine's owner.
+- **When sign-in becomes necessary.** Runs now carry personal logins, so picking a person runs an agent with that person's GitHub token and ChatGPT account. The lean is to add sign-in before the first run with real personal credentials.
+- **How a person gives AutoWorker a Codex login.** The lean is a Connect button that has the engine run `codex login --device-auth` and show the person its link and code, so the login is made for AutoWorker by construction.
+- **Which goal version an attempt follows.** The data model draft uses the latest version at claim time, so a goal fixed before a retry applies to the retry.
+- **Whether a task key is unique per routine or across routines.** The data model draft makes it unique per routine. The cost is that two routines can put two agents on one ticket at once.
