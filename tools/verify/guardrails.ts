@@ -5,25 +5,23 @@ import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { fail, pass, type Check, type Scenario } from './check.ts';
 
-type Tool = 'tsc' | 'node' | 'eslint' | 'depcruise' | 'check';
+type Tool = 'tsc' | 'node' | 'eslint' | 'depcruise' | 'check' | 'shape';
 
-type Companion = { readonly file: string; readonly source: string };
+type Plant =
+  | { readonly file: string; readonly source: string; readonly linkTo?: never }
+  | { readonly file: string; readonly linkTo: string; readonly source?: never };
 
-type Violation = {
+type Violation = Plant & {
   readonly name: string;
-  readonly file: string;
-  readonly source: string;
   readonly tool: Tool;
   readonly expect: readonly string[];
-  readonly companions?: readonly Companion[];
+  readonly companions?: readonly Plant[];
 };
 
-type Allowance = {
+type Allowance = Plant & {
   readonly name: string;
-  readonly file: string;
-  readonly source: string;
   readonly tool: Tool;
-  readonly companions?: readonly Companion[];
+  readonly companions?: readonly Plant[];
   readonly env?: Readonly<Record<string, string>>;
 };
 
@@ -35,7 +33,7 @@ const floatingPromise = 'export function load(): Promise<number> {\n  return Pro
 
 const noComments = 'autoworker/no-comments';
 
-const jsxTypes: Companion = {
+const jsxTypes: Plant = {
   file: 'features/planted/jsx.d.ts',
   source: 'declare global {\n  namespace JSX {\n    type Element = string;\n    interface IntrinsicElements {\n      div: { readonly children?: unknown };\n    }\n  }\n}\n\nexport {};\n',
 };
@@ -513,6 +511,84 @@ const violations: readonly Violation[] = [
       { file: 'services/dashboard/page.ts', source: "import { tick } from '../../tools/relay.ts';\nexport const page = tick;\n" },
     ],
   },
+  {
+    name: 'the shape check rejects a symbolic link that carries one feature into another',
+    file: 'lib',
+    linkTo: 'features/beta',
+    tool: 'shape',
+    expect: ['lib is a symbolic link'],
+  },
+  {
+    name: 'the shape check rejects a symbolic link that hides a @ts-ignore from lint',
+    file: 'features/alpha/linked',
+    linkTo: '../../.claude/hidden',
+    tool: 'shape',
+    expect: ['features/alpha/linked is a symbolic link'],
+    companions: [{ file: '.claude/hidden/ignore.ts', source: "// @ts-ignore lint never reads this file\nexport const count: number = 'one';\n" }],
+  },
+  {
+    name: 'the shape check rejects a feature folder whose name the import rules would read as a pattern',
+    file: 'features/(.)+/thing.ts',
+    source: 'export const thing = 1;\n',
+    tool: 'shape',
+    expect: ['features/(.)+ must match'],
+  },
+  {
+    name: 'the shape check rejects a service folder whose name the import rules would read as a pattern',
+    file: 'services/(.)+/main.ts',
+    source: 'export const main = 1;\n',
+    tool: 'shape',
+    expect: ['services/(.)+ must match'],
+  },
+  {
+    name: 'the shape check rejects a folder name that starts and ends with a letter but holds a pattern',
+    file: 'features/a.*z/thing.ts',
+    source: 'export const thing = 1;\n',
+    tool: 'shape',
+    expect: ['features/a.*z must match'],
+  },
+  {
+    name: 'the shape check rejects a node_modules folder inside a feature',
+    file: 'features/alpha/node_modules/bridge.ts',
+    source: 'export const bridge = 1;\n',
+    tool: 'shape',
+    expect: ['features/alpha/node_modules is a node_modules folder below the root'],
+  },
+  {
+    name: 'the shape check rejects a node_modules folder outside the product folders',
+    file: 'lib/node_modules/bridge.ts',
+    source: 'export const bridge = 1;\n',
+    tool: 'shape',
+    expect: ['lib/node_modules is a node_modules folder below the root'],
+  },
+  {
+    name: 'the shape check rejects a symbolic link inside a dot folder',
+    file: 'features/alpha/.cache/beta',
+    linkTo: '../../beta',
+    tool: 'shape',
+    expect: ['features/alpha/.cache/beta is a symbolic link'],
+  },
+  {
+    name: 'the shape check reports a link to its own folder without following it',
+    file: 'features/alpha/self',
+    linkTo: '.',
+    tool: 'shape',
+    expect: ['features/alpha/self is a symbolic link'],
+  },
+  {
+    name: 'the shape check rejects a symbolic link under .claude/ outside an install',
+    file: '.claude/skills/linked',
+    linkTo: '../../features/beta',
+    tool: 'shape',
+    expect: ['.claude/skills/linked is a symbolic link'],
+  },
+  {
+    name: 'npm run check runs the shape check',
+    file: 'docs/guide.md',
+    linkTo: '../README.md',
+    tool: 'check',
+    expect: ['docs/guide.md is a symbolic link'],
+  },
 ];
 
 const allowances: readonly Allowance[] = [
@@ -554,6 +630,18 @@ const allowances: readonly Allowance[] = [
     file: 'features/alpha/uses-package.ts',
     source: "import { version } from 'typescript';\nexport const compilerVersion = version;\n",
     tool: 'depcruise',
+  },
+  {
+    name: 'the shape check accepts a feature folder named with lowercase letters, digits, and dashes',
+    file: 'features/s3-upload/client.ts',
+    source: 'export const client = 1;\n',
+    tool: 'shape',
+  },
+  {
+    name: 'the shape check accepts the packages that agent tooling installs under .claude/',
+    file: '.claude/skills/poteto-mode/scripts/node_modules/.bin/tsc',
+    linkTo: '../typescript/bin/tsc',
+    tool: 'shape',
   },
 ];
 
@@ -632,6 +720,10 @@ const tools: Record<
     command: () => ['npm', 'run', '--silent', 'boundaries'],
     caught: (outcome, file, code) => outcome.output.split('\n').some(line => line.includes(code) && line.includes(file)),
   },
+  shape: {
+    command: () => ['npm', 'run', '--silent', 'shape'],
+    caught: (outcome, _file, code) => outcome.output.split('\n').some(line => line.startsWith(code)),
+  },
 };
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
@@ -643,15 +735,19 @@ function run(tool: Tool, copy: string, file: string, env: Readonly<Record<string
   return { status: result.status, stdout: result.stdout, output: `${result.stdout}${result.stderr}` };
 }
 
-async function withPlanted(copy: string, planted: readonly Companion[], judge: () => Check): Promise<Check> {
-  for (const { file, source } of planted) {
-    await mkdir(dirname(join(copy, file)), { recursive: true });
-    await writeFile(join(copy, file), source);
+async function withPlanted(copy: string, plants: readonly Plant[], judge: () => Check): Promise<Check> {
+  const created: string[] = [];
+  for (const plant of plants) {
+    const path = join(copy, plant.file);
+    const firstNewFolder = await mkdir(dirname(path), { recursive: true });
+    created.push(firstNewFolder ?? path);
+    if (plant.linkTo === undefined) await writeFile(path, plant.source);
+    else await symlink(plant.linkTo, path);
   }
   try {
     return judge();
   } finally {
-    for (const { file } of planted) await rm(join(copy, file), { force: true });
+    for (const path of created.toReversed()) await rm(path, { recursive: true, force: true });
   }
 }
 
@@ -686,7 +782,7 @@ export const guardrails: Scenario = {
   summary: 'plants each violation a check must reject and each line it must accept, and proves both',
   run: () =>
     withCopy(async copy => {
-      const checks: Check[] = (['tsc', 'eslint', 'depcruise'] as const).map(tool => {
+      const checks: Check[] = (['tsc', 'eslint', 'depcruise', 'shape'] as const).map(tool => {
         const clean = run(tool, copy, '.');
         const name = `the unplanted copy passes ${tool}`;
         const problem = clean.status === 0 ? tools[tool].unclean?.(clean) : (tools[tool].summary ?? firstLines)(clean);

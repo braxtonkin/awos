@@ -8,9 +8,10 @@
     "node": ">=24"
   },
   "scripts": {
-    "check": "npm run typecheck && npm run lint -- . && npm run boundaries",
+    "check": "npm run shape && npm run typecheck && npm run lint -- . && npm run boundaries",
     "boundaries": "depcruise --config .dependency-cruiser.json --output-type err .",
     "lint": "eslint --config eslint.config.ts --max-warnings 0",
+    "shape": "node tools/shape/main.ts",
     "typecheck": "tsc --noEmit",
     "verify": "node tools/verify/main.ts"
   },
