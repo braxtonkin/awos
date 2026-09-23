@@ -63,6 +63,11 @@ const losesAttemptsForever: Shape = {
   holds: run => run.loopActions.includes('Reap') && loopedTask(run, views => views.every(view => view.state === 'ready')),
 };
 
+const rerunsFailedStageForever: Shape = {
+  label: 'by a failed stage rerunning forever',
+  holds: run => run.loopActions.includes('Finish') && loopedTask(run, views => new Set(views.map(view => view.stage)).size === 1 && views.every(view => view.state === 'ready' && view.stage !== 'verify')),
+};
+
 const stoppedTaskKeepsAttempt: Shape = {
   label: 'by a stopped task that keeps its live attempt',
   holds: run => {
@@ -145,6 +150,10 @@ const mutants: readonly Mutant[] = [
   invariant('EnvRerunsAreCapped', 'environment reruns have no cap', 'EnvRerunsCapped'),
   unsettled('LostAttemptsAreCapped', 'lost attempts have no cap', losesAttemptsForever),
   invariant('LostAttemptsAreCapped', 'lost attempts have no cap', 'LostAttemptsCapped'),
+  unsettled('StageRetriesAreCapped', 'stage retries have no cap', rerunsFailedStageForever),
+  invariant('StageRetriesAreCapped', 'stage retries have no cap', 'StageRetriesCapped'),
+  invariant('PassResetsStageRetries', 'a pass keeps the stage retries', 'PassLeavesNoStageRetries'),
+  action('RetryResetsStageRetries', "a person's retry keeps the stage retries", 'RetryLeavesNoStageRetries'),
   unsettled('ReaperIsFair', 'the reaper has no fairness', hungWorkerHoldsItsTask),
 ];
 
@@ -152,13 +161,13 @@ const readConfig = (file: string): string => readFileSync(new URL(file, import.m
 
 const typeInvariant = 'TypeOK';
 
-const bounds = ['Tasks', 'Workers', 'MaxRounds', 'MaxEnvReruns', 'MaxLost', 'MaxHumanActions'] as const;
+const bounds = ['Tasks', 'Workers', 'MaxRounds', 'MaxEnvReruns', 'MaxLost', 'MaxStageRetries', 'MaxHumanActions'] as const;
 
 type Bound = (typeof bounds)[number];
 
 const floors: Readonly<Record<string, Readonly<Record<Bound, number>>>> = {
-  'Tasks.cfg': { Tasks: 2, Workers: 2, MaxRounds: 2, MaxEnvReruns: 2, MaxLost: 2, MaxHumanActions: 2 },
-  'Tasks.nightly.cfg': { Tasks: 2, Workers: 2, MaxRounds: 3, MaxEnvReruns: 3, MaxLost: 3, MaxHumanActions: 3 },
+  'Tasks.cfg': { Tasks: 2, Workers: 2, MaxRounds: 2, MaxEnvReruns: 2, MaxLost: 2, MaxStageRetries: 1, MaxHumanActions: 2 },
+  'Tasks.nightly.cfg': { Tasks: 2, Workers: 2, MaxRounds: 3, MaxEnvReruns: 3, MaxLost: 3, MaxStageRetries: 2, MaxHumanActions: 3 },
 };
 
 type Section = 'CONSTANTS' | 'INVARIANTS' | 'PROPERTIES';

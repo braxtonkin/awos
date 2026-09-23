@@ -8,6 +8,7 @@ CONSTANTS
     MaxRounds,
     MaxEnvReruns,
     MaxLost,
+    MaxStageRetries,
     MaxHumanActions,
     ClaimIsExclusive,
     ClaimNeedsReadyTask,
@@ -15,6 +16,9 @@ CONSTANTS
     RoundsAreCapped,
     EnvRerunsAreCapped,
     LostAttemptsAreCapped,
+    StageRetriesAreCapped,
+    PassResetsStageRetries,
+    RetryResetsStageRetries,
     BehaviorFailureReturnsToImplement,
     BehaviorFailureLeavesVerify,
     EnvironmentFailureStaysInVerify,
@@ -28,7 +32,7 @@ CONSTANTS
 
 ASSUME NoTask \notin Tasks
 
-ASSUME MaxRounds \in Nat \ {0} /\ MaxEnvReruns \in Nat /\ MaxLost \in Nat \ {0} /\ MaxHumanActions \in Nat
+ASSUME MaxRounds \in Nat \ {0} /\ MaxEnvReruns \in Nat /\ MaxLost \in Nat \ {0} /\ MaxStageRetries \in Nat /\ MaxHumanActions \in Nat
 
 VARIABLES task, attempt, worker, lateResults, humanActions, claimEpoch
 
@@ -71,6 +75,7 @@ TypeOK ==
                            rounds : 0..(MaxRounds + 1),
                            reruns : 0..(MaxEnvReruns + 1),
                            lost : 0..(MaxLost + 1),
+                           retries : 0..(MaxStageRetries + 1),
                            outputs : SUBSET Stages,
                            passed : BOOLEAN]]
     /\ attempt \in [Workers -> Tasks \cup {NoTask}]
@@ -80,7 +85,7 @@ TypeOK ==
     /\ claimEpoch \in [Workers -> 0..MaxHumanActions]
 
 Init ==
-    /\ task = [t \in Tasks |-> [stage |-> "specify", state |-> "ready", rounds |-> 0, reruns |-> 0, lost |-> 0, outputs |-> {}, passed |-> FALSE]]
+    /\ task = [t \in Tasks |-> [stage |-> "specify", state |-> "ready", rounds |-> 0, reruns |-> 0, lost |-> 0, retries |-> 0, outputs |-> {}, passed |-> FALSE]]
     /\ attempt = [w \in Workers |-> NoTask]
     /\ worker = [w \in Workers |-> "idle"]
     /\ lateResults = {}
@@ -89,13 +94,19 @@ Init ==
 
 Passed(current, s) ==
     IF s = "land"
-    THEN [current EXCEPT !.state = "done", !.outputs = @ \cup {s}]
+    THEN [current EXCEPT !.state = "done",
+                         !.outputs = @ \cup {s},
+                         !.retries = IF PassResetsStageRetries THEN 0 ELSE @]
     ELSE [current EXCEPT !.stage = After[s],
                          !.outputs = @ \cup {s},
                          !.rounds = IF s = "verify" THEN 0 ELSE @,
-                         !.reruns = 0]
+                         !.reruns = 0,
+                         !.retries = IF PassResetsStageRetries THEN 0 ELSE @]
 
-Failed(current) == [current EXCEPT !.state = IF FailureParksTask THEN "waiting" ELSE "stopped"]
+Failed(current) ==
+    IF StageRetriesAreCapped /\ current.retries >= MaxStageRetries
+    THEN [current EXCEPT !.state = IF FailureParksTask THEN "waiting" ELSE "stopped"]
+    ELSE [current EXCEPT !.retries = Min(@ + 1, MaxStageRetries + 1)]
 
 BehaviorFailed(current) ==
     IF RoundsAreCapped /\ current.rounds + 1 >= MaxRounds
@@ -188,6 +199,7 @@ Retry(t) ==
                             ![t].rounds = 0,
                             ![t].reruns = 0,
                             ![t].lost = 0,
+                            ![t].retries = IF RetryResetsStageRetries THEN 0 ELSE @,
                             ![t].passed = FALSE,
                             ![t].outputs = IF RetryKeepsOutputs THEN @ ELSE {}]
     /\ IF RetryEndsAttempt THEN EndAttemptsOn(t) ELSE UNCHANGED <<attempt, worker, lateResults, claimEpoch>>
@@ -229,6 +241,10 @@ EnvRerunsCapped == \A t \in Tasks : task[t].reruns <= MaxEnvReruns
 
 LostAttemptsCapped == \A t \in Tasks : task[t].lost <= MaxLost
 
+StageRetriesCapped == \A t \in Tasks : task[t].retries <= MaxStageRetries
+
+PassLeavesNoStageRetries == \A t \in Tasks : task[t].passed => task[t].retries = 0
+
 TaskChangesOnlyWithItsAttempt == [][\A t \in Tasks : task'[t] # task[t] => AttemptEndsOn(t) \/ PersonActsOn(t)]_vars
 
 AttemptEndsOnlyWithItsTask == [][\A t \in Tasks : AttemptEndsOn(t) => task'[t] # task[t] \/ PersonActsOn(t)]_vars
@@ -249,6 +265,8 @@ StageMovesOneStep ==
           \/ task[t].stage = "verify" /\ task'[t].stage = "implement"]_vars
 
 OnlyAPersonStops == [][\A t \in Tasks : task'[t].state = "stopped" /\ task[t].state # "stopped" => PersonActsOn(t)]_vars
+
+RetryLeavesNoStageRetries == [][\A t \in Tasks : PersonActsOn(t) /\ task'[t].state = "ready" => task'[t].retries = 0]_vars
 
 EveryTaskSettles == \A t \in Tasks : <>[](task[t].state \in Settled)
 
