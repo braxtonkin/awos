@@ -1,6 +1,6 @@
 # Rules for autoworker-oss
 
-These rules apply to every change in this repo, whether an agent or a person wrote it. [docs/spec.md](docs/spec.md) specifies the system these rules build. Every rule has an ID. Cite IDs in reviews and commit messages, for example `move parser into its feature folder (A4)`.
+These rules apply to every change in this repo, whether an agent or a person wrote it. [docs/spec.md](docs/spec.md) specifies the system these rules build. [docs/decisions.md](docs/decisions.md) records the settled design decisions and the options that lost. Do not reopen a settled decision without new evidence. Every rule has an ID. Cite IDs in reviews and commit messages, for example `move parser into its feature folder (A4)`.
 
 ## The rule behind the rules
 
