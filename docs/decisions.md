@@ -99,6 +99,22 @@ Rejected options:
 - **A dashboard form that opens a pull request.** Every author would need GitHub access, and it needs the same sync job.
 - **A dashboard form with an approval step.** It adds a review step that an internal service does not need.
 
+### Each attempt's Job has a time limit
+
+Decided 23 Sep 2026. Each attempt's Job gets a generous deadline, hours above a normal run. A Job past its deadline is killed, and the reaper marks its attempt lost, so the cap on lost attempts still applies. Without a deadline, an agent in a loop, or one waiting on a command that never returns, keeps its lease alive and holds a worker until a person notices. The TLA+ model's assumption that every attempt ends rests on this deadline. Its length comes from measured run times. The owner first leaned toward no limit and chose the deadline after reading the cases where an attempt never ends.
+
+Rejected option:
+
+- **No time limit.** A long run that is still making progress is never cut off, but a stuck run keeps its worker until someone stops it.
+
+### A stopped task can be resumed
+
+Decided 23 Sep 2026. A person can stop any task that is running or waiting. The stop ends the running attempt at once, its worker slot frees, and housekeeping deletes its Job. A stopped task runs nothing until a person presses Retry, which resumes it at the stage where it stopped and keeps the earlier stages' work. A stopped task keeps its ticket, so no other routine takes that ticket while it is stopped.
+
+Rejected option:
+
+- **A final stop.** A misclick could never be undone, and because a task keeps its ticket, no routine could ever work that ticket again.
+
 ### An attempt follows the goal as it is when the attempt starts
 
 Decided 23 Sep 2026. Each edit to a routine's goal saves a new version. When a worker claims an attempt, the engine reads the newest version and records its number on the attempt. An edit therefore reaches a task at its next attempt, whether that is a retry, its next stage, or a new task. A running attempt keeps the version it started with, and a person who wants a fix applied at once presses Retry.
@@ -232,7 +248,5 @@ Each open question names the current lean or default. A lean is not a decision.
 - **Whose credentials a run uses.** The spec names the ticket's assignee, and the owner described the person who launched the run. A scheduled run has no launcher, so a routine needs an owner either way. The lean is that a routine's runs use its owner's credentials, and a task starts owned by its routine's owner.
 - **When sign-in becomes necessary.** Runs now carry personal logins, so picking a person runs an agent with that person's GitHub token and ChatGPT account. The lean is to add sign-in before the first run with real personal credentials.
 - **How a person gives AutoWorker a Codex login.** The lean is a Connect button that has the engine run `codex login --device-auth` and show the person its link and code, so the login is made for AutoWorker by construction.
-- **How long an attempt may run.** The model assumes every attempt ends, either with a verdict or by going quiet and being reaped. The owner leans toward no limit. The recommendation is a generous deadline on each attempt's Job, because an agent in a loop, or one waiting on a command that never returns, keeps its lease alive. A Job past its deadline is killed, and the reaper marks its attempt lost.
-- **Whether a stop is final.** The TLA+ model in `features/tasks/` makes it final today. The lean is that a retry can resume a stopped task, so a misclick can be undone. If a stop is final and a stopped task keeps its ticket as a done task does, no routine could ever work that ticket again.
 - **What a new attempt starts from after a lost one.** Each attempt gets a fresh pod. The lean is that it continues from the task's branch and reads the lost attempt's transcript, and that the Job pushes the agent's work after each finished step, so at most one step is redone.
 - **How a worker that keeps stalling loses its task.** The TLA+ model in `features/tasks/` assumes that a lease that keeps lapsing is reaped at one of its lapses, which it states as strong fairness for the reaper. Nothing guarantees that yet, and the reaper's ticket, AUTO-10, picks the mechanism.
