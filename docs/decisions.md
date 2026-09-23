@@ -114,6 +114,15 @@ Decided 23 Sep 2026. The UI and the backend deploy separately, as they do in the
 
 Decided 23 Sep 2026. By default, Verify starts a pod that matches the product's real environment as closely as it can, reproduces the bug or exercises the feature there, and saves evidence such as a video. A repository can define its own way to verify, as it defines its own merge bar.
 
+### Stages hand off at artifacts, and a failed Verify returns to Implement
+
+Decided 23 Sep 2026. Each stage ends with something the next one starts from: Specify with a written plan, Implement with a draft pull request, Verify with saved evidence, and Land with a merged pull request. A failure costs one stage. What happens inside a stage comes from the routine's goal and the repository. When Verify finds the behavior still wrong, the task goes back to Implement with Verify's evidence, and Implement pushes a fix to the same pull request. When only Verify's environment fails, Verify runs again on its own. After 3 rounds without a pass, the task waits for a person, with exact instructions.
+
+Rejected options:
+
+- **Implement ends with a pushed branch.** Most repositories run CI on pull requests, so their checks would first run in Land, after Verify had passed.
+- **Retry Verify on every failure.** A retry cannot fix behavior that is still wrong.
+
 ### A request for help says exactly what to do
 
 Decided 23 Sep 2026. When AutoWorker needs a person, it says exactly what the person must do and what AutoWorker does once they have done it. This holds for parked tasks, the list of work that needs someone, and chat posts.
@@ -142,7 +151,6 @@ Each open question names the current lean or default. A lean is not a decision.
 
 - **What the dashboard's Overview shows first.** The lean is what needs the person picked, with the pipeline board and the history one click away.
 - **When AutoWorker posts to chat.** The default is to post when a task parks as waiting, when a routine is overdue, and once a day as a digest.
-- **Where the stage boundaries fall.** The lean is to cut where the work changes hands, with Implement ending in a draft pull request so the repository's CI runs during Verify. When Verify finds the behavior still wrong, the task goes back to Implement with the evidence. When only the environment fails, Verify runs again. After 3 rounds without a pass, the task waits for a person.
 - **Who starts Verify's environment pod.** The lean is the engine, so attempt Jobs keep no Kubernetes API access.
 - **How much of each agent run to keep.** The lean is to keep streamed text only until its step finishes. On the lab's own event log, streamed fragments were 76% of stored events and added no content once their step finished.
 - **How the engine reaches the app server.** The lean is a small bridge inside the Job that runs the app server over its standard input and output and connects out to the engine. It numbers every event and resends any the engine has not stored, so an engine restart loses nothing, and the Job listens on no port. The prototype instead had the engine connect to a WebSocket port in the Job, guarded by a token made for that attempt. That needs traffic into Job pods, and reading the Codex source found no replay of events a disconnected client missed.
