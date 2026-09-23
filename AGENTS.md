@@ -37,6 +37,7 @@ Never fix a repeated mistake only by rewording a prompt. Most rules below are en
 - **C2. One verification tool.** Verification lives in a checked-in tool that agents extend. Do not write throwaway scripts each session.
 - **C3. Keep the feature map current.** [docs/feature-map.md](docs/feature-map.md) lists every user-facing feature: what it does, how to reach it, and where its code lives. Update it in the same PR as the feature.
 - **C4. Correct is not the same as good.** Verification proves a change works. Quality comes from sections A and B.
+- **C5. Model concurrent protocols before building them.** Code that coordinates concurrent actors, such as claims and leases, the stage machine, the outbox, or event delivery, gets a TLA+ model before the code is written. The model runs in CI whenever it or the code it covers changes, and the verification skill says how to run it.
 
 ## D. Adding a feature
 
@@ -62,6 +63,7 @@ Each tool below is the only approved tool for its job (A3). To replace one, or t
 - **Outside data.** zod parses every payload, file, and environment variable where it enters.
 - **Secrets.** The app encrypts secrets with AES-256-GCM from `node:crypto` before they reach Postgres. The key comes from a Kubernetes Secret and never reaches the database.
 - **Tests.** Vitest against a real Postgres that Testcontainers starts. No database mocks.
+- **Formal models.** TLA+, checked with TLC. A model lives in the feature folder of the code it covers (A4).
 - **Dashboard.** Next.js App Router. Server components read Postgres, and server actions write to it.
 - **Connectors.** Octokit for GitHub. `fetch` and zod for Jira and Webex.
 - **Agent runtime.** The Codex app server (`codex app-server`), pinned to one exact Codex CLI version and run inside each attempt's Job. Use only the protocol's stable methods.
@@ -80,6 +82,7 @@ None yet. The first feature, command, or module of each kind defines its paved p
 | B1 | this file | a custom ESLint rule that rejects comments |
 | B2 | this file | ESLint `linterOptions.noInlineConfig` and `@typescript-eslint/ban-ts-comment` |
 | C3 | this file | CI check that changes under `features/` also change the feature map |
+| C5 | this file | CI job that runs TLC on a model whenever it or its feature folder changes |
 | All others | this file | promote when a check becomes possible |
 
 When a rule gains a check, update its row in the same PR.

@@ -145,6 +145,15 @@ Rejected options:
 - **Plum.** It is the most a matter of taste.
 - **The original green.** The owner found it unpleasant.
 
+### Concurrent protocols are model-checked with TLA+
+
+Decided 23 Sep 2026. Claims and leases, the stage machine with its Verify loop, the outbox, the bridge's event delivery, and the routine schedule each get a TLA+ model, checked with TLC. A model is written before the code it covers, so it checks the design while the design is still cheap to change. It runs in CI whenever the model or that code changes. The repository's verification skill, generated with `/create-verification-skill` once the engine runs, includes the models and the command that checks them.
+
+Rejected options:
+
+- **Lean.** It proves a property for every input, but each proof costs far more effort, and this design's risks are races between processes, which TLA+ checks directly.
+- **No formal methods.** The prototypes checked one run of each race. A model checks every ordering of steps within its bounds.
+
 ## Open
 
 Each open question names the current lean or default. A lean is not a decision.
@@ -152,6 +161,7 @@ Each open question names the current lean or default. A lean is not a decision.
 - **What the dashboard's Overview shows first.** The lean is what needs the person picked, with the pipeline board and the history one click away.
 - **When AutoWorker posts to chat.** The default is to post when a task parks as waiting, when a routine is overdue, and once a day as a digest.
 - **Who starts Verify's environment pod.** The lean is the engine, so attempt Jobs keep no Kubernetes API access.
+- **Whether outbox rows need a claim.** The data model draft has no claim on outbox rows, and Jira comments and chat posts are not idempotent on the other side. The outbox's TLA+ model settles this before the outbox is built.
 - **How much of each agent run to keep.** The lean is to keep streamed text only until its step finishes. On the lab's own event log, streamed fragments were 76% of stored events and added no content once their step finished.
 - **How the engine reaches the app server.** The lean is a small bridge inside the Job that runs the app server over its standard input and output and connects out to the engine. It numbers every event and resends any the engine has not stored, so an engine restart loses nothing, and the Job listens on no port. The prototype instead had the engine connect to a WebSocket port in the Job, guarded by a token made for that attempt. That needs traffic into Job pods, and reading the Codex source found no replay of events a disconnected client missed.
 - **Codex sign-in.** Parked for now. The app server ignores the `CODEX_API_KEY` variable that `codex exec` reads, so it signs in from `auth.json` or through a sign-in call in its protocol.
