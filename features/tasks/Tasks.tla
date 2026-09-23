@@ -16,6 +16,7 @@ CONSTANTS
     EnvRerunsAreCapped,
     LostAttemptsAreCapped,
     BehaviorFailureReturnsToImplement,
+    BehaviorFailureLeavesVerify,
     EnvironmentFailureStaysInVerify,
     FailureParksTask,
     RetryKeepsOutputs,
@@ -99,7 +100,9 @@ Failed(current) == [current EXCEPT !.state = IF FailureParksTask THEN "waiting" 
 BehaviorFailed(current) ==
     IF RoundsAreCapped /\ current.rounds + 1 >= MaxRounds
     THEN [current EXCEPT !.state = "waiting", !.rounds = @ + 1]
-    ELSE [current EXCEPT !.stage = IF BehaviorFailureReturnsToImplement THEN "implement" ELSE "specify",
+    ELSE [current EXCEPT !.stage = CASE ~BehaviorFailureLeavesVerify -> "verify"
+                                     [] BehaviorFailureReturnsToImplement -> "implement"
+                                     [] OTHER -> "specify",
                          !.rounds = Min(@ + 1, MaxRounds + 1),
                          !.reruns = 0]
 

@@ -136,7 +136,7 @@ const mutants: readonly Mutant[] = [
   action('EnvironmentFailureStaysInVerify', 'an environment failure counts as a pass', 'StageAdvancesOnlyOnPass'),
   action('StopSparesDoneTasks', 'a person can stop a done task', 'DoneIsFinal'),
   action('BehaviorFailureReturnsToImplement', 'a behavior failure returns to specify', 'StageMovesOneStep'),
-  action('BehaviorFailureReturnsToImplement', 'a behavior failure returns to specify', 'FailedRoundReturnsToImplement'),
+  action('BehaviorFailureLeavesVerify', 'a behavior failure reruns Verify', 'FailedRoundReturnsToImplement'),
   action('EndingSparesOtherTasks', 'a stop or retry ends every live attempt', 'AttemptEndsOnlyWithItsTask', { shape: personEndsALiveAttempt }),
   action('FailureParksTask', 'a failed stage stops the task', 'OnlyAPersonStops'),
   unsettled('RoundsAreCapped', 'verify rounds have no cap', loopsBetweenImplementAndVerify),
@@ -161,36 +161,68 @@ const floors: Readonly<Record<string, Readonly<Record<Bound, number>>>> = {
   'Tasks.nightly.cfg': { Tasks: 2, Workers: 2, MaxRounds: 3, MaxEnvReruns: 3, MaxLost: 3, MaxHumanActions: 3 },
 };
 
-const listedProperties = (config: string): ReadonlySet<string> =>
-  new Set((config.split('\nINVARIANTS')[1] ?? '').split('\n').filter(line => /^ {4}\w+$/.test(line)).map(line => line.trim()));
+type Section = 'CONSTANTS' | 'INVARIANTS' | 'PROPERTIES';
 
-const guardsIn = (config: string): readonly string[] => [...config.matchAll(/^ {4}(\w+) = TRUE$/gm)].map(([, guard = '']) => guard);
+type ConfigShape = {
+  readonly constants: ReadonlyMap<string, string>;
+  readonly listed: Readonly<Record<Mutant['kind'], ReadonlySet<string>>>;
+  readonly problems: readonly string[];
+};
 
-function boundIn(config: string, bound: Bound): number | undefined {
-  const value = new RegExp(`^ {4}${bound} = (.+)$`, 'm').exec(config)?.[1];
+const sections: readonly Section[] = ['CONSTANTS', 'INVARIANTS', 'PROPERTIES'];
+
+const isSection = (line: string): line is Section => sections.some(section => section === line);
+
+function parseConfig(config: string): ConfigShape {
+  const constants = new Map<string, string>();
+  const invariants = new Set<string>();
+  const properties = new Set<string>();
+  const problems: string[] = [];
+  let section: Section | undefined;
+  for (const line of config.split('\n')) {
+    const assignment = /^ {4}(\w+) = (\S.*)$/.exec(line);
+    const listed = /^ {4}(\w+)$/.exec(line)?.[1];
+    if (line === '' || line === 'SPECIFICATION Spec') continue;
+    if (isSection(line)) section = line;
+    else if (section === 'CONSTANTS' && assignment !== null) {
+      const [, name = '', value = ''] = assignment;
+      if (constants.has(name)) problems.push(`${name} is assigned twice`);
+      constants.set(name, value.trim());
+    } else if (section === 'INVARIANTS' && listed !== undefined) invariants.add(listed);
+    else if (section === 'PROPERTIES' && listed !== undefined) properties.add(listed);
+    else problems.push(`unexpected line "${line}"`);
+  }
+  return { constants, listed: { INVARIANT: invariants, PROPERTY: properties }, problems };
+}
+
+function boundOf(constants: ReadonlyMap<string, string>, bound: Bound): number | undefined {
+  const value = constants.get(bound);
   if (value === undefined) return undefined;
-  return value.startsWith('{') ? value.replace(/[{}\s]/g, '').split(',').filter(item => item !== '').length : Number(value);
+  return value.startsWith('{') ? new Set(value.replace(/[{}\s]/g, '').split(',').filter(item => item !== '')).size : Number(value);
 }
 
 function checkConfig(file: string): Check {
-  const config = readConfig(file);
+  const { constants, listed, problems } = parseConfig(readConfig(file));
   const floor = floors[file];
-  const listed = listedProperties(config);
+  const everyListed = [...listed.INVARIANT, ...listed.PROPERTY];
   const broken = new Set(mutants.map(mutant => mutant.property));
   const mutated = new Set(mutants.map(mutant => mutant.guard));
-  const problems = [
-    ...[...broken].filter(property => !listed.has(property)).map(property => `${property} is not checked`),
-    ...[...listed].filter(property => property !== typeInvariant && !broken.has(property)).map(property => `${property} has no mutant`),
-    ...guardsIn(config).filter(guard => !mutated.has(guard)).map(guard => `guard ${guard} has no mutant`),
+  const guards = [...constants].filter(([, value]) => value === 'TRUE').map(([name]) => name);
+  const findings = [
+    ...problems,
+    ...(listed.INVARIANT.has(typeInvariant) ? [] : [`${typeInvariant} is not listed under INVARIANTS`]),
+    ...mutants.filter(mutant => !listed[mutant.kind].has(mutant.property)).map(mutant => `${mutant.property} is not listed under ${mutant.kind === 'INVARIANT' ? 'INVARIANTS' : 'PROPERTIES'}`),
+    ...everyListed.filter(property => property !== typeInvariant && !broken.has(property)).map(property => `${property} has no mutant`),
+    ...guards.filter(guard => !mutated.has(guard)).map(guard => `guard ${guard} has no mutant`),
     ...(floor === undefined
       ? [`${file} has no floors`]
       : bounds.flatMap(bound => {
-          const value = boundIn(config, bound);
+          const value = boundOf(constants, bound);
           return value !== undefined && value >= floor[bound] ? [] : [`${bound} is ${String(value)}, below its floor of ${String(floor[bound])}`];
         })),
   ];
-  const name = `${file} checks every property and guard with a mutant, at bounds no lower than its floors`;
-  return problems.length === 0 ? pass(name, `${String(broken.size)} properties, ${String(mutated.size)} guards`) : fail(name, problems.join('; '));
+  const name = `${file} lists each property in its section with a mutant, every guard with a mutant, and bounds no lower than its floors`;
+  return findings.length === 0 ? pass(name, `${String(broken.size)} properties, ${String(guards.length)} guards`) : fail(name, [...new Set(findings)].join('; '));
 }
 
 function mutantConfig(config: string, mutant: Mutant): string {
