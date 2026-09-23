@@ -20,7 +20,8 @@
     "verbatimModuleSyntax": true,
     "allowImportingTsExtensions": true,
     "noEmit": true,
-    "forceConsistentCasingInFileNames": true
+    "forceConsistentCasingInFileNames": true,
+    "jsx": "preserve"
   },
-  "include": ["eslint.config.ts", "tools/**/*.ts", "features/**/*.ts", "services/**/*.ts", "shared/**/*.ts"]
+  "include": ["eslint.config.ts", "tools/**/*.ts", "features/**/*.ts", "features/**/*.tsx", "services/**/*.ts", "shared/**/*.ts"]
 }

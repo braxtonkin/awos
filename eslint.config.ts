@@ -3,6 +3,7 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { defineConfig } from 'eslint/config';
 import tseslint from 'typescript-eslint';
+import { noComments } from './tools/eslint/no-comments.ts';
 
 if (existsSync(join(import.meta.dirname, 'eslint-suppressions.json'))) {
   throw new Error('eslint-suppressions.json silences lint errors, which AGENTS.md rule B2 forbids. Delete it and fix the errors, or change the rule in its own PR.');
@@ -16,6 +17,7 @@ export default defineConfig(
   {
     files: ['**/*.{ts,tsx,mts,cts,js,jsx,mjs,cjs}'],
     extends: [js.configs.recommended, tseslint.configs.strictTypeChecked],
+    plugins: { autoworker: { rules: { 'no-comments': noComments } } },
     languageOptions: {
       parserOptions: {
         project: './tsconfig.json',
@@ -34,6 +36,7 @@ export default defineConfig(
         { selector: 'ImportExpression > TemplateLiteral.source', message: 'Write an import path as a plain string, so the import rules can read it.' },
         { selector: `${importSource}[source.value=/\\.claude/]`, message: 'Product code never imports from .claude/, which holds agent tooling that lint does not check.' },
       ],
+      'autoworker/no-comments': 'error',
     },
   },
 );

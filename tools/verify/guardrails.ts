@@ -18,11 +18,27 @@ type Violation = {
   readonly companions?: readonly Companion[];
 };
 
+type Allowance = {
+  readonly name: string;
+  readonly file: string;
+  readonly source: string;
+  readonly tool: Tool;
+  readonly companions?: readonly Companion[];
+  readonly env?: Readonly<Record<string, string>>;
+};
+
 type Outcome = { readonly status: number | null; readonly stdout: string; readonly output: string };
 
 type LintMessage = { readonly file: string; readonly ruleId: string | null; readonly severity: number; readonly message: string };
 
 const floatingPromise = 'export function load(): Promise<number> {\n  return Promise.resolve(1);\n}\nload();\n';
+
+const noComments = 'autoworker/no-comments';
+
+const jsxTypes: Companion = {
+  file: 'features/planted/jsx.d.ts',
+  source: 'declare global {\n  namespace JSX {\n    type Element = string;\n    interface IntrinsicElements {\n      div: { readonly children?: unknown };\n    }\n  }\n}\n\nexport {};\n',
+};
 
 const violations: readonly Violation[] = [
   {
@@ -224,6 +240,120 @@ const violations: readonly Violation[] = [
     tool: 'eslint',
     expect: ['was not found in any of the provided project(s)'],
   },
+  {
+    name: 'eslint rejects a line comment',
+    file: 'features/planted/line.ts',
+    source: '// explain\nexport const count = 1;\n',
+    tool: 'eslint',
+    expect: [noComments],
+  },
+  {
+    name: 'eslint rejects a block comment',
+    file: 'features/planted/block.ts',
+    source: '/* note */\nexport const count = 1;\n',
+    tool: 'eslint',
+    expect: [noComments],
+  },
+  {
+    name: 'eslint rejects a doc comment',
+    file: 'features/planted/doc.ts',
+    source: '/** docs */\nexport function count(): number {\n  return 1;\n}\n',
+    tool: 'eslint',
+    expect: [noComments],
+  },
+  {
+    name: 'eslint rejects a JSX comment',
+    file: 'features/planted/note.tsx',
+    source: 'export const note = <div>{/* note */}</div>;\n',
+    tool: 'eslint',
+    expect: [noComments],
+    companions: [jsxTypes],
+  },
+  {
+    name: 'eslint rejects a comment below a shebang',
+    file: 'features/planted/cli-note.ts',
+    source: '#!/usr/bin/env node\n// explain\nexport const count = 1;\n',
+    tool: 'eslint',
+    expect: [noComments],
+  },
+  {
+    name: 'eslint rejects prose after a reference directive',
+    file: 'features/planted/prose.d.ts',
+    source: '/// <reference types="node" /> kept because it is needed\nexport declare const count: number;\n',
+    tool: 'eslint',
+    expect: [noComments],
+  },
+  {
+    name: 'eslint rejects a comment line below a reference directive',
+    file: 'features/planted/explained.d.ts',
+    source: '/// <reference types="node" />\n/// explain\nexport declare const count: number;\n',
+    tool: 'eslint',
+    expect: [noComments],
+  },
+  {
+    name: 'eslint rejects a reference directive after code',
+    file: 'features/planted/late.d.ts',
+    source: 'export declare const count: number;\n/// <reference types="node" />\n',
+    tool: 'eslint',
+    expect: [noComments],
+  },
+  {
+    name: 'eslint rejects a block comment shaped like a reference directive',
+    file: 'features/planted/block-reference.d.ts',
+    source: '/*/ <reference types="node\nkeep this line, the dashboard needs Buffer\n" />*/\nexport declare const count: number;\n',
+    tool: 'eslint',
+    expect: [noComments],
+  },
+  {
+    name: 'a lint warning alone fails the check',
+    file: '.claude/warned.ts',
+    source: 'export const count = 1;\n',
+    tool: 'eslint',
+    expect: ['File ignored because of a matching ignore pattern'],
+  },
+  {
+    name: 'eslint rejects a reference directive outside a .d.ts file',
+    file: 'features/planted/reference.ts',
+    source: '/// <reference types="node" />\nexport const count = 1;\n',
+    tool: 'eslint',
+    expect: [noComments],
+  },
+  {
+    name: 'eslint rejects an eslint-disable comment as a comment',
+    file: 'features/planted/directive.ts',
+    source: '// eslint-disable-next-line no-console\nexport const count = 1;\n',
+    tool: 'eslint',
+    expect: [noComments],
+  },
+];
+
+const allowances: readonly Allowance[] = [
+  {
+    name: 'eslint accepts a shebang on line 1, as an editor parses it',
+    file: 'features/planted/cli.ts',
+    source: '#!/usr/bin/env node\nexport const count = 1;\n',
+    tool: 'eslint',
+    env: { TSESTREE_SINGLE_RUN: 'false' },
+  },
+  {
+    name: 'eslint accepts a reference directive in a .d.ts file',
+    file: 'features/planted/environment.d.ts',
+    source: '/// <reference types="node" />\n',
+    tool: 'eslint',
+  },
+  {
+    name: 'eslint accepts comment markers inside a string',
+    file: 'features/planted/text.ts',
+    source: "export const text = '// not a comment, see https://example.com';\n",
+    tool: 'eslint',
+  },
+  {
+    name: 'tsc accepts JSX in a .tsx file, so the JSX comment case lints a file the check compiles',
+    file: 'features/planted/view.tsx',
+    source: "export const view = <div>{'text'}</div>;\n",
+    tool: 'tsc',
+    companions: [jsxTypes],
+  },
 ];
 
 const isRecord = (value: unknown): value is Readonly<Record<string, unknown>> => typeof value === 'object' && value !== null;
@@ -302,28 +432,38 @@ const tools: Record<
 const root = fileURLToPath(new URL('../../', import.meta.url));
 const skipped = new Set(['node_modules', '.git', '.claude']);
 
-function run(tool: Tool, copy: string, file: string): Outcome {
+function run(tool: Tool, copy: string, file: string, env: Readonly<Record<string, string>> = {}): Outcome {
   const [executable, ...args] = tools[tool].command(copy, file);
-  const result = spawnSync(executable, args, { cwd: copy, encoding: 'utf8' });
+  const result = spawnSync(executable, args, { cwd: copy, encoding: 'utf8', env: { ...process.env, ...env } });
   return { status: result.status, stdout: result.stdout, output: `${result.stdout}${result.stderr}` };
 }
 
-async function plant(copy: string, violation: Violation): Promise<Check> {
-  const planted = [violation, ...(violation.companions ?? [])];
+async function withPlanted(copy: string, planted: readonly Companion[], judge: () => Check): Promise<Check> {
   for (const { file, source } of planted) {
     await mkdir(dirname(join(copy, file)), { recursive: true });
     await writeFile(join(copy, file), source);
   }
   try {
+    return judge();
+  } finally {
+    for (const { file } of planted) await rm(join(copy, file), { force: true });
+  }
+}
+
+const reject = (copy: string, violation: Violation): Promise<Check> =>
+  withPlanted(copy, [violation, ...(violation.companions ?? [])], () => {
     const outcome = run(violation.tool, copy, violation.file);
     const code = violation.expect.find(candidate => tools[violation.tool].caught(outcome, violation.file, candidate));
     return outcome.status !== 0 && code !== undefined
       ? pass(violation.name, code)
       : fail(violation.name, `expected ${violation.expect.join(' or ')}, exit ${String(outcome.status)}`);
-  } finally {
-    for (const { file } of planted) await rm(join(copy, file), { force: true });
-  }
-}
+  });
+
+const accept = (copy: string, allowance: Allowance): Promise<Check> =>
+  withPlanted(copy, [allowance, ...(allowance.companions ?? [])], () => {
+    const outcome = run(allowance.tool, copy, allowance.file, allowance.env);
+    return outcome.status === 0 ? pass(allowance.name, 'accepted') : fail(allowance.name, (tools[allowance.tool].summary ?? firstLines)(outcome));
+  });
 
 async function withCopy(work: (copy: string) => Promise<readonly Check[]>): Promise<readonly Check[]> {
   const copy = await mkdtemp(join(tmpdir(), 'guardrails-'));
@@ -338,7 +478,7 @@ async function withCopy(work: (copy: string) => Promise<readonly Check[]>): Prom
 
 export const guardrails: Scenario = {
   name: 'guardrails',
-  summary: 'plants each violation a check must reject, and proves the check rejects it',
+  summary: 'plants each violation a check must reject and each line it must accept, and proves both',
   run: () =>
     withCopy(async copy => {
       const checks: Check[] = (['tsc', 'eslint'] as const).map(tool => {
@@ -347,7 +487,8 @@ export const guardrails: Scenario = {
         const problem = clean.status === 0 ? tools[tool].unclean?.(clean) : (tools[tool].summary ?? firstLines)(clean);
         return problem === undefined ? pass(name, '') : fail(name, problem);
       });
-      for (const violation of violations) checks.push(await plant(copy, violation));
+      for (const violation of violations) checks.push(await reject(copy, violation));
+      for (const allowance of allowances) checks.push(await accept(copy, allowance));
       return checks;
     }),
 };

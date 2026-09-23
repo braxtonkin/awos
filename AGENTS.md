@@ -78,7 +78,7 @@ The first feature, command, or module of each kind defines its paved path. Recor
 - **Layout.** Feature code lives in `features/<name>/`. Entry points live in `services/engine/`, `services/dashboard/`, and `services/job/`, and hold no logic. Code moves to `shared/` only when a second feature needs it. Migrations live in `db/migrations/`, and tools live in `tools/`.
 - **TypeScript.** Node 24 runs `.ts` files directly, so there is no build step. Import with the `.ts` extension, use `import type` for types, and write only syntax Node can erase, so no `enum` and no `namespace`. `npm run check` runs `npm run typecheck`, then `npm run lint`, which lints against the root ESLint config and the root tsconfig, so a nested config of either kind changes nothing.
 - **Verification.** `npm run verify -- <scenario>` runs one scenario, prints `PASS` or `FAIL` per check, and exits non-zero on any failure. A feature's scenarios live in `features/<name>/verify.ts`, which exports `scenarios`. Run everything inside the verify container, which CI uses too. Install with `docker compose run --rm verify npm ci`, again after any change to the lockfile, then run `docker compose run --rm verify npm run verify -- <scenario>`.
-- **Guardrails.** Every check that enforces a rule gets a case in `tools/verify/guardrails.ts`. The case plants a violation in a copy of the repository and passes only when the check rejects it. Each check is an npm script that `npm run check` chains, and a case runs that same script, so it proves the check CI runs. One case per chained script runs `npm run check` itself, so a script dropped from the chain fails too.
+- **Guardrails.** Every check that enforces a rule gets a case in `tools/verify/guardrails.ts`. The case plants a violation in a copy of the repository and passes only when the check rejects it. An exception the check allows gets an allowance case that plants the allowed line and passes only when the check accepts it, beside cases that prove the exception allows nothing more. Each check is an npm script that `npm run check` chains, and a case runs that same script, so it proves the check CI runs. One case per chained script runs `npm run check` itself, so a script dropped from the chain fails too.
 
 ## Enforcement
 
@@ -86,7 +86,7 @@ The first feature, command, or module of each kind defines its paved path. Recor
 | --- | --- | --- |
 | A5 | this file | `dependency-cruiser` in CI |
 | A7 | the `tsconfig` flags in [Stack](#stack) and typescript-eslint `strict-type-checked`, run by `npm run check` and proved by `guardrails` in CI | met |
-| B1 | this file | a custom ESLint rule that rejects comments |
+| B1 | `autoworker/no-comments` in `tools/eslint/no-comments.ts`, run by `npm run lint` and proved by `guardrails` in CI | met for TypeScript; SQL gets its check with the first migration |
 | B2 | ESLint `linterOptions.noInlineConfig` with `--max-warnings 0`, `@typescript-eslint/ban-ts-comment`, `no-warning-comments` for `@ts-` in any case, and a config that refuses a suppressions file, run by `npm run lint` and proved by `guardrails` in CI | met |
 | C3 | this file | CI check that changes under `features/` also change the feature map |
 | C5 | this file | CI job that runs TLC on a model whenever it or its feature folder changes |
