@@ -171,7 +171,7 @@ Rejected options:
 
 ### Every task works in one repository
 
-Decided 23 Sep 2026. A routine names the repository its work happens in, and each task copies that repository when the routine finds it. Every attempt then knows what to clone before its agent starts, and a task's repository never changes while it runs. The schema holds this as a rule and refuses a task with no repository. For now the only repository is AutoWorker's own. Repositories are rows of their own, since several routines will share one, and facts about a repository, such as its default branch, belong in one place.
+Decided 23 Sep 2026. A routine names the repository its work happens in, and each task copies that repository when the routine finds it. Every attempt then knows what to clone before its agent starts, and a task's repository never changes while it runs. The schema holds this as a rule and refuses a task with no repository. For now the only repository is AutoWorker's own. Repositories are rows of their own, since several routines will share one, and facts about a repository belong in one place. A row names the repository and the branch changes land on.
 
 Rejected options:
 
@@ -190,12 +190,14 @@ Rejected options:
 
 ### An end-to-end test proves ticket to merge on sandboxes
 
-Decided 23 Sep 2026. Before AutoWorker works on itself, a test proves the whole path on sandboxes. It files a ticket in a sandbox Jira space, and AutoWorker takes the ticket to a merged pull request in a private sandbox repository, running the real agent with the owner's Codex login. The test checks each step against Jira, GitHub, and AutoWorker's own record rather than trusting AutoWorker's report, and posts a timeline with links and evidence to the ticket. Its harness is built first and reports how far a ticket gets, so each later PR shows its progress toward the whole path. Webex joins once the call on chat posts is made.
+Decided 23 Sep 2026. Before AutoWorker works on itself, a test proves the whole path on sandboxes. It files a ticket in a sandbox Jira space, and AutoWorker takes the ticket to a merged pull request on a sandbox branch of its own repository, running the real agent with the owner's Codex login. The sandbox project lives in a folder of AutoWorker's repository, and each run gets a fresh branch made from that folder alone, so main never changes and every run starts from the same code. AutoWorker will run where a private repository is out of reach, and it needs write access to its own repository for self-delivery anyway, so the test needs no other repository. The test checks each step against Jira, GitHub, and AutoWorker's own record rather than trusting AutoWorker's report, and posts a timeline with links and evidence to the ticket. Its harness is built first and reports how far a ticket gets, so each later PR shows its progress toward the whole path. Webex joins once the call on chat posts is made.
 
 Rejected options:
 
 - **Fakes of Jira and GitHub.** They run free in CI and may come later for that, but a demonstration needs the real services' behavior, such as Jira's workflow and GitHub's checks.
 - **Wait for AutoWorker to deliver its own changes.** That stays the final bar. A sandbox lets a failed run cost nothing, and the test can run as often as needed.
+- **A separate private sandbox repository.** Where AutoWorker runs later may not reach a private repository under the owner's account.
+- **Merge sandbox changes into main.** Every run would add commits to main and run main's CI, and runs would stop starting from the same code.
 
 ## Open
 
