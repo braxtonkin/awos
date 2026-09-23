@@ -179,11 +179,12 @@ function parseConfig(config: string): ConfigShape {
   const properties = new Set<string>();
   const problems: string[] = [];
   let section: Section | undefined;
-  for (const line of config.split('\n')) {
+  for (const line of config.split('\n').map(raw => raw.trimEnd())) {
     const assignment = /^ {4}(\w+) = (\S.*)$/.exec(line);
     const listed = /^ {4}(\w+)$/.exec(line)?.[1];
     if (line === '' || line === 'SPECIFICATION Spec') continue;
-    if (isSection(line)) section = line;
+    if (/\\\*|\(\*/.test(line)) problems.push(`comment in "${line}"`);
+    else if (isSection(line)) section = line;
     else if (section === 'CONSTANTS' && assignment !== null) {
       const [, name = '', value = ''] = assignment;
       if (constants.has(name)) problems.push(`${name} is assigned twice`);
@@ -201,8 +202,10 @@ function boundOf(constants: ReadonlyMap<string, string>, bound: Bound): number |
   return value.startsWith('{') ? new Set(value.replace(/[{}\s]/g, '').split(',').filter(item => item !== '')).size : Number(value);
 }
 
-function checkConfig(file: string): Check {
-  const { constants, listed, problems } = parseConfig(readConfig(file));
+type ConfigReview = { readonly findings: readonly string[]; readonly summary: string };
+
+function reviewConfig(file: string, config: string): ConfigReview {
+  const { constants, listed, problems } = parseConfig(config);
   const floor = floors[file];
   const everyListed = [...listed.INVARIANT, ...listed.PROPERTY];
   const broken = new Set(mutants.map(mutant => mutant.property));
@@ -221,8 +224,39 @@ function checkConfig(file: string): Check {
           return value !== undefined && value >= floor[bound] ? [] : [`${bound} is ${String(value)}, below its floor of ${String(floor[bound])}`];
         })),
   ];
+  return { findings: [...new Set(findings)], summary: `${String(broken.size)} properties, ${String(guards.length)} guards` };
+}
+
+function checkConfig(file: string): Check {
+  const { findings, summary } = reviewConfig(file, readConfig(file));
   const name = `${file} lists each property in its section with a mutant, every guard with a mutant, and bounds no lower than its floors`;
-  return findings.length === 0 ? pass(name, `${String(broken.size)} properties, ${String(guards.length)} guards`) : fail(name, [...new Set(findings)].join('; '));
+  return findings.length === 0 ? pass(name, summary) : fail(name, findings.join('; '));
+}
+
+type Plant = { readonly change: string; readonly harmful: boolean; readonly edit: (config: string) => string };
+
+const plants: readonly Plant[] = [
+  { change: 'a comment hides a smaller Tasks', harmful: true, edit: config => config.replace('    Tasks = {t1, t2}', '    Tasks = {t1} \\* {t1, t2}') },
+  { change: 'a comment follows a guard', harmful: true, edit: config => config.replace('    ReaperIsFair = TRUE', '    ReaperIsFair = TRUE \\* fair') },
+  { change: 'an invariant moves under PROPERTIES', harmful: true, edit: config => config.replace('    RoundsCapped\n', '').replace('PROPERTIES\n', 'PROPERTIES\n    RoundsCapped\n') },
+  { change: 'Tasks is assigned twice', harmful: true, edit: config => config.replace('    Workers =', '    Tasks = {t1}\n    Workers =') },
+  { change: 'Tasks repeats a member', harmful: true, edit: config => config.replace('{t1, t2}', '{t1, t1}') },
+  { change: 'TypeOK is dropped', harmful: true, edit: config => config.replace('    TypeOK\n', '') },
+  { change: 'a line ends in a tab', harmful: false, edit: config => config.replace('    TypeOK\n', '    TypeOK\t\n') },
+  { change: 'a blank line holds spaces', harmful: false, edit: config => config.replace('\nINVARIANTS', '\n    \nINVARIANTS') },
+  { change: 'lines end in CRLF', harmful: false, edit: config => config.replace(/\n/g, '\r\n') },
+];
+
+function checkPlants(file: string): Check {
+  const config = readConfig(file);
+  const misses = plants.flatMap(plant => {
+    const planted = plant.edit(config);
+    if (planted === config) return [`${plant.change} no longer changes ${file}`];
+    const rejected = reviewConfig(file, planted).findings.length > 0;
+    return rejected === plant.harmful ? [] : [`${plant.change} is ${rejected ? 'rejected' : 'accepted'}`];
+  });
+  const name = `the review of ${file} rejects each harmful plant and accepts each harmless one`;
+  return misses.length === 0 ? pass(name, `${String(plants.length)} plants`) : fail(name, misses.join('; '));
 }
 
 function mutantConfig(config: string, mutant: Mutant): string {
@@ -261,9 +295,9 @@ export const scenarios: readonly Scenario[] = [
     name: 'tasks-model',
     summary: 'model-checks task claims, leases, and stages in TLC, and proves each property fails without its guard',
     run: args => {
-      if (args.includes('nightly')) return Promise.resolve([checkConfig('Tasks.nightly.cfg'), checkHolds('Tasks.nightly.cfg')]);
+      if (args.includes('nightly')) return Promise.resolve([checkConfig('Tasks.nightly.cfg'), checkPlants('Tasks.nightly.cfg'), checkHolds('Tasks.nightly.cfg')]);
       const config = readConfig('Tasks.cfg');
-      return Promise.resolve([checkConfig('Tasks.cfg'), checkHolds('Tasks.cfg'), ...mutants.map(mutant => checkMutant(config, mutant))]);
+      return Promise.resolve([checkConfig('Tasks.cfg'), checkPlants('Tasks.cfg'), checkHolds('Tasks.cfg'), ...mutants.map(mutant => checkMutant(config, mutant))]);
     },
   },
 ];
