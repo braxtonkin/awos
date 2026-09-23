@@ -6,7 +6,7 @@ This file holds the settled design decisions for AutoWorker and the questions st
 
 ### Workers claim a task by inserting an attempt row
 
-Decided 23 Sep 2026. Every try at a stage is a row in the `attempt` table. A partial unique index on `task_id`, limited to rows where `finished_at` is null, allows one unfinished attempt per task. Postgres refuses a second claim, so no code has to check first. A reaper marks attempts whose lease has expired as `lost`. That frees the task and keeps a record the dashboard can show. A late write from a lost attempt matches no rows.
+Decided 23 Sep 2026. Every try at a stage is a row in the `attempt` table. A partial unique index on `task_id`, limited to rows where `finished_at` is null, allows one unfinished attempt per task. Postgres refuses a second claim, so no code has to check first. A reaper marks attempts whose lease has expired as `lost`. That frees the task and keeps a record the dashboard can show. A late write from a lost attempt matches no rows. A lost or stopped attempt stops counting against the engine's capacity at once, and housekeeping deletes its Job. A lease that keeps lapsing is reaped at one of its lapses, which the TLA+ model in `features/tasks/` states as strong fairness for the reaper.
 
 The evidence comes from a throwaway prototype on Postgres 18 with a 2 s lease:
 
@@ -116,7 +116,7 @@ Decided 23 Sep 2026. By default, Verify starts a pod that matches the product's 
 
 ### Stages hand off at artifacts, and a failed Verify returns to Implement
 
-Decided 23 Sep 2026. Each stage ends with something the next one starts from: Specify with a written plan, Implement with a draft pull request, Verify with saved evidence, and Land with a merged pull request. A failure costs one stage. What happens inside a stage comes from the routine's goal and the repository. When Verify finds the behavior still wrong, the task goes back to Implement with Verify's evidence, and Implement pushes a fix to the same pull request. When only Verify's environment fails, Verify runs again on its own. After 3 rounds without a pass, the task waits for a person, with exact instructions.
+Decided 23 Sep 2026. Each stage ends with something the next one starts from: Specify with a written plan, Implement with a draft pull request, Verify with saved evidence, and Land with a merged pull request. A failure costs one stage. What happens inside a stage comes from the routine's goal and the repository. When Verify finds the behavior still wrong, the task goes back to Implement with Verify's evidence, and Implement pushes a fix to the same pull request. When only Verify's environment fails, Verify runs again on its own, up to 3 times in a row, and a fourth environment failure in a row makes the task wait for a person. After 3 rounds without a pass, the task waits for a person, with exact instructions. The TLA+ model in `features/tasks/` checks that these caps hold and that every task ends done, waiting, or stopped.
 
 Rejected options:
 
@@ -214,3 +214,6 @@ Each open question names the current lean or default. A lean is not a decision.
 - **How a person gives AutoWorker a Codex login.** The lean is a Connect button that has the engine run `codex login --device-auth` and show the person its link and code, so the login is made for AutoWorker by construction.
 - **Which goal version an attempt follows.** The data model draft uses the latest version at claim time, so a goal fixed before a retry applies to the retry.
 - **Whether a task key is unique per routine or across routines.** The data model draft makes it unique per routine. The cost is that two routines can put two agents on one ticket at once.
+- **What a failed Specify, Implement, or Land attempt does.** The lean, which the TLA+ model in `features/tasks/` checks, is that the task waits for a person, who can retry that stage. The alternative is a few automatic retries first, as Verify gets for environment failures.
+- **How many lost attempts in a row make a task wait.** An attempt is lost when its lease expires. Without a cap, a task whose every attempt dies would be claimed forever. The model found this. The lean is 3, like the other caps, after which the task waits for a person.
+- **How long an attempt may run.** The model assumes every attempt ends, either with a verdict or by going quiet and being reaped. The lean is a deadline on each attempt's Job. A Job past its deadline is killed, and the reaper marks its attempt lost.

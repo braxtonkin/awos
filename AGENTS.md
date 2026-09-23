@@ -66,7 +66,7 @@ Each tool below is the only approved tool for its job (A3). To replace one, or t
 - **Outside data.** zod parses every payload, file, and environment variable where it enters.
 - **Secrets.** The app encrypts secrets with AES-256-GCM from `node:crypto` before they reach Postgres. The key comes from a Kubernetes Secret and never reaches the database.
 - **Tests.** Vitest against a real Postgres that Testcontainers starts. No database mocks.
-- **Formal models.** TLA+, checked with TLC. A model lives in the feature folder of the code it covers (A4).
+- **Formal models.** TLA+, checked with TLC from `tla2tools.jar` v1.7.4 on Java 21, both pinned in the verify image. A model lives in the feature folder of the code it covers (A4).
 - **Dashboard.** Next.js App Router. Server components read Postgres, and server actions write to it.
 - **Connectors.** Octokit for GitHub. `fetch` and zod for Jira and Webex.
 - **Agent runtime.** The Codex app server (`codex app-server`), pinned to one exact Codex CLI version and run inside each attempt's Job. Use only the protocol's stable methods.
@@ -81,6 +81,7 @@ The first feature, command, or module of each kind defines its paved path. Recor
 - **Verification.** `npm run verify -- <scenario>` runs one scenario, prints `PASS` or `FAIL` per check, and exits non-zero on any failure. A feature's scenarios live in `features/<name>/verify.ts`, which exports `scenarios`. Run everything inside the verify container, which CI uses too. Install with `docker compose run --rm verify npm ci`, again after any change to the lockfile, then run `docker compose run --rm verify npm run verify -- <scenario>`.
 - **Guardrails.** Every check that enforces a rule gets a case in `tools/verify/guardrails.ts`. The case plants a violation in a copy of the repository and passes only when the check rejects it. An exception the check allows gets an allowance case that plants the allowed line and passes only when the check accepts it, beside cases that prove the exception allows nothing more. Each check is an npm script that `npm run check` chains, and a case runs that same script, so it proves the check CI runs. One case per chained script runs `npm run check` itself, so a script dropped from the chain fails too.
 - **Boundaries.** `.dependency-cruiser.json` declares them, and `npm run boundaries` enforces them as part of `npm run check`. Imports only point down: `services/` may import `features/` and `shared/`, `features/` may import `shared/`, and `shared/` imports neither. Features never import each other, and no service imports another. `tools/` never imports product code, so it cannot carry one module to another. Code in `services/job/` never imports a Postgres client, `kysely`, `shared/db/`, or a `@kubernetes` package, even through a helper. No import rule can see `fetch`, a raw socket, or a module loaded by a computed name, so the Job's pod spec stays its runtime boundary. No import is circular or orphaned.
+- **Formal models.** A model is `features/<name>/<Model>.tla` with `<Model>.cfg`, written before the code it covers. Give each guard in the design a boolean constant that the real config sets to `TRUE`. The feature's `verify.ts` runs TLC through `tools/verify/tlc.ts` on the real config, then once per guard with that guard set to `FALSE` and only its property checked. The scenario passes only when the real config holds and every mutant fails. It first checks that the config lists every property, that every property and every guard has a mutant, and that each bound is at or above the floor `verify.ts` sets, so shrinking the model fails too. Larger bounds go in `<Model>.nightly.cfg`. Add the scenario to the `models` job in CI and to the nightly workflow. `features/tasks/` is the example.
 
 ## Enforcement
 
@@ -88,10 +89,10 @@ The first feature, command, or module of each kind defines its paved path. Recor
 | --- | --- | --- |
 | A5 | `dependency-cruiser` with `.dependency-cruiser.json`, run by `npm run boundaries` and proved by `guardrails` in CI | met |
 | A7 | the `tsconfig` flags in [Stack](#stack) and typescript-eslint `strict-type-checked`, run by `npm run check` and proved by `guardrails` in CI | met |
-| B1 | `autoworker/no-comments` in `tools/eslint/no-comments.ts`, run by `npm run lint` and proved by `guardrails` in CI | met for TypeScript; SQL gets its check with the first migration |
+| B1 | `autoworker/no-comments` in `tools/eslint/no-comments.ts`, run by `npm run lint` and proved by `guardrails` in CI | met for TypeScript; TLA+ models have no check yet, and SQL gets its check with the first migration |
 | B2 | ESLint `linterOptions.noInlineConfig` with `--max-warnings 0`, `@typescript-eslint/ban-ts-comment`, `no-warning-comments` for `@ts-` in any case, and a config that refuses a suppressions file, run by `npm run lint` and proved by `guardrails` in CI | met |
 | C3 | this file | CI check that changes under `features/` also change the feature map |
-| C5 | this file | CI job that runs TLC on a model whenever it or its feature folder changes |
+| C5 | the `models` job runs each model and its mutants in CI on every PR, and the nightly workflow runs larger bounds | met |
 | C6 | this file | a CI check that every TLA+ property has a simulator check of the same name, and a mutant run per schema constraint |
 | All others | this file | promote when a check becomes possible |
 
