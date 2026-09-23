@@ -4,6 +4,14 @@ This file holds the settled design decisions for AutoWorker and the questions st
 
 ## Settled
 
+### AutoWorker is a generic core that a company forks
+
+Decided 23 Sep 2026. This repository holds a generic AutoWorker. A company forks it and adds its own behavior, such as how Verify gets a live environment or how its pull requests get approved. The core keeps that behavior behind small plug-in points, so a fork adds its own implementation instead of editing the core, and it can keep taking upstream changes. Company names, policies, and infrastructure stay out of this repository.
+
+Rejected option:
+
+- **Build for one company's setup.** Every other user would have to undo it, and the owner's own fork would drift further from upstream with each change.
+
 ### Workers claim a task by inserting an attempt row
 
 Decided 23 Sep 2026. Every try at a stage is a row in the `attempt` table. A partial unique index on `task_id`, limited to rows where `finished_at` is null, allows one unfinished attempt per task. Postgres refuses a second claim, so no code has to check first. A reaper marks attempts whose lease has expired as `lost`. That frees the task and keeps a record the dashboard can show. A late write from a lost attempt matches no rows. A lost or stopped attempt stops counting against the engine's capacity at once, and housekeeping deletes its Job. Three lost attempts in a row make the task wait for a person, so a task whose every attempt dies does not restart forever. An attempt that finishes resets that count.
