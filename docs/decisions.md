@@ -188,6 +188,15 @@ Rejected options:
 - **A unit test per function or table row.** It restates the code, so it still passes when the code is wrong, and it blocks honest edits to the value it pins.
 - **Port the data model draft's 87 checks as unit tests.** Most restate a constraint Postgres already enforces. A mutant per constraint shows each constraint is load-bearing, and the simulation exercises it under concurrency.
 
+### An end-to-end test proves ticket to merge on sandboxes
+
+Decided 23 Sep 2026. Before AutoWorker works on itself, a test proves the whole path on sandboxes. It files a ticket in a sandbox Jira space, and AutoWorker takes the ticket to a merged pull request in a private sandbox repository, running the real agent with the owner's Codex login. The test checks each step against Jira, GitHub, and AutoWorker's own record rather than trusting AutoWorker's report, and posts a timeline with links and evidence to the ticket. Its harness is built first and reports how far a ticket gets, so each later PR shows its progress toward the whole path. Webex joins once the call on chat posts is made.
+
+Rejected options:
+
+- **Fakes of Jira and GitHub.** They run free in CI and may come later for that, but a demonstration needs the real services' behavior, such as Jira's workflow and GitHub's checks.
+- **Wait for AutoWorker to deliver its own changes.** That stays the final bar. A sandbox lets a failed run cost nothing, and the test can run as often as needed.
+
 ## Open
 
 Each open question names the current lean or default. A lean is not a decision.
