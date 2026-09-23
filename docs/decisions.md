@@ -55,9 +55,9 @@ Rejected options:
 - **Ask when the agent wants to** (`on-request`). An unattended task waits until someone answers.
 - **Ask before most commands** (`untrusted`). In the prototype, the agent asked before a read-only `cat` and before `npm test`, so an unattended task would wait at almost every step.
 
-### The agent view lives inside running work
+### The agent view lives on each task's page
 
-Decided 23 Sep 2026. The live view of an agent, where a person watches each step and sends it messages, is a panel on the page of an in-progress routine or task. It is not the dashboard's first view or a page of its own. Opening a task shows its own page, with that panel and how long the task took from start to merge.
+Decided 23 Sep 2026. The view of an agent is a panel on the page of a routine or task. It is not the dashboard's first view or a page of its own. Opening a task, whether it is running or done, shows its own page with that panel and how long the task took from start to merge. While the task runs, the panel streams each step and takes a message that changes the agent's course or stops it. Once the task is done, the same panel replays what the agent did, read-only, for as long as transcripts are kept. After 30 days the panel says the transcript has expired, and the task's attempts and evidence stay for their 180 days. The owner added the replay on finished tasks the same day.
 
 Rejected option:
 
