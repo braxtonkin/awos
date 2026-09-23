@@ -72,14 +72,19 @@ Each tool below is the only approved tool for its job (A3). To replace one, or t
 
 ## Paved paths
 
-None yet. The first feature, command, or module of each kind defines its paved path; record it here in the same PR.
+The first feature, command, or module of each kind defines its paved path. Record it here in the same PR.
+
+- **Layout.** Feature code lives in `features/<name>/`. Entry points live in `services/engine/`, `services/dashboard/`, and `services/job/`, and hold no logic. Code moves to `shared/` only when a second feature needs it. Migrations live in `db/migrations/`, and tools live in `tools/`.
+- **TypeScript.** Node 24 runs `.ts` files directly, so there is no build step. Import with the `.ts` extension, use `import type` for types, and write only syntax Node can erase, so no `enum` and no `namespace`. `npm run check` type-checks everything.
+- **Verification.** `npm run verify -- <scenario>` runs one scenario, prints `PASS` or `FAIL` per check, and exits non-zero on any failure. A feature's scenarios live in `features/<name>/verify.ts`, which exports `scenarios`. Run everything inside the verify container, which CI uses too. Install with `docker compose run --rm verify npm ci`, again after any change to the lockfile, then run `docker compose run --rm verify npm run verify -- <scenario>`.
+- **Guardrails.** Every check that enforces a rule gets a case in `tools/verify/guardrails.ts`. The case plants a violation in a copy of the repository and passes only when the check rejects it.
 
 ## Enforcement
 
 | Rule | Enforced by today | Target |
 | --- | --- | --- |
 | A5 | this file | `dependency-cruiser` in CI |
-| A7 | this file | the `tsconfig` flags in [Stack](#stack) and typescript-eslint `strict-type-checked` |
+| A7 | the `tsconfig` flags in [Stack](#stack), checked by `npm run check` and `guardrails` in CI | typescript-eslint `strict-type-checked` |
 | B1 | this file | a custom ESLint rule that rejects comments |
 | B2 | this file | ESLint `linterOptions.noInlineConfig` and `@typescript-eslint/ban-ts-comment` |
 | C3 | this file | CI check that changes under `features/` also change the feature map |

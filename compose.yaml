@@ -1,0 +1,17 @@
+services:
+  verify:
+    build:
+      context: tools/verify
+      dockerfile: Dockerfile
+    working_dir: /repo
+    volumes:
+      - .:/repo
+      - node_modules:/repo/node_modules
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      TESTCONTAINERS_HOST_OVERRIDE: host.docker.internal
+    extra_hosts:
+      - host.docker.internal:host-gateway
+
+volumes:
+  node_modules:

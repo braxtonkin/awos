@@ -1,0 +1,23 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - run: docker compose build verify
+      - run: docker compose run --rm verify npm ci
+      - run: docker compose run --rm verify npm run check
+      - run: docker compose run --rm verify npm run verify -- guardrails
+      - run: docker compose run --rm verify npm run verify -- doctor
