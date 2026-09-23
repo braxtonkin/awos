@@ -11,7 +11,7 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -24,11 +24,11 @@ jobs:
 
   models:
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
       - run: docker compose build verify
       - run: docker compose run --rm verify npm ci
-      - run: docker compose run --rm verify npm run verify -- tasks-model
+      - run: docker compose run --rm verify npm run verify -- models

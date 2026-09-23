@@ -18,4 +18,4 @@ jobs:
           persist-credentials: false
       - run: docker compose build verify
       - run: docker compose run --rm verify npm ci
-      - run: docker compose run --rm verify npm run verify -- tasks-model nightly
+      - run: docker compose run --rm verify npm run verify -- models nightly

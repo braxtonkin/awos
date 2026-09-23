@@ -1,11 +1,11 @@
 import { spawnSync } from 'node:child_process';
 import { cp, mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { basename, dirname, join } from 'node:path';
+import { basename, dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { fail, pass, type Check, type Scenario } from './check.ts';
 
-type Tool = 'tsc' | 'node' | 'eslint' | 'depcruise' | 'check' | 'shape';
+type Tool = 'tsc' | 'node' | 'eslint' | 'depcruise' | 'check' | 'shape' | 'models';
 
 type Plant =
   | { readonly file: string; readonly source: string; readonly linkTo?: never }
@@ -591,6 +591,14 @@ const violations: readonly Violation[] = [
   },
 ];
 
+const plantedModel: Violation = {
+  name: 'npm run verify -- models runs a failing model scenario from a new feature folder',
+  file: 'features/planted/verify.ts',
+  source: "import { fail, type Scenario } from '../../tools/verify/check.ts';\n\nexport const scenarios: readonly Scenario[] = [\n  {\n    name: 'planted-model',\n    summary: 'a model planted to fail',\n    run: () => Promise.resolve([fail('the planted model holds', 'planted to fail')]),\n  },\n];\n",
+  tool: 'models',
+  expect: ['FAIL  planted-model: the planted model holds'],
+};
+
 const allowances: readonly Allowance[] = [
   {
     name: 'eslint accepts a shebang on line 1, as an editor parses it',
@@ -724,6 +732,10 @@ const tools: Record<
     command: () => ['npm', 'run', '--silent', 'shape'],
     caught: (outcome, _file, code) => outcome.output.split('\n').some(line => line.startsWith(code)),
   },
+  models: {
+    command: () => ['npm', 'run', '--silent', 'verify', '--', 'models'],
+    caught: (outcome, _file, code) => outcome.output.includes(code),
+  },
 };
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
@@ -766,10 +778,10 @@ const accept = (copy: string, allowance: Allowance): Promise<Check> =>
     return outcome.status === 0 ? pass(allowance.name, 'accepted') : fail(allowance.name, (tools[allowance.tool].summary ?? firstLines)(outcome));
   });
 
-async function withCopy(work: (copy: string) => Promise<readonly Check[]>): Promise<readonly Check[]> {
+async function withCopy(work: (copy: string) => Promise<readonly Check[]>, leftOut: readonly string[] = []): Promise<readonly Check[]> {
   const copy = await mkdtemp(join(tmpdir(), 'guardrails-'));
   try {
-    await cp(root, copy, { recursive: true, filter: source => !skipped.has(basename(source)) });
+    await cp(root, copy, { recursive: true, filter: source => !skipped.has(basename(source)) && !leftOut.includes(relative(root, source)) });
     await symlink(join(root, 'node_modules'), join(copy, 'node_modules'), 'junction');
     return await work(copy);
   } finally {
@@ -780,8 +792,8 @@ async function withCopy(work: (copy: string) => Promise<readonly Check[]>): Prom
 export const guardrails: Scenario = {
   name: 'guardrails',
   summary: 'plants each violation a check must reject and each line it must accept, and proves both',
-  run: () =>
-    withCopy(async copy => {
+  run: async () => [
+    ...(await withCopy(async copy => {
       const checks: Check[] = (['tsc', 'eslint', 'depcruise', 'shape'] as const).map(tool => {
         const clean = run(tool, copy, '.');
         const name = `the unplanted copy passes ${tool}`;
@@ -791,5 +803,7 @@ export const guardrails: Scenario = {
       for (const violation of violations) checks.push(await reject(copy, violation));
       for (const allowance of allowances) checks.push(await accept(copy, allowance));
       return checks;
-    }),
+    })),
+    ...(await withCopy(async copy => [await reject(copy, plantedModel)], ['features'])),
+  ],
 };
