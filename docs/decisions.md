@@ -46,6 +46,23 @@ Rejected options:
 - **`codex mcp-server`.** Codex 0.154.0 removed it.
 - **Driving the interactive terminal UI.** Its screen text is not an interface.
 
+### Agents run with full permissions
+
+Decided 23 Sep 2026. Routines run with nobody watching, so an agent never stops to ask a person before it acts. The app server in each Job runs with the approval policy `never` and the sandbox mode `danger-full-access`. The Job is the safety boundary. It has its own workspace, only its owner's credentials, and no database or Kubernetes API access. A person who disagrees with what an agent is doing steers or stops it.
+
+Rejected options:
+
+- **Ask when the agent wants to** (`on-request`). An unattended task waits until someone answers.
+- **Ask before most commands** (`untrusted`). In the prototype, the agent asked before a read-only `cat` and before `npm test`, so an unattended task would wait at almost every step.
+
+### The agent view lives inside running work
+
+Decided 23 Sep 2026. The live view of an agent, where a person watches each step and sends it messages, is a panel on the page of an in-progress routine or task. It is not the dashboard's first view or a page of its own.
+
+Rejected option:
+
+- **A standalone agent screen,** like the prototype lab. It shows the agent without the routine, stage, and evidence around its work.
+
 ### The backend is one engine program
 
 Decided 23 Sep 2026. One engine program runs all four loops: intake, worker, reaper, and outbox. It runs as a single copy. It can run as several copies if load ever needs it, because Postgres refuses a second claim.
@@ -102,5 +119,4 @@ Each open question names the current lean or default. A lean is not a decision.
 - **Where the stage boundaries fall.** The default is to cut where the work changes hands. Specify ends with a written plan, implement with a pushed branch, verify with saved evidence, and land with a merged pull request.
 - **How stored credentials behave without sign-in.** The proposal is that a stored credential can be replaced but never shown back, so switching to someone else's identity cannot reveal their token.
 - **How the engine reaches the app server.** The lean is a small bridge inside the Job that runs the app server over its standard input and output and connects out to the engine. It numbers every event and resends any the engine has not stored, so an engine restart loses nothing, and the Job listens on no port. The prototype instead had the engine connect to a WebSocket port in the Job, guarded by a token made for that attempt. That needs traffic into Job pods, and reading the Codex source found no replay of events a disconnected client missed.
-- **Whether agents ask before acting.** The lean is that they never ask. The Job is the safety boundary, and a person steers or stops the agent instead, so a task never stalls waiting for an answer when no one is watching.
 - **Codex sign-in.** Parked for now. The app server ignores the `CODEX_API_KEY` variable that `codex exec` reads, so it signs in from `auth.json` or through a sign-in call in its protocol.
