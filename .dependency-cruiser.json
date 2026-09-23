@@ -1,0 +1,74 @@
+{
+  "forbidden": [
+    {
+      "name": "no-cross-feature-import",
+      "severity": "error",
+      "comment": "A feature lives in one folder (A4). Move code to shared/ once a second feature needs it.",
+      "from": { "path": "^features/([^/]+)/" },
+      "to": { "path": "^features/[^/]+/", "pathNot": "^features/$1/" }
+    },
+    {
+      "name": "shared-imports-nothing-above",
+      "severity": "error",
+      "comment": "shared/ holds what several features need, so it never imports a feature or a service, which would let one feature reach another through it.",
+      "from": { "path": "^shared/" },
+      "to": { "path": "^(features|services)/" }
+    },
+    {
+      "name": "features-import-no-services",
+      "severity": "error",
+      "comment": "Services are entry points that import features, never the other way round.",
+      "from": { "path": "^features/" },
+      "to": { "path": "^services/" }
+    },
+    {
+      "name": "job-has-no-database",
+      "severity": "error",
+      "comment": "Code that runs in an attempt's Job has no database access, not even through a shared helper.",
+      "from": { "path": "^services/job/" },
+      "to": { "path": "(^shared/db/|(^|node_modules/)(pg|pg-[^/]+|postgres|kysely[^/]*|@databases/[^/]+)(/|$))", "reachable": true }
+    },
+    {
+      "name": "job-has-no-kubernetes-api",
+      "severity": "error",
+      "comment": "Code that runs in an attempt's Job has no Kubernetes API access.",
+      "from": { "path": "^services/job/" },
+      "to": { "path": "(^|node_modules/)@kubernetes/", "reachable": true }
+    },
+    {
+      "name": "services-stay-apart",
+      "severity": "error",
+      "comment": "Each service deploys on its own, so no service imports another.",
+      "from": { "path": "^services/([^/]+)/" },
+      "to": { "path": "^services/[^/]+/", "pathNot": "^services/$1/" }
+    },
+    {
+      "name": "tools-import-no-product-code",
+      "severity": "error",
+      "comment": "tools/ checks the product and never carries it, so no module reaches another through tools/.",
+      "from": { "path": "^tools/" },
+      "to": { "path": "^(features|services|shared)/" }
+    },
+    {
+      "name": "no-circular",
+      "severity": "error",
+      "comment": "Circular imports hide a missing boundary.",
+      "from": {},
+      "to": { "circular": true }
+    },
+    {
+      "name": "no-orphans",
+      "severity": "error",
+      "comment": "A module nothing imports and that imports nothing is dead code (B5).",
+      "from": { "orphan": true, "pathNot": "\\.d\\.ts$" },
+      "to": {}
+    }
+  ],
+  "options": {
+    "doNotFollow": { "path": "(^|/)node_modules/" },
+    "exclude": { "path": "^\\.claude/" },
+    "preserveSymlinks": true,
+    "tsPreCompilationDeps": true,
+    "tsConfig": { "fileName": "tsconfig.json" }
+  }
+}

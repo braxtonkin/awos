@@ -5,7 +5,7 @@ import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { fail, pass, type Check, type Scenario } from './check.ts';
 
-type Tool = 'tsc' | 'node' | 'eslint' | 'check';
+type Tool = 'tsc' | 'node' | 'eslint' | 'depcruise' | 'check';
 
 type Companion = { readonly file: string; readonly source: string };
 
@@ -89,6 +89,7 @@ const violations: readonly Violation[] = [
     source: "export const count: number = 'one';\n",
     tool: 'check',
     expect: ['TS2322'],
+    companions: [{ file: 'features/planted/uses-chained-types.ts', source: "import { count } from './chained-types.ts';\nexport const doubled = count * 2;\n" }],
   },
   {
     name: 'npm run check runs the linter',
@@ -96,6 +97,7 @@ const violations: readonly Violation[] = [
     source: floatingPromise,
     tool: 'check',
     expect: ['@typescript-eslint/no-floating-promises'],
+    companions: [{ file: 'features/planted/uses-chained-lint.ts', source: "import { load } from './chained-lint.ts';\nexport const loader = load;\n" }],
   },
   {
     name: 'eslint rejects a floating promise',
@@ -325,6 +327,151 @@ const violations: readonly Violation[] = [
     tool: 'eslint',
     expect: [noComments],
   },
+  {
+    name: 'dependency-cruiser rejects an import from another feature',
+    file: 'features/alpha/uses.ts',
+    source: "import { thing } from '../beta/thing.ts';\nexport const uses = thing;\n",
+    tool: 'depcruise',
+    expect: ['no-cross-feature-import'],
+    companions: [{ file: 'features/beta/thing.ts', source: 'export const thing = 1;\n' }],
+  },
+  {
+    name: 'dependency-cruiser rejects a database driver in a Job',
+    file: 'services/job/direct.ts',
+    source: "import pg from 'pg';\nexport const job = pg;\n",
+    tool: 'depcruise',
+    expect: ['job-has-no-database'],
+  },
+  {
+    name: 'dependency-cruiser rejects a Job reaching the database through a helper',
+    file: 'services/job/main.ts',
+    source: "import { helper } from '../../shared/helper.ts';\nexport const job = helper;\n",
+    tool: 'depcruise',
+    expect: ['job-has-no-database'],
+    companions: [
+      { file: 'shared/helper.ts', source: "import { client } from './db/client.ts';\nexport const helper = client;\n" },
+      { file: 'shared/db/client.ts', source: 'export const client = 1;\n' },
+    ],
+  },
+  {
+    name: 'dependency-cruiser rejects a Kubernetes client in a Job',
+    file: 'services/job/kube.ts',
+    source: "import { KubeConfig } from '@kubernetes/client-node';\nexport const job = KubeConfig;\n",
+    tool: 'depcruise',
+    expect: ['job-has-no-kubernetes-api'],
+  },
+  {
+    name: 'dependency-cruiser rejects the dashboard importing the engine',
+    file: 'services/dashboard/page.ts',
+    source: "import { engine } from '../engine/main.ts';\nexport const page = engine;\n",
+    tool: 'depcruise',
+    expect: ['services-stay-apart'],
+    companions: [{ file: 'services/engine/main.ts', source: 'export const engine = 1;\n' }],
+  },
+  {
+    name: 'dependency-cruiser rejects a circular import',
+    file: 'features/alpha/first.ts',
+    source: "import { second } from './second.ts';\nexport const first = (): number => second();\n",
+    tool: 'depcruise',
+    expect: ['no-circular'],
+    companions: [{ file: 'features/alpha/second.ts', source: "import { first } from './first.ts';\nexport const second = (): number => first();\n" }],
+  },
+  {
+    name: 'dependency-cruiser rejects an orphan module',
+    file: 'features/alpha/lonely.ts',
+    source: 'export const lonely = 1;\n',
+    tool: 'depcruise',
+    expect: ['no-orphans'],
+  },
+  {
+    name: 'npm run check runs dependency-cruiser',
+    file: 'features/alpha/chained-orphan.ts',
+    source: 'export const lonely = 1;\n',
+    tool: 'check',
+    expect: ['no-orphans'],
+  },
+  {
+    name: 'dependency-cruiser rejects a type-only import from another feature',
+    file: 'features/alpha/typed.ts',
+    source: "import type { Thing } from '../beta/thing.ts';\nexport const typed: Thing | undefined = undefined;\n",
+    tool: 'depcruise',
+    expect: ['no-cross-feature-import'],
+    companions: [{ file: 'features/beta/thing.ts', source: 'export type Thing = number;\n' }],
+  },
+  {
+    name: 'dependency-cruiser rejects shared code re-exporting a feature',
+    file: 'shared/reexport.ts',
+    source: "export { thing } from '../features/beta/thing.ts';\n",
+    tool: 'depcruise',
+    expect: ['shared-imports-nothing-above'],
+    companions: [{ file: 'features/beta/thing.ts', source: 'export const thing = 1;\n' }],
+  },
+  {
+    name: 'dependency-cruiser rejects a feature importing a service',
+    file: 'features/alpha/uses-service.ts',
+    source: "import { engine } from '../../services/engine/main.ts';\nexport const uses = engine;\n",
+    tool: 'depcruise',
+    expect: ['features-import-no-services'],
+    companions: [{ file: 'services/engine/main.ts', source: 'export const engine = 1;\n' }],
+  },
+  {
+    name: 'dependency-cruiser rejects a relative of pg in a Job',
+    file: 'services/job/pool.ts',
+    source: "import Pool from 'pg-pool';\nexport const job = Pool;\n",
+    tool: 'depcruise',
+    expect: ['job-has-no-database'],
+  },
+  {
+    name: 'dependency-cruiser rejects a Job reaching kysely through a feature',
+    file: 'services/job/report.ts',
+    source: "import { query } from '../../features/alpha/query.ts';\nexport const report = query;\n",
+    tool: 'depcruise',
+    expect: ['job-has-no-database'],
+    companions: [{ file: 'features/alpha/query.ts', source: "import { sql } from 'kysely';\nexport const query = sql;\n" }],
+  },
+  {
+    name: 'dependency-cruiser rejects a Job reaching the Kubernetes API through a helper',
+    file: 'services/job/cluster.ts',
+    source: "import { kube } from '../../shared/kube.ts';\nexport const cluster = kube;\n",
+    tool: 'depcruise',
+    expect: ['job-has-no-kubernetes-api'],
+    companions: [{ file: 'shared/kube.ts', source: "import { KubeConfig } from '@kubernetes/client-node';\nexport const kube = KubeConfig;\n" }],
+  },
+  {
+    name: 'dependency-cruiser rejects the engine importing the dashboard',
+    file: 'services/engine/start.ts',
+    source: "import { page } from '../dashboard/page.ts';\nexport const start = page;\n",
+    tool: 'depcruise',
+    expect: ['services-stay-apart'],
+    companions: [{ file: 'services/dashboard/page.ts', source: 'export const page = 1;\n' }],
+  },
+  {
+    name: 'dependency-cruiser rejects the Job importing the engine',
+    file: 'services/job/uses-engine.ts',
+    source: "import { tick } from '../engine/loop.ts';\nexport const job = tick;\n",
+    tool: 'depcruise',
+    expect: ['services-stay-apart'],
+    companions: [{ file: 'services/engine/loop.ts', source: 'export const tick = 1;\n' }],
+  },
+  {
+    name: 'dependency-cruiser rejects tools/ carrying a feature to another feature',
+    file: 'tools/bridge.ts',
+    source: "export { thing } from '../features/beta/thing.ts';\n",
+    tool: 'depcruise',
+    expect: ['tools-import-no-product-code'],
+    companions: [
+      { file: 'features/beta/thing.ts', source: 'export const thing = 1;\n' },
+      { file: 'features/alpha/uses-bridge.ts', source: "import { thing } from '../../tools/bridge.ts';\nexport const uses = thing;\n" },
+    ],
+  },
+  {
+    name: 'dependency-cruiser rejects a Job reaching pg through a module whose name contains node_modules',
+    file: 'services/job/sync.ts',
+    source: "import { client } from '../../shared/node_modules_db.ts';\nexport const sync = client;\n",
+    tool: 'depcruise',
+    expect: ['job-has-no-database'],
+    companions: [{ file: 'shared/node_modules_db.ts', source: "import pg from 'pg';\nexport const client = pg;\n" }],
+  },
 ];
 
 const allowances: readonly Allowance[] = [
@@ -353,6 +500,19 @@ const allowances: readonly Allowance[] = [
     source: "export const view = <div>{'text'}</div>;\n",
     tool: 'tsc',
     companions: [jsxTypes],
+  },
+  {
+    name: 'dependency-cruiser accepts a feature importing shared code',
+    file: 'features/alpha/uses-shared.ts',
+    source: "import { util } from '../../shared/util.ts';\nexport const uses = util;\n",
+    tool: 'depcruise',
+    companions: [{ file: 'shared/util.ts', source: 'export const util = 1;\n' }],
+  },
+  {
+    name: 'dependency-cruiser keeps edges to installed packages, so a module importing only one is not an orphan',
+    file: 'features/alpha/uses-package.ts',
+    source: "import { version } from 'typescript';\nexport const compilerVersion = version;\n",
+    tool: 'depcruise',
   },
 ];
 
@@ -427,6 +587,10 @@ const tools: Record<
     command: () => ['npm', 'run', '--silent', 'check'],
     caught: (outcome, file, code) => outcome.output.includes(file) && outcome.output.split('\n').some(line => line.includes(code)),
   },
+  depcruise: {
+    command: () => ['npm', 'run', '--silent', 'boundaries'],
+    caught: (outcome, file, code) => outcome.output.split('\n').some(line => line.includes(code) && line.includes(file)),
+  },
 };
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
@@ -481,7 +645,7 @@ export const guardrails: Scenario = {
   summary: 'plants each violation a check must reject and each line it must accept, and proves both',
   run: () =>
     withCopy(async copy => {
-      const checks: Check[] = (['tsc', 'eslint'] as const).map(tool => {
+      const checks: Check[] = (['tsc', 'eslint', 'depcruise'] as const).map(tool => {
         const clean = run(tool, copy, '.');
         const name = `the unplanted copy passes ${tool}`;
         const problem = clean.status === 0 ? tools[tool].unclean?.(clean) : (tools[tool].summary ?? firstLines)(clean);

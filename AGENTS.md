@@ -60,6 +60,7 @@ Each tool below is the only approved tool for its job (A3). To replace one, or t
 
 - **Language.** TypeScript on Node 24 LTS, with `strict`, `noUncheckedIndexedAccess`, and `exactOptionalPropertyTypes` on.
 - **Lint.** ESLint with typescript-eslint `strictTypeChecked`, typed from the root tsconfig, from one config at the repository root, run only through `npm run lint`.
+- **Boundaries.** dependency-cruiser, from `.dependency-cruiser.json`, run only through `npm run boundaries`.
 - **Database.** Postgres. The schema lives in plain SQL migrations that `dbmate` runs. Invariants are schema constraints.
 - **Queries.** Kysely, with types that `kysely-codegen` generates from the database. No ORM.
 - **Outside data.** zod parses every payload, file, and environment variable where it enters.
@@ -79,12 +80,13 @@ The first feature, command, or module of each kind defines its paved path. Recor
 - **TypeScript.** Node 24 runs `.ts` files directly, so there is no build step. Import with the `.ts` extension, use `import type` for types, and write only syntax Node can erase, so no `enum` and no `namespace`. `npm run check` runs `npm run typecheck`, then `npm run lint`, which lints against the root ESLint config and the root tsconfig, so a nested config of either kind changes nothing.
 - **Verification.** `npm run verify -- <scenario>` runs one scenario, prints `PASS` or `FAIL` per check, and exits non-zero on any failure. A feature's scenarios live in `features/<name>/verify.ts`, which exports `scenarios`. Run everything inside the verify container, which CI uses too. Install with `docker compose run --rm verify npm ci`, again after any change to the lockfile, then run `docker compose run --rm verify npm run verify -- <scenario>`.
 - **Guardrails.** Every check that enforces a rule gets a case in `tools/verify/guardrails.ts`. The case plants a violation in a copy of the repository and passes only when the check rejects it. An exception the check allows gets an allowance case that plants the allowed line and passes only when the check accepts it, beside cases that prove the exception allows nothing more. Each check is an npm script that `npm run check` chains, and a case runs that same script, so it proves the check CI runs. One case per chained script runs `npm run check` itself, so a script dropped from the chain fails too.
+- **Boundaries.** `.dependency-cruiser.json` declares them, and `npm run boundaries` enforces them as part of `npm run check`. Imports only point down: `services/` may import `features/` and `shared/`, `features/` may import `shared/`, and `shared/` imports neither. Features never import each other, and no service imports another. `tools/` never imports product code, so it cannot carry one module to another. Code in `services/job/` never imports a Postgres client, `kysely`, `shared/db/`, or a `@kubernetes` package, even through a helper. No import rule can see `fetch`, a raw socket, or a module loaded by a computed name, so the Job's pod spec stays its runtime boundary. No import is circular or orphaned.
 
 ## Enforcement
 
 | Rule | Enforced by today | Target |
 | --- | --- | --- |
-| A5 | this file | `dependency-cruiser` in CI |
+| A5 | `dependency-cruiser` with `.dependency-cruiser.json`, run by `npm run boundaries` and proved by `guardrails` in CI | met |
 | A7 | the `tsconfig` flags in [Stack](#stack) and typescript-eslint `strict-type-checked`, run by `npm run check` and proved by `guardrails` in CI | met |
 | B1 | `autoworker/no-comments` in `tools/eslint/no-comments.ts`, run by `npm run lint` and proved by `guardrails` in CI | met for TypeScript; SQL gets its check with the first migration |
 | B2 | ESLint `linterOptions.noInlineConfig` with `--max-warnings 0`, `@typescript-eslint/ban-ts-comment`, `no-warning-comments` for `@ts-` in any case, and a config that refuses a suppressions file, run by `npm run lint` and proved by `guardrails` in CI | met |
