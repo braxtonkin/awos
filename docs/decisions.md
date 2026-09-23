@@ -141,7 +141,7 @@ Rejected option:
 
 ### A run acts as a fixed person or as the ticket's assignee
 
-Decided 23 Sep 2026. A routine may name a fixed person to run as. Otherwise each attempt runs as the ticket's current Jira assignee, matched to a person by their Jira account when the attempt is claimed. Each attempt records the person it runs as. A claim with nobody to run as is refused, and the task waits for a person with a note that says to assign the ticket to someone with a connected login or to set the routine's person. The routine's own search in Jira runs as its fixed person, or else as the person who created it.
+Decided 23 Sep 2026. A routine may name a fixed person to run as. Otherwise each attempt runs as the ticket's current Jira assignee, matched to a person by their Jira account when the attempt is claimed. Each attempt records the person it runs as. A claim with nobody to run as is refused, and the task waits for a person with a note that says to assign the ticket to someone with a connected login or to set the routine's person. The routine's own search in Jira runs as its fixed person, or else as the person who created it. A fixed choice may also be a team's shared account rather than a person. The core decides who a run acts as through one small plug-in, so a fork can add its own rules, such as one that follows a condition on the ticket.
 
 Rejected options:
 
@@ -189,6 +189,23 @@ Decided 23 Sep 2026. The UI and the backend deploy separately, as they do in the
 ### Verify runs in an environment faithful to production
 
 Decided 23 Sep 2026. By default, Verify starts a pod that matches the product's real environment as closely as it can, reproduces the bug or exercises the feature there, and saves evidence such as a video. A repository can define its own way to verify, as it defines its own merge bar.
+
+### Verify proves a change with one reproduction, run before and after
+
+Decided 23 Sep 2026. Verify writes one small reproduction, such as a browser script for a user interface bug, or API calls and commands otherwise. It runs the reproduction on the ticket's starting commit, where it must show the bug, and on the change, where it must pass. Each run records video when there is a user interface, and logs and outputs always. The pull request and the task's page show both runs side by side, with the script attached so anyone can rerun it. For a feature, the first run shows the behavior missing, and the second shows the ticket's acceptance criteria met. When the script can run in the repository's CI, Implement also adds it as a regression test.
+
+Rejected options:
+
+- **Record the change working, after only.** It takes one run instead of two, but it can't prove the bug existed or that the script would have caught it.
+- **A test in CI only, with no live run.** It repeats for free, but bugs that show only in a live environment slip past it.
+
+### The core ships one public Job image
+
+Decided 23 Sep 2026. Every attempt's Job runs from one public image that the core ships, with the pinned Codex CLI. A repository may name its own image and a test command. Registries that need credentials, and images that aren't public, belong to a company's fork. Nothing more is built into the core until a second repository needs it.
+
+Rejected option:
+
+- **A prebuilt image and a test command required for every repository.** Some images aren't public, and a repository that needs neither would have to supply both.
 
 ### Stages hand off at artifacts, and a failed Verify returns to Implement
 
