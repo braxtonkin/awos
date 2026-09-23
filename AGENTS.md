@@ -59,6 +59,7 @@ Never fix a repeated mistake only by rewording a prompt. Most rules below are en
 Each tool below is the only approved tool for its job (A3). To replace one, or to add a second tool for the same job, change this list in its own PR.
 
 - **Language.** TypeScript on Node 24 LTS, with `strict`, `noUncheckedIndexedAccess`, and `exactOptionalPropertyTypes` on.
+- **Lint.** ESLint with typescript-eslint `strictTypeChecked`, typed from the root tsconfig, from one config at the repository root, run only through `npm run lint`.
 - **Database.** Postgres. The schema lives in plain SQL migrations that `dbmate` runs. Invariants are schema constraints.
 - **Queries.** Kysely, with types that `kysely-codegen` generates from the database. No ORM.
 - **Outside data.** zod parses every payload, file, and environment variable where it enters.
@@ -75,18 +76,18 @@ Each tool below is the only approved tool for its job (A3). To replace one, or t
 The first feature, command, or module of each kind defines its paved path. Record it here in the same PR.
 
 - **Layout.** Feature code lives in `features/<name>/`. Entry points live in `services/engine/`, `services/dashboard/`, and `services/job/`, and hold no logic. Code moves to `shared/` only when a second feature needs it. Migrations live in `db/migrations/`, and tools live in `tools/`.
-- **TypeScript.** Node 24 runs `.ts` files directly, so there is no build step. Import with the `.ts` extension, use `import type` for types, and write only syntax Node can erase, so no `enum` and no `namespace`. `npm run check` type-checks everything.
+- **TypeScript.** Node 24 runs `.ts` files directly, so there is no build step. Import with the `.ts` extension, use `import type` for types, and write only syntax Node can erase, so no `enum` and no `namespace`. `npm run check` runs `npm run typecheck`, then `npm run lint`, which lints against the root ESLint config and the root tsconfig, so a nested config of either kind changes nothing.
 - **Verification.** `npm run verify -- <scenario>` runs one scenario, prints `PASS` or `FAIL` per check, and exits non-zero on any failure. A feature's scenarios live in `features/<name>/verify.ts`, which exports `scenarios`. Run everything inside the verify container, which CI uses too. Install with `docker compose run --rm verify npm ci`, again after any change to the lockfile, then run `docker compose run --rm verify npm run verify -- <scenario>`.
-- **Guardrails.** Every check that enforces a rule gets a case in `tools/verify/guardrails.ts`. The case plants a violation in a copy of the repository and passes only when the check rejects it.
+- **Guardrails.** Every check that enforces a rule gets a case in `tools/verify/guardrails.ts`. The case plants a violation in a copy of the repository and passes only when the check rejects it. Each check is an npm script that `npm run check` chains, and a case runs that same script, so it proves the check CI runs. One case per chained script runs `npm run check` itself, so a script dropped from the chain fails too.
 
 ## Enforcement
 
 | Rule | Enforced by today | Target |
 | --- | --- | --- |
 | A5 | this file | `dependency-cruiser` in CI |
-| A7 | the `tsconfig` flags in [Stack](#stack), checked by `npm run check` and `guardrails` in CI | typescript-eslint `strict-type-checked` |
+| A7 | the `tsconfig` flags in [Stack](#stack) and typescript-eslint `strict-type-checked`, run by `npm run check` and proved by `guardrails` in CI | met |
 | B1 | this file | a custom ESLint rule that rejects comments |
-| B2 | this file | ESLint `linterOptions.noInlineConfig` and `@typescript-eslint/ban-ts-comment` |
+| B2 | ESLint `linterOptions.noInlineConfig` with `--max-warnings 0`, `@typescript-eslint/ban-ts-comment`, `no-warning-comments` for `@ts-` in any case, and a config that refuses a suppressions file, run by `npm run lint` and proved by `guardrails` in CI | met |
 | C3 | this file | CI check that changes under `features/` also change the feature map |
 | C5 | this file | CI job that runs TLC on a model whenever it or its feature folder changes |
 | C6 | this file | a CI check that every TLA+ property has a simulator check of the same name, and a mutant run per schema constraint |

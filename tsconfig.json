@@ -22,5 +22,5 @@
     "noEmit": true,
     "forceConsistentCasingInFileNames": true
   },
-  "include": ["tools/**/*.ts", "features/**/*.ts", "services/**/*.ts", "shared/**/*.ts"]
+  "include": ["eslint.config.ts", "tools/**/*.ts", "features/**/*.ts", "services/**/*.ts", "shared/**/*.ts"]
 }

@@ -8,11 +8,17 @@
     "node": ">=24"
   },
   "scripts": {
-    "check": "tsc --noEmit",
+    "check": "npm run typecheck && npm run lint -- .",
+    "lint": "eslint --config eslint.config.ts --max-warnings 0",
+    "typecheck": "tsc --noEmit",
     "verify": "node tools/verify/main.ts"
   },
   "devDependencies": {
+    "@eslint/js": "10.0.1",
     "@types/node": "24.13.6",
-    "typescript": "6.0.3"
+    "eslint": "10.11.0",
+    "jiti": "2.7.0",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.70.1"
   }
 }
