@@ -188,7 +188,11 @@ Decided 23 Sep 2026. The UI and the backend deploy separately, as they do in the
 
 ### Verify runs in an environment faithful to production
 
-Decided 23 Sep 2026. By default, Verify starts a pod that matches the product's real environment as closely as it can, reproduces the bug or exercises the feature there, and saves evidence such as a video. A repository can define its own way to verify, as it defines its own merge bar.
+Decided 23 Sep 2026, and refined the same day. Verify aims for an environment as faithful to production as a repository can give it, reproduces the bug or exercises the feature there, and saves evidence such as a video. Each repository names a Verify environment provider. A provider starts an environment for one attempt, gives the agent an address or a workspace, and tears the environment down when the engine says the attempt ended. The engine holds any credentials the provider needs, and Jobs still get no Kubernetes access. The core ships a tests-only provider, where the agent runs the repository's fast test command in its own Job. A company's fork adds providers that fit its own infrastructure and policy.
+
+Rejected option:
+
+- **A sandbox namespace per attempt, built into the core.** It hard-codes one cluster policy into every fork, a company's devops policy may not allow it, and it gives Verify Jobs Kubernetes access.
 
 ### Verify proves a change with one reproduction, run before and after
 
@@ -216,6 +220,32 @@ Rejected options:
 - **Implement ends with a pushed branch.** Most repositories run CI on pull requests, so their checks would first run in Land, after Verify had passed.
 - **Retry Verify on every failure.** A retry cannot fix behavior that is still wrong.
 - **Wait for a person at the first failure of Specify, Implement, or Land.** It spends no agent time on reruns, but a failure that a second try would clear still reaches a person.
+
+### A routine sets where it ends, its gates, and its stage instructions
+
+Decided 23 Sep 2026. A person should step in before an action that can't be undone, where a judgment belongs to the team, and where a team doesn't trust AutoWorker yet for that kind of work. The last of these changes over time, routine by routine, so it lives in each routine's settings rather than in the core. A routine picks its last stage, so done can be an open pull request that people take from there. After any stage, a routine can add a gate that waits for a person's Approve action. Each stage has a default prompt in the core, and a routine adds its own instructions to any stage. A task keeps the stages and gates of the routine version that found it, and its instructions follow the newest version at each attempt. The engine performs irreversible actions itself, through the outbox, and only when their conditions hold. It merges, or joins the merge queue, only when GitHub reports the pull request mergeable under the repository's own rules and every gate is approved, and no prompt can override that.
+
+Rejected options:
+
+- **One fixed pipeline.** No routine could stop at a pull request or ask for a plan review.
+- **Stages each routine defines for itself.** No model could check every shape, the dashboard could not show one, and a prompt could decide when to merge.
+
+### Review feedback comes back once, as a whole review
+
+Decided 23 Sep 2026. Land acts on a whole submitted review rather than on single comments, and returns the task to Implement at most once, with every comment as its input. After that round, a routine chooses whether later reviews wait for a person or are ignored, because later rounds tend to be nits and noise. When they are ignored, AutoWorker carries on toward Land, and GitHub's own rules still decide whether the pull request can merge. A repository can list reviewers whose reviews are always ignored, such as review bots. Formally dismissing someone's review on GitHub stays out of the core, because it overrides a reviewer, and a fork can add it.
+
+Rejected options:
+
+- **Answer every review, up to the stage caps.** Where an approval must follow the last push, each round costs the reviewer another approval.
+- **Never answer, and always wait.** Small fixes would wait on people too.
+
+### A pull request leaves draft only when every check that ran is green
+
+Decided 23 Sep 2026. Implement opens its pull request as a draft, and GitHub can't merge a draft, so Land marks it ready. Ready is GitHub's signal to reviewers, so AutoWorker marks it ready only once every check that ran on the head is green, apart from checks the repository marks as ignorable. A red check returns the work to Implement within the caps, before any person spends time on it. AutoWorker never asks anyone for a review itself.
+
+Rejected option:
+
+- **Mark it ready once the required checks pass.** Reviewers would see red pull requests from AutoWorker and learn to ignore its work.
 
 ### A request for help says exactly what to do
 
@@ -301,7 +331,6 @@ Each open question names the current lean or default. A lean is not a decision.
 
 - **What the dashboard's Overview shows first.** The lean is what needs the person picked, with the pipeline board and the history one click away.
 - **When AutoWorker posts to chat.** The default is to post when a task parks as waiting, when a routine is overdue, and once a day as a digest.
-- **Who starts Verify's environment pod.** The lean is the engine, so attempt Jobs keep no Kubernetes API access.
 - **Whether outbox rows need a claim.** The data model draft has no claim on outbox rows, and Jira comments and chat posts are not idempotent on the other side. The outbox's TLA+ model settles this before the outbox is built.
 - **When sign-in becomes necessary.** Runs now carry personal logins, so picking a person runs an agent with that person's GitHub token and ChatGPT account. The lean is to add sign-in before the first run with real personal credentials.
 - **How a person gives AutoWorker a Codex login.** The lean is a Connect button that has the engine run `codex login --device-auth` and show the person its link and code, so the login is made for AutoWorker by construction.
