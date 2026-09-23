@@ -6,7 +6,7 @@ This file holds the settled design decisions for AutoWorker and the questions st
 
 ### AutoWorker is a generic core that a company forks
 
-Decided 23 Sep 2026. This repository holds a generic AutoWorker. A company forks it and adds its own behavior, such as how Verify gets a live environment or how its pull requests get approved. The core keeps that behavior behind small plug-in points, so a fork adds its own implementation instead of editing the core, and it can keep taking upstream changes. Company names, policies, and infrastructure stay out of this repository.
+Decided 23 Sep 2026. This repository holds a generic AutoWorker. A company forks it and adds its own behavior, such as how Verify gets a live environment or how its pull requests get approved. The core keeps that behavior behind small plug-in points, so a fork adds its own implementation instead of editing the core, and it can keep taking upstream changes. Company names, policies, and infrastructure stay out of this repository. Anything that can differ from one repository to the next is a per-repository setting with a sensible default rather than a hard-coded rule. Examples are when a draft leaves draft, which reviews to ignore, the Job image and test command, and the Verify environment provider. Needs that settings can't express plug in.
 
 Rejected option:
 
@@ -239,13 +239,13 @@ Rejected options:
 - **Answer every review, up to the stage caps.** Where an approval must follow the last push, each round costs the reviewer another approval.
 - **Never answer, and always wait.** Small fixes would wait on people too.
 
-### A pull request leaves draft only when every check that ran is green
+### Each repository chooses when a draft leaves draft
 
-Decided 23 Sep 2026. Implement opens its pull request as a draft, and GitHub can't merge a draft, so Land marks it ready. Ready is GitHub's signal to reviewers, so AutoWorker marks it ready only once every check that ran on the head is green, apart from checks the repository marks as ignorable. A red check returns the work to Implement within the caps, before any person spends time on it. AutoWorker never asks anyone for a review itself.
+Decided 23 Sep 2026. Implement opens its pull request as a draft, and GitHub can't merge a draft, so Land marks it ready. Ready is GitHub's signal to reviewers, and when AutoWorker flips it is a per-repository setting. By default it waits until every check that ran on the head is green, apart from checks the repository marks as ignorable, and a red check returns the work to Implement within the caps. A repository can instead mark the draft ready without waiting for green checks, because in some repositories a red pull request in review is fine. AutoWorker never asks anyone for a review itself.
 
 Rejected option:
 
-- **Mark it ready once the required checks pass.** Reviewers would see red pull requests from AutoWorker and learn to ignore its work.
+- **One rule for every repository.** Review customs differ between repositories, and a generic core can't know them.
 
 ### A request for help says exactly what to do
 
