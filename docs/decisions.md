@@ -6,7 +6,7 @@ This file holds the settled design decisions for AutoWorker and the questions st
 
 ### Workers claim a task by inserting an attempt row
 
-Decided 23 Sep 2026. Every try at a stage is a row in the `attempt` table. A partial unique index on `task_id`, limited to rows where `finished_at` is null, allows one unfinished attempt per task. Postgres refuses a second claim, so no code has to check first. A reaper marks attempts whose lease has expired as `lost`. That frees the task and keeps a record the dashboard can show. A late write from a lost attempt matches no rows. A lost or stopped attempt stops counting against the engine's capacity at once, and housekeeping deletes its Job. A lease that keeps lapsing is reaped at one of its lapses, which the TLA+ model in `features/tasks/` states as strong fairness for the reaper.
+Decided 23 Sep 2026. Every try at a stage is a row in the `attempt` table. A partial unique index on `task_id`, limited to rows where `finished_at` is null, allows one unfinished attempt per task. Postgres refuses a second claim, so no code has to check first. A reaper marks attempts whose lease has expired as `lost`. That frees the task and keeps a record the dashboard can show. A late write from a lost attempt matches no rows. A lost or stopped attempt stops counting against the engine's capacity at once, and housekeeping deletes its Job. Three lost attempts in a row make the task wait for a person, so a task whose every attempt dies does not restart forever. An attempt that finishes resets that count.
 
 The evidence comes from a throwaway prototype on Postgres 18 with a 2 s lease:
 
@@ -18,6 +18,7 @@ Rejected options:
 
 - **Lease columns on the task row.** It measured as safe as the attempt row, but the claim and the attempt history end up in two records that must agree.
 - **A session advisory lock.** A hung worker held its task forever, and its late write was accepted. Both break the spec.
+- **A cap of 2 or 5 lost attempts.** Two parks a task after one crash and one node restart. Five lets a task that always crashes run five times. Three matches the other caps.
 
 ### Each attempt runs in its own Kubernetes Job
 
@@ -57,7 +58,7 @@ Rejected options:
 
 ### The agent view lives on each task's page
 
-Decided 23 Sep 2026. The view of an agent is a panel on the page of a routine or task. It is not the dashboard's first view or a page of its own. Opening a task, whether it is running or done, shows its own page with that panel and how long the task took from start to merge. While the task runs, the panel streams each step and takes a message that changes the agent's course or stops it. Once the task is done, the same panel replays what the agent did, read-only, for as long as transcripts are kept. After 30 days the panel says the transcript has expired, and the task's attempts and evidence stay for their 180 days. The owner added the replay on finished tasks the same day.
+Decided 23 Sep 2026. The view of an agent is a panel on the page of a routine or task. It is not the dashboard's first view or a page of its own. Opening a task, whether it is running or done, shows its own page with that panel and how long the task took from start to merge. While the task runs, the panel streams each step and takes a message that changes the agent's course or stops it. Once the task is done, the same panel replays what the agent did, read-only, for as long as transcripts are kept. After 30 days the panel says the transcript has expired, and the task's attempts and evidence stay for their 180 days. The owner added the replay on finished tasks the same day. The owner also asked that a task's agent trace be very visible on its page, so a person can easily find where the agent failed.
 
 Rejected option:
 
@@ -98,6 +99,22 @@ Rejected options:
 - **A dashboard form that opens a pull request.** Every author would need GitHub access, and it needs the same sync job.
 - **A dashboard form with an approval step.** It adds a review step that an internal service does not need.
 
+### An attempt follows the goal as it is when the attempt starts
+
+Decided 23 Sep 2026. Each edit to a routine's goal saves a new version. When a worker claims an attempt, the engine reads the newest version and records its number on the attempt. An edit therefore reaches a task at its next attempt, whether that is a retry, its next stage, or a new task. A running attempt keeps the version it started with, and a person who wants a fix applied at once presses Retry.
+
+Rejected option:
+
+- **Follow the version that found the task.** A fix to the goal would not reach a task that is already stuck.
+
+### A ticket gets one task across all routines
+
+Decided 23 Sep 2026. A task's key, usually its ticket, is unique across all routines. The first routine to find a ticket owns it, and every other routine skips it, so two agents never work one ticket at once. A task keeps its ticket after it is done, so later routines skip that work too.
+
+Rejected option:
+
+- **A key unique per routine,** as the data model draft had it. Two routines on one ticket would count as two pieces of work, and two agents could work that ticket at once.
+
 ### Each repository sets its own merge bar
 
 Decided 23 Sep 2026. A change lands only when it passes the checks its own repository defines, such as lint rules, CI, and actions. The agent finds and follows those checks. AutoWorker applies no coverage threshold of its own.
@@ -116,12 +133,13 @@ Decided 23 Sep 2026. By default, Verify starts a pod that matches the product's 
 
 ### Stages hand off at artifacts, and a failed Verify returns to Implement
 
-Decided 23 Sep 2026. Each stage ends with something the next one starts from: Specify with a written plan, Implement with a draft pull request, Verify with saved evidence, and Land with a merged pull request. A failure costs one stage. What happens inside a stage comes from the routine's goal and the repository. When Verify finds the behavior still wrong, the task goes back to Implement with Verify's evidence, and Implement pushes a fix to the same pull request. When only Verify's environment fails, Verify runs again on its own, up to 3 times in a row, and a fourth environment failure in a row makes the task wait for a person. After 3 rounds without a pass, the task waits for a person, with exact instructions. The TLA+ model in `features/tasks/` checks that these caps hold and that every task ends done, waiting, or stopped.
+Decided 23 Sep 2026. Each stage ends with something the next one starts from: Specify with a written plan, Implement with a draft pull request, Verify with saved evidence, and Land with a merged pull request. A failure costs one stage. What happens inside a stage comes from the routine's goal and the repository. When Verify finds the behavior still wrong, the task goes back to Implement with Verify's evidence, and Implement pushes a fix to the same pull request. When only Verify's environment fails, Verify runs again on its own, up to 3 times in a row, and a fourth environment failure in a row makes the task wait for a person. When Specify, Implement, or Land fails, that stage runs again on its own, up to 2 times in a row, and a third failure in a row makes the task wait for a person. Agents are not deterministic, so a second try sometimes succeeds where the first failed. After 3 Verify rounds without a pass, the task waits for a person, with exact instructions. The TLA+ model in `features/tasks/` checks that the Verify caps hold and that every task ends done, waiting, or stopped.
 
 Rejected options:
 
 - **Implement ends with a pushed branch.** Most repositories run CI on pull requests, so their checks would first run in Land, after Verify had passed.
 - **Retry Verify on every failure.** A retry cannot fix behavior that is still wrong.
+- **Wait for a person at the first failure of Specify, Implement, or Land.** It spends no agent time on reruns, but a failure that a second try would clear still reaches a person.
 
 ### A request for help says exactly what to do
 
@@ -147,12 +165,14 @@ Rejected options:
 
 ### Concurrent protocols are model-checked with TLA+
 
-Decided 23 Sep 2026. Claims and leases, the stage machine with its Verify loop, the outbox, the bridge's event delivery, and the routine schedule each get a TLA+ model, checked with TLC. A model is written before the code it covers, so it checks the design while the design is still cheap to change. It runs in CI whenever the model or that code changes. The repository's verification skill, generated with `/create-verification-skill` once the engine runs, includes the models and the command that checks them.
+Decided 23 Sep 2026. Claims and leases, the stage machine with its Verify loop, the outbox, the bridge's event delivery, and the routine schedule each get a TLA+ model, checked with TLC. A model is written before the code it covers, so it checks the design while the design is still cheap to change. It runs in CI whenever the model or that code changes. The repository's verification skill, generated with `/create-verification-skill` once the engine runs, includes the models and the command that checks them. Each night, TLC also checks the task model at 2 tasks and 2 workers at the real caps. On 23 Sep the owner added a second nightly size of 3 tasks and 2 workers, at caps of 2 with 1 person action, for the safety properties only, so that tasks compete for workers.
 
 Rejected options:
 
 - **Lean.** It proves a property for every input, but each proof costs far more effort, and this design's risks are races between processes, which TLA+ checks directly.
 - **No formal methods.** The prototypes checked one run of each race. A model checks every ordering of steps within its bounds.
+- **A nightly run of 3 tasks and 4 workers at the real caps.** With only 2 workers, that size passed 186 million states and was stopped after 40 minutes on 16 CPUs.
+- **A nightly run of 2 tasks only.** Tasks never compete for workers, so a bug that needs a queue of tasks cannot show.
 
 ### The engine checks and refreshes every credential
 
@@ -212,8 +232,7 @@ Each open question names the current lean or default. A lean is not a decision.
 - **Whose credentials a run uses.** The spec names the ticket's assignee, and the owner described the person who launched the run. A scheduled run has no launcher, so a routine needs an owner either way. The lean is that a routine's runs use its owner's credentials, and a task starts owned by its routine's owner.
 - **When sign-in becomes necessary.** Runs now carry personal logins, so picking a person runs an agent with that person's GitHub token and ChatGPT account. The lean is to add sign-in before the first run with real personal credentials.
 - **How a person gives AutoWorker a Codex login.** The lean is a Connect button that has the engine run `codex login --device-auth` and show the person its link and code, so the login is made for AutoWorker by construction.
-- **Which goal version an attempt follows.** The data model draft uses the latest version at claim time, so a goal fixed before a retry applies to the retry.
-- **Whether a task key is unique per routine or across routines.** The data model draft makes it unique per routine. The cost is that two routines can put two agents on one ticket at once.
-- **What a failed Specify, Implement, or Land attempt does.** The lean, which the TLA+ model in `features/tasks/` checks, is that the task waits for a person, who can retry that stage. The alternative is a few automatic retries first, as Verify gets for environment failures.
-- **How many lost attempts in a row make a task wait.** An attempt is lost when its lease expires. Without a cap, a task whose every attempt dies would be claimed forever. The model found this. The lean is 3, like the other caps, after which the task waits for a person.
-- **How long an attempt may run.** The model assumes every attempt ends, either with a verdict or by going quiet and being reaped. The lean is a deadline on each attempt's Job. A Job past its deadline is killed, and the reaper marks its attempt lost.
+- **How long an attempt may run.** The model assumes every attempt ends, either with a verdict or by going quiet and being reaped. The owner leans toward no limit. The recommendation is a generous deadline on each attempt's Job, because an agent in a loop, or one waiting on a command that never returns, keeps its lease alive. A Job past its deadline is killed, and the reaper marks its attempt lost.
+- **Whether a stop is final.** The TLA+ model in `features/tasks/` makes it final today. The lean is that a retry can resume a stopped task, so a misclick can be undone. If a stop is final and a stopped task keeps its ticket as a done task does, no routine could ever work that ticket again.
+- **What a new attempt starts from after a lost one.** Each attempt gets a fresh pod. The lean is that it continues from the task's branch and reads the lost attempt's transcript, and that the Job pushes the agent's work after each finished step, so at most one step is redone.
+- **How a worker that keeps stalling loses its task.** The TLA+ model in `features/tasks/` assumes that a lease that keeps lapsing is reaped at one of its lapses, which it states as strong fairness for the reaper. Nothing guarantees that yet, and the reaper's ticket, AUTO-10, picks the mechanism.
