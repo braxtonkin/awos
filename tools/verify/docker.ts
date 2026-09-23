@@ -17,8 +17,8 @@ export const docker = (method: string, path: string, body?: object): Promise<Rep
       incoming.on('end', () => {
         try {
           resolve({ status: incoming.statusCode ?? 0, body: text === '' ? null : (JSON.parse(text) as unknown) });
-        } catch (error) {
-          reject(error instanceof Error ? error : new Error(String(error)));
+        } catch {
+          reject(new Error(`the Docker API answered ${method} ${path} with a body that is not JSON`));
         }
       });
     });

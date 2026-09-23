@@ -1,9 +1,11 @@
 import { access, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { accounts } from './accounts.ts';
 import { fail, type Check, type Scenario } from './check.ts';
 import { doctor } from './doctor.ts';
 import { guardrails } from './guardrails.ts';
+import { kind } from './kind.ts';
 import { migrations } from './migrations.ts';
 
 const modelSuffix = '-model';
@@ -70,7 +72,7 @@ const models = (features: readonly Scenario[]): Scenario => ({
 export async function loadScenarios(root: string): Promise<ReadonlyMap<string, Scenario>> {
   const features = await featureScenarios(root);
   const registry = new Map<string, Scenario>();
-  for (const scenario of [guardrails, doctor, migrations, models(features), ...features]) {
+  for (const scenario of [guardrails, doctor, migrations, kind, accounts, models(features), ...features]) {
     if (registry.has(scenario.name)) throw new Error(`two scenarios are named ${scenario.name}`);
     registry.set(scenario.name, scenario);
   }

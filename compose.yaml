@@ -1,5 +1,6 @@
 services:
   verify:
+    image: ${COMPOSE_PROJECT_NAME}-verify
     build:
       context: tools/verify
       dockerfile: Dockerfile
@@ -13,6 +14,14 @@ services:
       TESTCONTAINERS_RYUK_DISABLED: "true"
     extra_hosts:
       - host.docker.internal:host-gateway
+
+  live:
+    extends: verify
+    env_file:
+      - path: ~/.autoworker/sandbox.env
+        required: false
+    volumes:
+      - ~/.autoworker/codex:/codex:ro
 
 volumes:
   node_modules:
