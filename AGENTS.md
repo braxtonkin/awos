@@ -64,7 +64,7 @@ Each tool below is the only approved tool for its job (A3). To replace one, or t
 - **Tests.** Vitest against a real Postgres that Testcontainers starts. No database mocks.
 - **Dashboard.** Next.js App Router. Server components read Postgres, and server actions write to it.
 - **Connectors.** Octokit for GitHub. `fetch` and zod for Jira and Webex.
-- **Agent runtime.** The Codex CLI, run as `codex exec --json` inside the task's workspace.
+- **Agent runtime.** The Codex app server (`codex app-server`), pinned to one exact Codex CLI version and run inside each attempt's Job. Use only the protocol's stable methods.
 - **Deployment.** Kubernetes.
 
 ## Paved paths

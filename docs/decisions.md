@@ -28,6 +28,24 @@ Rejected options:
 - **A subprocess in the engine pod.** It starts fastest, but tasks would share one pod's disk and memory, and work in flight would die with the engine.
 - **A warm pool of workspace pods.** It starts fast and stays isolated, but it needs pool sizing and a wipe step between tasks that must never miss.
 
+### Agents run under the Codex app server
+
+Decided 23 Sep 2026. Each attempt's Job runs `codex app-server`, pinned to one exact version of the Codex CLI. It is the only way to run Codex that streams every step as it happens and takes a new message in the middle of a turn. The command is labeled experimental and has dropped methods between versions, so the engine uses only the protocol's stable methods, and moving to a new version is its own change.
+
+The evidence comes from a throwaway prototype that ran Codex CLI 0.156.0 in an Ubuntu container, with the model gpt-6-luna, against a small repo with failing tests:
+
+- The first live event arrived 1.1 s after a turn started. One 27-second turn sent 261 events, covering every command and its output, each file change, summaries of the agent's reasoning, and its messages word by word.
+- A message sent mid-turn was accepted in 23 ms and joined the same turn, and the agent followed it. The repo's tests went from 1 of 3 passing to 4 of 4, including the new test the message asked for.
+- A stop request ended the turn 46 ms later.
+- After the connection dropped, a new connection read back both turns and all 15 of their steps.
+
+Rejected options:
+
+- **`codex exec --json`.** Events flow one way, so nothing can reach the agent mid-turn. Messages and command output arrive only after each step ends, approval requests are refused, and stopping it means signaling the process.
+- **The Codex TypeScript SDK.** It wraps `codex exec`, so it has the same limits.
+- **`codex mcp-server`.** Codex 0.154.0 removed it.
+- **Driving the interactive terminal UI.** Its screen text is not an interface.
+
 ### The backend is one engine program
 
 Decided 23 Sep 2026. One engine program runs all four loops: intake, worker, reaper, and outbox. It runs as a single copy. It can run as several copies if load ever needs it, because Postgres refuses a second claim.
@@ -83,4 +101,6 @@ Each open question names the current lean or default. A lean is not a decision.
 - **When AutoWorker posts to chat.** The default is to post when a task parks as waiting, when a routine is overdue, and once a day as a digest.
 - **Where the stage boundaries fall.** The default is to cut where the work changes hands. Specify ends with a written plan, implement with a pushed branch, verify with saved evidence, and land with a merged pull request.
 - **How stored credentials behave without sign-in.** The proposal is that a stored credential can be replaced but never shown back, so switching to someone else's identity cannot reveal their token.
-- **Codex sign-in.** Parked for now.
+- **How the engine reaches the app server.** The lean is a small bridge inside the Job that runs the app server over its standard input and output and connects out to the engine. It numbers every event and resends any the engine has not stored, so an engine restart loses nothing, and the Job listens on no port. The prototype instead had the engine connect to a WebSocket port in the Job, guarded by a token made for that attempt. That needs traffic into Job pods, and reading the Codex source found no replay of events a disconnected client missed.
+- **Whether agents ask before acting.** The lean is that they never ask. The Job is the safety boundary, and a person steers or stops the agent instead, so a task never stalls waiting for an answer when no one is watching.
+- **Codex sign-in.** Parked for now. The app server ignores the `CODEX_API_KEY` variable that `codex exec` reads, so it signs in from `auth.json` or through a sign-in call in its protocol.
