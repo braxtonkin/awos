@@ -38,6 +38,7 @@ Never fix a repeated mistake only by rewording a prompt. Most rules below are en
 - **C3. Keep the feature map current.** [docs/feature-map.md](docs/feature-map.md) lists every user-facing feature: what it does, how to reach it, and where its code lives. Update it in the same PR as the feature.
 - **C4. Correct is not the same as good.** Verification proves a change works. Quality comes from sections A and B.
 - **C5. Model concurrent protocols before building them.** Code that coordinates concurrent actors, such as claims and leases, the stage machine, the outbox, or event delivery, gets a TLA+ model before the code is written. The model runs in CI whenever it or the code it covers changes, and the verification skill says how to run it.
+- **C6. Put invariants in structure and check behavior by simulation.** Put each invariant where the build or the store enforces it, in a type, a schema constraint, or a TLA+ property, and prove it can fail with a negative control, such as a planted violation or a mutant. Check behavior by running the real code in a seeded simulation that injects faults and checks those invariants after every step. Write a unit test only for a pure function whose logic a simulation cannot reach, and never one that restates the code.
 
 ## D. Adding a feature
 
@@ -83,6 +84,7 @@ None yet. The first feature, command, or module of each kind defines its paved p
 | B2 | this file | ESLint `linterOptions.noInlineConfig` and `@typescript-eslint/ban-ts-comment` |
 | C3 | this file | CI check that changes under `features/` also change the feature map |
 | C5 | this file | CI job that runs TLC on a model whenever it or its feature folder changes |
+| C6 | this file | a CI check that every TLA+ property has a simulator check of the same name, and a mutant run per schema constraint |
 | All others | this file | promote when a check becomes possible |
 
 When a rule gains a check, update its row in the same PR.

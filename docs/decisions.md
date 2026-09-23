@@ -179,6 +179,15 @@ Rejected options:
 - **A repository found per task at intake.** Intake would have no default and nothing to enforce.
 - **The agent chooses.** The pod clones the repository before the agent starts.
 
+### Invariants live in structure, and behavior is checked by simulation
+
+Decided 23 Sep 2026. The owner's experience is that unit tests for models do little, and that simulating behavior finds far more. Each invariant lives where the build or the store enforces it, in a type, a schema constraint, or a TLA+ property. A negative control proves it can fail, such as a planted violation or a mutant that drops a constraint. Behavior is checked by running the real code in a seeded simulation against real Postgres. The simulation injects faults such as crashes, hangs, and bursts of concurrent claims, and checks every invariant after each step, under the same names the TLA+ model uses. A seed replays a failing run. A unit test is kept only for a pure function whose logic a simulation cannot reach. AGENTS.md records this as C6.
+
+Rejected options:
+
+- **A unit test per function or table row.** It restates the code, so it still passes when the code is wrong, and it blocks honest edits to the value it pins.
+- **Port the data model draft's 87 checks as unit tests.** Most restate a constraint Postgres already enforces. A mutant per constraint shows each constraint is load-bearing, and the simulation exercises it under concurrency.
+
 ## Open
 
 Each open question names the current lean or default. A lean is not a decision.
