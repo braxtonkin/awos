@@ -19,6 +19,40 @@ Rejected options:
 - **Lease columns on the task row.** It measured as safe as the attempt row, but the claim and the attempt history end up in two records that must agree.
 - **A session advisory lock.** A hung worker held its task forever, and its late write was accepted. Both break the spec.
 
+### Each attempt runs in its own Kubernetes Job
+
+Decided 23 Sep 2026. The engine starts one Kubernetes Job per attempt, in the engine's own namespace. The Job clones the repo and runs Codex. It gets only its owner's credentials for that run, and no database or Kubernetes API access. The engine watches the Job, saves what it did as evidence, and records the verdict. This matches how the current AutoWorker runs delivery attempts.
+
+Rejected options:
+
+- **A subprocess in the engine pod.** It starts fastest, but tasks would share one pod's disk and memory, and work in flight would die with the engine.
+- **A warm pool of workspace pods.** It starts fast and stays isolated, but it needs pool sizing and a wipe step between tasks that must never miss.
+
+### The backend is one engine program
+
+Decided 23 Sep 2026. One engine program runs all four loops: intake, worker, reaper, and outbox. It runs as a single copy. It can run as several copies if load ever needs it, because Postgres refuses a second claim.
+
+Rejected option:
+
+- **One service per loop.** It would mean four services to deploy and configure, for separate scaling the team does not need.
+
+### Housekeeping is part of the engine
+
+Decided 23 Sep 2026. Expiring lost attempts, deleting leftover Jobs, and pruning history past the retention limits are engine loops, not routines. Correctness never depends on how a routine is set up, and the routine list stays about product work.
+
+Rejected option:
+
+- **Housekeeping as routines,** as in the current AutoWorker. A paused or misconfigured routine could leave stuck work behind.
+
+### The dashboard has no sign-in for now
+
+Decided 23 Sep 2026. A person picks who they are from a list of people, and anyone can act as anyone. Every action is still recorded under the person picked. This is a known gap. Anyone could stop another person's task, change another person's routine, or replace another person's GitHub access. Revisit before AutoWorker is used outside the team.
+
+Rejected options:
+
+- **Company sign-in.** It is the lasting answer, but it is not needed yet.
+- **GitHub sign-in.** A GitHub email may not match the company email that identifies people across connectors.
+
 ### Routines are goals that anyone on the team edits in the dashboard
 
 Decided 23 Sep 2026. A routine is a goal in plain words and a schedule. The goal states what to do and where to stop, so a routine has no settings for what it may touch or how far it may go. Definitions live in Postgres. Anyone on the team may add or change a routine with no approval step, because AutoWorker is an internal service. A person can pause a routine, change its schedule, or run it now.
@@ -45,10 +79,8 @@ Decided 23 Sep 2026. The UI and the backend deploy separately, as they do in the
 
 Each open question names the current lean or default. A lean is not a decision.
 
-- **Where the agent runs.** The lean is one Kubernetes Job per attempt, in the engine's namespace. The Job gets no database or Kubernetes API credentials, only its owner's credentials for that run. This matches how the current AutoWorker runs delivery attempts.
-- **How the backend is split.** The lean is one engine image run as a few copies, with every copy running all four loops: intake, worker, reaper, and outbox. Extra copies are safe because Postgres refuses a second claim.
-- **What the dashboard's Overview shows first.** The lean is what needs the signed-in person, with the pipeline board and the history one click away.
+- **What the dashboard's Overview shows first.** The lean is what needs the person picked, with the pipeline board and the history one click away.
 - **When AutoWorker posts to chat.** The default is to post when a task parks as waiting, when a routine is overdue, and once a day as a digest.
 - **Where the stage boundaries fall.** The default is to cut where the work changes hands. Specify ends with a written plan, implement with a pushed branch, verify with saved evidence, and land with a merged pull request.
-- **Whether housekeeping belongs to the engine.** The proposal is that expiring lost attempts, deleting leftover Jobs, and pruning old history are engine loops rather than routines, so correctness never depends on how a routine is set up.
+- **How stored credentials behave without sign-in.** The proposal is that a stored credential can be replaced but never shown back, so switching to someone else's identity cannot reveal their token.
 - **Codex sign-in.** Parked for now.
