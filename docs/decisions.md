@@ -142,11 +142,20 @@ Rejected options:
 
 ### Agents reach the engine through a bridge in the Job
 
-Decided 23 Sep 2026. A small bridge inside each Job runs the app server over its standard input and output and connects out to the engine. It numbers every event and resends any the engine has not stored, so an engine restart loses nothing, and steering messages come back over the same connection. The Job listens on no port. With the engine stopped for 8 seconds mid-task, the prototype bridge lost none of the run's 275 events.
+Decided 23 Sep 2026. A small bridge inside each Job runs the app server over its standard input and output and connects out to the engine. The bridge is the Job's main process in the attempt's own pod, so the bridge and the agent share one lifecycle. It numbers every event and resends any the engine has not stored, so an engine restart loses nothing, and steering messages come back over the same connection. The Job listens on no port. With the engine stopped for 8 seconds mid-task, the prototype bridge lost none of the run's 275 events.
 
 Rejected option:
 
 - **The engine connects to a WebSocket port in the Job.** In the same outage, 30 of the 31 events sent never arrived, because Codex does not replay events that a disconnected client missed. Every Job would also have to accept traffic from the cluster.
+
+### A new attempt continues a lost one's work
+
+Decided 23 Sep 2026. Each attempt works on its own branch, named for its task and attempt number, and the Job pushes the agent's work after each step the agent finishes. When an attempt is lost, the next one starts in a fresh pod from the lost attempt's branch, with a summary of the lost attempt's transcript, so at most one step is redone. A lost Job that wakes up can push only to its own branch, so it cannot overwrite the new attempt. When a stage passes, its attempt's branch becomes the task's branch, the one behind the draft pull request, and housekeeping deletes the other attempt branches.
+
+Rejected options:
+
+- **Redo the stage from its start.** It is simpler, but a lost Implement throws away all its work so far.
+- **Reuse the lost attempt's pod and workspace.** The pod is usually gone, and a hung pod that wakes up would write the same files as the new attempt.
 
 ### Streamed text is kept only until its step finishes
 
@@ -271,5 +280,4 @@ Each open question names the current lean or default. A lean is not a decision.
 - **Whether outbox rows need a claim.** The data model draft has no claim on outbox rows, and Jira comments and chat posts are not idempotent on the other side. The outbox's TLA+ model settles this before the outbox is built.
 - **When sign-in becomes necessary.** Runs now carry personal logins, so picking a person runs an agent with that person's GitHub token and ChatGPT account. The lean is to add sign-in before the first run with real personal credentials.
 - **How a person gives AutoWorker a Codex login.** The lean is a Connect button that has the engine run `codex login --device-auth` and show the person its link and code, so the login is made for AutoWorker by construction.
-- **What a new attempt starts from after a lost one.** Each attempt gets a fresh pod. The lean is that it continues from the task's branch and reads the lost attempt's transcript, and that the Job pushes the agent's work after each finished step, so at most one step is redone.
 - **How a worker that keeps stalling loses its task.** The TLA+ model in `features/tasks/` assumes that a lease that keeps lapsing is reaped at one of its lapses, which it states as strong fairness for the reaper. Nothing guarantees that yet, and the reaper's ticket, AUTO-10, picks the mechanism.
