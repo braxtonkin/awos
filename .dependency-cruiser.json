@@ -50,6 +50,13 @@
       "to": { "path": "^(features|services|shared)/" }
     },
     {
+      "name": "loose-files-import-no-product-code",
+      "severity": "error",
+      "comment": "Code lives in a feature folder, a service folder, shared/, or tools/, so a file anywhere else cannot carry an import around the other rules.",
+      "from": { "pathNot": "^(features/[^/]+/|services/[^/]+/|shared/|tools/)" },
+      "to": { "path": "^(features|services|shared)/" }
+    },
+    {
       "name": "no-circular",
       "severity": "error",
       "comment": "Circular imports hide a missing boundary.",

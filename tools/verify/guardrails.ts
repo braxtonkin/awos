@@ -472,6 +472,47 @@ const violations: readonly Violation[] = [
     expect: ['job-has-no-database'],
     companions: [{ file: 'shared/node_modules_db.ts', source: "import pg from 'pg';\nexport const client = pg;\n" }],
   },
+  {
+    name: 'dependency-cruiser rejects a file directly under features/ carrying one feature to another',
+    file: 'features/bridge.ts',
+    source: "export { thing } from './beta/thing.ts';\n",
+    tool: 'depcruise',
+    expect: ['loose-files-import-no-product-code'],
+    companions: [
+      { file: 'features/beta/thing.ts', source: 'export const thing = 1;\n' },
+      { file: 'features/alpha/uses-bridge.ts', source: "import { thing } from '../bridge.ts';\nexport const uses = thing;\n" },
+    ],
+  },
+  {
+    name: 'dependency-cruiser rejects a file outside the named folders carrying the engine to the dashboard',
+    file: 'lib/bridge.ts',
+    source: "export { tick } from '../services/engine/loop.ts';\n",
+    tool: 'depcruise',
+    expect: ['loose-files-import-no-product-code'],
+    companions: [
+      { file: 'services/engine/loop.ts', source: 'export const tick = 1;\n' },
+      { file: 'services/dashboard/page.ts', source: "import { tick } from '../../lib/bridge.ts';\nexport const page = tick;\n" },
+    ],
+  },
+  {
+    name: 'dependency-cruiser rejects the engine importing the Job',
+    file: 'services/engine/uses-job.ts',
+    source: "import { run } from '../job/run.ts';\nexport const engine = run;\n",
+    tool: 'depcruise',
+    expect: ['services-stay-apart'],
+    companions: [{ file: 'services/job/run.ts', source: 'export const run = 1;\n' }],
+  },
+  {
+    name: 'dependency-cruiser rejects tools/ carrying the engine to the dashboard',
+    file: 'tools/relay.ts',
+    source: "export { tick } from '../services/engine/loop.ts';\n",
+    tool: 'depcruise',
+    expect: ['tools-import-no-product-code'],
+    companions: [
+      { file: 'services/engine/loop.ts', source: 'export const tick = 1;\n' },
+      { file: 'services/dashboard/page.ts', source: "import { tick } from '../../tools/relay.ts';\nexport const page = tick;\n" },
+    ],
+  },
 ];
 
 const allowances: readonly Allowance[] = [
