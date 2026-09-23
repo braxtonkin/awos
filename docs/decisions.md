@@ -131,6 +131,32 @@ Rejected option:
 
 - **A key unique per routine,** as the data model draft had it. Two routines on one ticket would count as two pieces of work, and two agents could work that ticket at once.
 
+### A run acts as a fixed person or as the ticket's assignee
+
+Decided 23 Sep 2026. A routine may name a fixed person to run as. Otherwise each attempt runs as the ticket's current Jira assignee, matched to a person by their Jira account when the attempt is claimed. Each attempt records the person it runs as. A claim with nobody to run as is refused, and the task waits for a person with a note that says to assign the ticket to someone with a connected login or to set the routine's person. The routine's own search in Jira runs as its fixed person, or else as the person who created it.
+
+Rejected options:
+
+- **Always the routine's owner.** It is always defined, but one person's name and usage would sit on every ticket the routine touches, whoever the ticket belongs to.
+- **Always the ticket's assignee.** A routine that should run as one set person, or on unassigned tickets, would have no way to say so.
+
+### Agents reach the engine through a bridge in the Job
+
+Decided 23 Sep 2026. A small bridge inside each Job runs the app server over its standard input and output and connects out to the engine. It numbers every event and resends any the engine has not stored, so an engine restart loses nothing, and steering messages come back over the same connection. The Job listens on no port. With the engine stopped for 8 seconds mid-task, the prototype bridge lost none of the run's 275 events.
+
+Rejected option:
+
+- **The engine connects to a WebSocket port in the Job.** In the same outage, 30 of the 31 events sent never arrived, because Codex does not replay events that a disconnected client missed. Every Job would also have to accept traffic from the cluster.
+
+### Streamed text is kept only until its step finishes
+
+Decided 23 Sep 2026. While a step runs, its streamed fragments are stored, so the live panel and a stopped command's partial output work. When the step finishes, the finished step holds the same text, and its fragments are deleted. On the lab's event log of 960 events, fragments were 76% of the rows, and every fragment stream joined back into its finished step exactly. The estimate is about 90 MB per 1,000 agent-minutes, kept for 30 days.
+
+Rejected options:
+
+- **Keep every event for 30 days.** It is more than twice the size, about 210 MB for the same work, and the extra rows add no text.
+- **Keep only finished steps.** It is the same size, but a stopped command's partial output is lost.
+
 ### Each repository sets its own merge bar
 
 Decided 23 Sep 2026. A change lands only when it passes the checks its own repository defines, such as lint rules, CI, and actions. The agent finds and follows those checks. AutoWorker applies no coverage threshold of its own.
@@ -243,9 +269,6 @@ Each open question names the current lean or default. A lean is not a decision.
 - **When AutoWorker posts to chat.** The default is to post when a task parks as waiting, when a routine is overdue, and once a day as a digest.
 - **Who starts Verify's environment pod.** The lean is the engine, so attempt Jobs keep no Kubernetes API access.
 - **Whether outbox rows need a claim.** The data model draft has no claim on outbox rows, and Jira comments and chat posts are not idempotent on the other side. The outbox's TLA+ model settles this before the outbox is built.
-- **How much of each agent run to keep.** The lean is to keep streamed text only until its step finishes. On the lab's own event log, streamed fragments were 76% of stored events and added no content once their step finished.
-- **How the engine reaches the app server.** The lean is a small bridge inside the Job that runs the app server over its standard input and output and connects out to the engine. It numbers every event and resends any the engine has not stored, so an engine restart loses nothing, and the Job listens on no port. The prototype instead had the engine connect to a WebSocket port in the Job, guarded by a token made for that attempt. That needs traffic into Job pods, and reading the Codex source found no replay of events a disconnected client missed.
-- **Whose credentials a run uses.** The spec names the ticket's assignee, and the owner described the person who launched the run. A scheduled run has no launcher, so a routine needs an owner either way. The lean is that a routine's runs use its owner's credentials, and a task starts owned by its routine's owner.
 - **When sign-in becomes necessary.** Runs now carry personal logins, so picking a person runs an agent with that person's GitHub token and ChatGPT account. The lean is to add sign-in before the first run with real personal credentials.
 - **How a person gives AutoWorker a Codex login.** The lean is a Connect button that has the engine run `codex login --device-auth` and show the person its link and code, so the login is made for AutoWorker by construction.
 - **What a new attempt starts from after a lost one.** Each attempt gets a fresh pod. The lean is that it continues from the task's branch and reads the lost attempt's transcript, and that the Job pushes the agent's work after each finished step, so at most one step is redone.
