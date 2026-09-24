@@ -598,24 +598,25 @@ export const properties = {
   },
   ContinuationStartsFromLastPush: {
     moment: 'each-step',
-    breaks: sql`select a.id as attempt, a.task_id, a.start_commit, previous.id as previous, previous.last_pushed as lost_push, task_head.head as task_head
+    breaks: sql`select a.id as attempt, a.task_id, a.start_commit, lost.id as lost_attempt, lost.last_pushed as lost_push, task_head.head as task_head
       from prior p
       join attempt a on a.id > coalesce(p.max_attempt, 0)
       join task t on t.id = a.task_id
       join repository r on r.id = t.repository_id
       left join lateral (
-        select b.id, b.verdict, b.last_pushed from attempt b where b.task_id = a.task_id and b.step = a.step and b.id < a.id order by b.id desc limit 1
-      ) previous on true
+        select b.id, b.last_pushed from attempt b
+        where b.task_id = a.task_id and b.step = a.step and b.id < a.id and b.verdict = 'lost' and b.last_pushed is not null
+          and not exists (select 1 from attempt c where c.task_id = a.task_id and c.step = a.step and c.id > b.id and c.id < a.id and c.verdict is distinct from 'lost')
+        order by b.id desc limit 1
+      ) lost on true
       left join lateral (
         select o.payload ->> 'to' as head from outbox o where o.task_id = a.task_id and o.kind = 'branch.advance' and o.state = 'done' order by o.position desc limit 1
       ) task_head on true
       where a.branch is not null
-        and a.start_commit is distinct from coalesce(
-          case when previous.verdict = 'lost' then previous.last_pushed end,
-          task_head.head,
-          left(encode(sha256(convert_to(r.github || '@' || r.branch, 'UTF8')), 'hex'), 40))`,
+        and a.start_commit is distinct from coalesce(lost.last_pushed, task_head.head, left(encode(sha256(convert_to(r.github || '@' || r.branch, 'UTF8')), 'hex'), 40))`,
     plants: [
       { setup: [branchedAttempt(1, 'lost', pushedA)], violation: branchedAttempt(2, null, null, pushedB) },
+      { setup: [branchedAttempt(1, 'lost', pushedA), branchedAttempt(2, 'lost', null, pushedA)], violation: branchedAttempt(3, null, null, pushedB) },
       { setup: [], violation: branchedAttempt(1, null, null, pushedB) },
     ],
   },
