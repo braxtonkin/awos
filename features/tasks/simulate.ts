@@ -415,7 +415,9 @@ export const profiles: Readonly<Record<ProfileName, Profile>> = {
 
 const forcedAtChecks: Partial<Readonly<Record<ProfileName, StepVerdict>>> = { behavior: 'behavior_fail', environment: 'environment_fail' };
 
-export const fingerprint = createHash('sha256').update(JSON.stringify({ moves, profiles, assignees, forcedAtChecks, workflows })).digest('hex').slice(0, 16);
+const pushChance: Readonly<Record<string, number>> = { implement: 1 };
+
+export const fingerprint = createHash('sha256').update(JSON.stringify({ moves, profiles, assignees, forcedAtChecks, workflows, pushChance })).digest('hex').slice(0, 16);
 
 export type Plan = {
   readonly profile: ProfileName;
@@ -765,9 +767,8 @@ function replyFor(random: Random, kind: StepKind, verdict: StepVerdict): string 
   return JSON.stringify(output);
 }
 
-async function liveBranch(db: Database, attempt: string): Promise<string | null | undefined> {
-  const row = await db.selectFrom('attempt').select('attempt.branch').where('attempt.id', '=', attempt).where('attempt.finished_at', 'is', null).executeTakeFirst();
-  return row === undefined ? undefined : row.branch;
+async function liveBranch(db: Database, attempt: string): Promise<{ readonly branch: string | null; readonly step: string } | undefined> {
+  return db.selectFrom('attempt').select(['attempt.branch', 'attempt.step']).where('attempt.id', '=', attempt).where('attempt.finished_at', 'is', null).executeTakeFirst();
 }
 
 function nextCommit(world: World, attempt: string): string {
@@ -776,8 +777,9 @@ function nextCommit(world: World, attempt: string): string {
 }
 
 async function lastLines(turn: Turn, attempt: string, reply: string | null): Promise<readonly JobLine[]> {
-  const branch = await liveBranch(turn.db, attempt);
-  const pushes = branch != null && turn.random() < 0.5 ? [{ kind: 'pushed' as const, commit: nextCommit(turn.world, attempt), branch }] : [];
+  const live = await liveBranch(turn.db, attempt);
+  const branch = live?.branch ?? null;
+  const pushes = branch !== null && turn.random() < (pushChance[live?.step ?? ''] ?? 0.5) ? [{ kind: 'pushed' as const, commit: nextCommit(turn.world, attempt), branch }] : [];
   return [...replyLines(reply), ...pushes, { kind: 'end' }];
 }
 
@@ -1219,8 +1221,9 @@ const rules: Readonly<Record<Move, Rule>> = {
     perform: async ({ db, world, random, now, jobs: job }) => {
       const worker = pick(random, held(world, ['busy']));
       if (worker === undefined) return 'no busy worker';
-      const branch = await liveBranch(db, worker.attempt);
-      if (branch == null) return `attempt ${worker.attempt} has ${branch === undefined ? 'ended' : 'no branch'}, so its Job pushes nothing`;
+      const live = await liveBranch(db, worker.attempt);
+      const branch = live?.branch ?? null;
+      if (branch === null) return `attempt ${worker.attempt} has ${live === undefined ? 'ended' : 'no branch'}, so its Job pushes nothing`;
       const commit = nextCommit(world, worker.attempt);
       const posted = await job.post(db, worker.attempt, [{ kind: 'pushed', commit, branch }], now);
       count(world, `push ${posted}`);

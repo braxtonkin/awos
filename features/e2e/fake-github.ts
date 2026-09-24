@@ -36,6 +36,9 @@ function runProcess(file: string, args: readonly string[], options: RunOptions):
     child.on('close', code => {
       resolve({ code: code ?? 1, out, err });
     });
+    child.stdin.on('error', error => {
+      err = `${err}stdin closed before its input was written: ${error.message}\n`.slice(-kept);
+    });
     child.stdin.end(options.input ?? '');
   });
 }
