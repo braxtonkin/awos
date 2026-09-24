@@ -14,4 +14,5 @@ COPY --from=java /opt/java/openjdk /opt/java/openjdk
 ENV JAVA_HOME=/opt/java/openjdk
 ENV PATH="/opt/java/openjdk/bin:${PATH}"
 ADD --chmod=644 --checksum=sha256:936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88 https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar /opt/tla/tla2tools.jar
+RUN npm install --global @openai/codex@0.156.0 && npm cache clean --force
 WORKDIR /repo
