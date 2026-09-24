@@ -94,6 +94,14 @@ const plantedStep = "name: 'planted', reads: [], prompt: 'Planted.', needsReposi
 
 const violations: readonly Violation[] = [
   {
+    name: 'tsc rejects a GitHub performer map without pr.merge',
+    file: 'features/github/planted.ts',
+    source:
+      "import type { Performers } from '../../shared/actions.ts';\nimport { githubPerformers, type GithubKind } from './performers.ts';\n\nconst { 'pr.merge': merge, ...others } = githubPerformers({ clientFor: () => Promise.resolve({ failed: 'planted' }), owedAt: () => Promise.resolve(undefined) });\n\nexport const withoutMerge: Performers<GithubKind> = others;\n\nexport const planted = merge;\n",
+    tool: 'tsc',
+    expect: ['TS2741'],
+  },
+  {
     name: 'tsc rejects an unchecked index access',
     file: 'features/planted/index.ts',
     source: 'const names: string[] = [];\nexport const size = names[0].length;\n',

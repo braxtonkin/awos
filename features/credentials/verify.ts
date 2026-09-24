@@ -823,14 +823,15 @@ const giveToJob = "import { accessOnly, type AccessOnlyLogin } from '../../share
 
 const typePlants: readonly TypePlant[] = [
   {
-    what: 'a Checks record with no check for github',
-    source: "import type { Checks } from './checks.ts';\nexport const planted: Checks = { codex: { rotates: () => false, run: () => Promise.reject(new Error('planted')) } };\n",
-    rejectedWith: "Property 'github' is missing",
+    what: 'a Checks record with no check for jira',
+    source:
+      "import type { Checks } from './checks.ts';\nimport type { Check } from './kinds.ts';\nconst check: Check = { rotates: () => false, run: () => Promise.reject(new Error('planted')) };\nexport const planted: Checks = { codex: check, github: check };\n",
+    rejectedWith: "Property 'jira' is missing",
   },
   {
     what: 'a Checks record with a check for every kind',
     source:
-      "import type { Checks } from './checks.ts';\nimport type { Check } from './kinds.ts';\nconst check: Check = { rotates: () => false, run: () => Promise.reject(new Error('planted')) };\nexport const planted: Checks = { codex: check, github: check };\n",
+      "import type { Checks } from './checks.ts';\nimport type { Check } from './kinds.ts';\nconst check: Check = { rotates: () => false, run: () => Promise.reject(new Error('planted')) };\nexport const planted: Checks = { codex: check, github: check, jira: check };\n",
     rejectedWith: undefined,
   },
   {

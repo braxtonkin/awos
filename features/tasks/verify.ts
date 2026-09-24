@@ -696,11 +696,10 @@ function noUrlCheck(): Check {
   return started.status === 1 && started.said.includes('DATABASE_URL') ? pass(name, started.said.replaceAll('\n', ' ')) : fail(name, `exit ${String(started.status)}: ${started.said}`);
 }
 
-const alwaysRun = ['reaper', 'scheduler', 'environments'] as const;
+const alwaysRun = ['reaper', 'scheduler', 'environments', 'outbox'] as const;
 
 const skipReasons = {
   checks: 'has no CREDENTIAL_KEY, so it opens and checks no credentials',
-  outbox: 'performs no action kinds, so it runs no outbox',
   sweep: 'has no JOB_IMAGE, so it launches no Jobs and sweeps none',
 } as const;
 

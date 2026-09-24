@@ -43,12 +43,14 @@ async function reveal(source: Source, env: NodeJS.ProcessEnv, folder: string): P
 }
 
 export function logins(env: NodeJS.ProcessEnv, folder: string) {
-  return z.strictObject({ github: githubSource, codex: codexSource }).transform(async (named, context): Promise<readonly Secret[]> => {
+  return z.strictObject({ github: githubSource, codex: codexSource, jira: githubSource.optional() }).transform(async (named, context): Promise<readonly Secret[]> => {
     const github = await reveal(named.github, env, folder);
     const codex = await reveal(named.codex, env, folder);
+    const jira = named.jira === undefined ? undefined : await reveal(named.jira, env, folder);
     const secrets: readonly (readonly [string, Secret | string])[] = [
       ['github', 'text' in github ? { connector: 'github', token: github.text.trim() } : github.problem],
       ['codex', 'text' in codex ? { connector: 'codex', login: codex.text, madeForAutoWorker: named.codex.madeForAutoWorker } : codex.problem],
+      ...(jira === undefined ? [] : [['jira', 'text' in jira ? { connector: 'jira' as const, login: jira.text.trim() } : jira.problem] as const]),
     ];
     const problems = secrets.flatMap(([field, secret]) => {
       if (typeof secret === 'string') return [{ field, message: secret }];
@@ -66,6 +68,8 @@ const textOf = (secret: Secret): string => {
       return secret.login;
     case 'github':
       return secret.token;
+    case 'jira':
+      return secret.login;
   }
 };
 

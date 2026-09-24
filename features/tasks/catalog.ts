@@ -64,6 +64,8 @@ export const noMutantYet: Readonly<Record<string, readonly string[]>> = {
     'version_lists_its_gates',
     'version_says_how_it_treats_later_reviews',
     'source_names_its_kind',
+    'jira_start_status_is_named',
+    'jira_end_status_is_named',
     'version_repository_when_needed',
     'version_workflow_rule',
     'setting_of_version',
