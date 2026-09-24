@@ -123,9 +123,9 @@ export async function withPostgres<T>(work: (postgres: TestPostgres) => Promise<
   const started = performance.now();
   const postgres = await startPostgres();
   try {
-    migrate(postgres.url(template));
+    migrate(postgres.stableUrl(template));
     const readyInMs = performance.now() - started;
-    const admin = adminClient(postgres.url('postgres'));
+    const admin = adminClient(postgres.stableUrl('postgres'));
     try {
       let made = 0;
       return await work({

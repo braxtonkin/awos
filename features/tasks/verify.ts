@@ -730,7 +730,7 @@ const passesIn = (said: string): number => Number(/reaper: stopped after (\d+) p
 
 async function engineStartChecks(postgres: TestPostgres): Promise<readonly Check[]> {
   const scratch = await postgres.scratch();
-  const db = connect(scratch.url, 1);
+  const db = connect(scratch.stableUrl, 1);
   try {
     const person = await db.insertInto('person').values({ email: 'ada@example.com', name: 'Ada' }).returning('id').executeTakeFirstOrThrow();
     const saving = randomUUID();
@@ -742,11 +742,11 @@ async function engineStartChecks(postgres: TestPostgres): Promise<readonly Check
       .returning('id')
       .executeTakeFirstOrThrow();
     await saveRoutine(db, person.id, repository.id, 'code-change');
-    const known = runEngine(scratch.url, quickEngine);
+    const known = runEngine(scratch.stableUrl, quickEngine);
     const started = await known.waitFor('The engine runs the workflows code-change, and the loops reaper every 200 ms.');
     const knownStatus = started ? await known.terminate() : null;
     const stranger = await saveRoutine(db, person.id, repository.id, 'no-such-flow');
-    const unknown = startEngine({ ...process.env, DATABASE_URL: scratch.url });
+    const unknown = startEngine({ ...process.env, DATABASE_URL: scratch.stableUrl });
     const knownName = 'the engine starts when every routine uses a workflow it was given, and exits 0 on SIGTERM';
     const unknownName = 'the engine refuses to start and names the routine whose workflow it was not given';
     return [
@@ -772,7 +772,7 @@ async function idleCheck(postgres: TestPostgres): Promise<Check> {
   const name = 'the engine runs at least 3 reaper intervals on an empty database with no error, then exits 0 on SIGTERM';
   const scratch = await postgres.scratch();
   try {
-    const engine = runEngine(scratch.url, quickEngine);
+    const engine = runEngine(scratch.stableUrl, quickEngine);
     const started = await engine.waitFor('The engine runs');
     await wait(900);
     const status = started ? await engine.terminate() : null;
@@ -787,7 +787,7 @@ async function idleCheck(postgres: TestPostgres): Promise<Check> {
 
 async function sigtermChecks(postgres: TestPostgres): Promise<readonly Check[]> {
   const scratch = await postgres.scratch();
-  const db = connect(scratch.url, 3);
+  const db = connect(scratch.stableUrl, 3);
   try {
     const person = await db.insertInto('person').values({ email: 'ada@example.com', name: 'Ada' }).returning('id').executeTakeFirstOrThrow();
     const repository = await db
@@ -835,7 +835,7 @@ async function sigtermChecks(postgres: TestPostgres): Promise<readonly Check[]> 
           await sql<{ waiting: string }>`select count(*) as waiting from pg_stat_activity where datname = current_database() and wait_event_type = 'Lock'`.execute(db)
         ).rows[0]?.waiting ?? '0',
       ) > 0;
-    const engine = runEngine(scratch.url, { REAPER_EVERY_MS: '2000', LEASE_MS: '1000' });
+    const engine = runEngine(scratch.stableUrl, { REAPER_EVERY_MS: '2000', LEASE_MS: '1000' });
     const resumed = await engine.waitFor('reaper: gave ');
     let unlock = (): void => undefined;
     const unlocked = new Promise<void>(resolve => {
@@ -862,7 +862,7 @@ async function sigtermChecks(postgres: TestPostgres): Promise<readonly Check[]> 
       .orderBy('task.id')
       .execute();
     const halfReleased = halves.filter(row => row.lost !== Number(row.lostAttempts ?? '0'));
-    const restarted = runEngine(scratch.url, { REAPER_EVERY_MS: '250', LEASE_MS: '1000' });
+    const restarted = runEngine(scratch.stableUrl, { REAPER_EVERY_MS: '250', LEASE_MS: '1000' });
     const finished = await until(15_000, async () => (await lost(backlog)) === backlog.length);
     const secondStatus = await restarted.terminate();
     const stopName = 'the engine got SIGTERM in the middle of a reaper pass, finished that pass, and exited 0';
