@@ -1314,10 +1314,11 @@ async function runSeed(postgres: TestPostgres, plan: Plan, seed: number): Promis
       const engineDue = due !== undefined && due <= world.clock;
       if (!engineDue) engines.virtual.advance(world.clock);
       const turn: Turn = { db, postgres, world, profile, plan, random, quiet, now: new Date(world.clock) };
+      const said = engines.log.length;
       const made = engineDue ? { move: 'engine', detail: await engineStep(turn) } : await perform(turn);
       const at = engines.virtual.clock.now().getTime();
       trace.push({ step, at: at - epoch, ...made });
-      const broken = await watched.step(new Date(at));
+      const broken = await watched.step(new Date(at), engines.log.slice(said).some(line => line.includes(': gave ')));
       if (broken.length > 0) return await ended(step, { step, move: made.move, broken });
       world.clock = Math.max(world.clock, at) + (engineDue ? 0 : 1 + Math.floor(random() * profile.stepMs));
     }

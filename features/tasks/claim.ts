@@ -90,6 +90,7 @@ export async function renew(db: Database, attempt: string, now: Date, leaseMs: n
     .set({ lease_until: later(now, leaseMs) })
     .where('id', '=', attempt)
     .where('finished_at', 'is', null)
+    .where('lease_until', '>=', now)
     .executeTakeFirst();
   return numUpdatedRows === 1n ? 'renewed' : 'lost';
 }

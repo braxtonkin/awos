@@ -166,6 +166,11 @@ const hungWorkerHoldsItsTask: Shape = {
   },
 };
 
+const renewsLapsedLeaseForever: Shape = {
+  label: 'by a worker whose lease lapses and renews forever',
+  holds: run => run.loopActions.includes('Hang') && run.loopActions.includes('Wake') && !run.loopActions.includes('Reap'),
+};
+
 const invariant = (guard: string, without: string, property: string, shape?: Shape): Mutant => ({
   guard,
   without,
@@ -225,6 +230,8 @@ const mutants: readonly Mutant[] = [
   invariant('PassResetsStageRetries', 'a pass keeps the stage retries', 'PassLeavesNoStageRetries'),
   action('RetryResetsStageRetries', "a person's retry keeps the stage retries", 'RetryLeavesNoStageRetries'),
   unsettled('ReaperIsFair', 'the reaper has no fairness', hungWorkerHoldsItsTask),
+  action('LapsedLeaseCannotRenew', 'a worker renews a lease that has lapsed', 'LapsedLeaseNeverRenews'),
+  unsettled('LapsedLeaseCannotRenew', 'a worker renews a lease that has lapsed', renewsLapsedLeaseForever),
   invariant('EndStageIsFinal', "passing a routine's end stage does not end the task", 'StopsAtItsEndStage'),
   action('GateBlocksUntilApproved', 'a gated stage passes straight to the next stage', 'GatePassesOnlyOnApprove'),
   action('ReturnClearsApprovals', 'a return to Implement keeps the approval of a gate it must pass again', 'GatePassesOnlyOnApprove'),

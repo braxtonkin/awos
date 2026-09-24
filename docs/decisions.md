@@ -28,6 +28,16 @@ Rejected options:
 - **A session advisory lock.** A hung worker held its task forever, and its late write was accepted. Both break the spec.
 - **A cap of 2 or 5 lost attempts.** Two parks a task after one crash and one node restart. Five lets a task that always crashes run five times. Three matches the other caps.
 
+### A lapsed lease cannot be renewed
+
+Decided 24 Sep 2026. A renewal succeeds only while the attempt's lease has not yet lapsed, and one that comes later reports the attempt as lost. The reaper releases every lease that lapsed, so once a lease lapses the attempt stays releasable until the reaper takes it. A worker that keeps stalling therefore loses its task at its first lapse, and the reaper needs only to run on its schedule. The task model states this as weak fairness for the reaper, and its property `LapsedLeaseNeverRenews` fails when a guard lets a worker renew after a lapse. The simulation checks the same property after each step. The condition sits in the renew statement, because a store constraint would need the engine's clock, not the database's. When the engine starts, it gives every live attempt a fresh lease, lapsed or not, so attempts that could not renew while the engine or Postgres was away are not released at once. That grace runs once per start, so it cannot keep a lease alive forever, and the simulation's check skips the step where an engine starts. This closes AUTO-10.
+
+Rejected options:
+
+- **Strong fairness for the reaper.** The model assumed that a lease that lapses again and again is reaped at one of its lapses. Nothing in the code guaranteed it, because a renewal could land between two reaper passes every time.
+- **A count of lapses on the attempt.** It adds a column and a cap to bound a case that refusing the late renewal removes.
+- **A store constraint.** Postgres would compare the lease with its own clock, while the engine and the simulation run on the engine's clock.
+
 ### Each attempt runs in its own Kubernetes Job
 
 Decided 23 Sep 2026. The engine starts one Kubernetes Job per attempt, in the engine's own namespace. The Job clones the repo and runs Codex. It gets only its owner's credentials for that run, and no database or Kubernetes API access. The engine watches the Job, saves what it did as evidence, and records the verdict. This matches how the current AutoWorker runs delivery attempts.
@@ -380,4 +390,3 @@ Each open question names the current lean or default. A lean is not a decision.
 - **Whether outbox rows need a claim.** The data model draft has no claim on outbox rows, and Jira comments and chat posts are not idempotent on the other side. The outbox's TLA+ model settles this before the outbox is built.
 - **When sign-in becomes necessary.** Runs now carry personal logins, so picking a person runs an agent with that person's GitHub token and ChatGPT account. The lean is to add sign-in before the first run with real personal credentials.
 - **How a person gives AutoWorker a Codex login.** The lean is a Connect button that has the engine run `codex login --device-auth` and show the person its link and code, so the login is made for AutoWorker by construction.
-- **How a worker that keeps stalling loses its task.** The TLA+ model in `features/tasks/` assumes that a lease that keeps lapsing is reaped at one of its lapses, which it states as strong fairness for the reaper. Nothing guarantees that yet, and the reaper's ticket, AUTO-10, picks the mechanism.

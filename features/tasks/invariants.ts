@@ -525,6 +525,13 @@ export const properties = {
       where a.id = any(p.live) and a.verdict = 'lost' and a.lease_until >= checked_at`,
     plants: [{ setup: [liveAttempt], violation: sql`update attempt set finished_at = ${t0} + interval '20 seconds', verdict = 'lost' where id = 1`, checkedAtSeconds: 20 }],
   },
+  LapsedLeaseNeverRenews: {
+    moment: 'each-step',
+    breaks: sql`select a.id as attempt, a.task_id, l.lease_until as lapsed_at, a.lease_until, checked_at as renewed_by
+      from attempt a join held_leases l on l.id = a.id
+      where not graced and a.finished_at is null and l.lease_until < checked_at and a.lease_until > l.lease_until`,
+    plants: [{ setup: [liveAttempt], violation: sql`update attempt set lease_until = ${t0} + interval '90 seconds' where id = 1` }],
+  },
   ReviewsOnlyGrow: {
     moment: 'each-step',
     breaks: sql`select s.id, c.counter, s.was_counts ->> c.counter as was, s.counts ->> c.counter as count
@@ -579,7 +586,7 @@ export type Violation = { readonly property: PropertyName; readonly row: unknown
 
 export type Watch = {
   readonly atStart: readonly Violation[];
-  readonly step: (checkedAt: Date) => Promise<readonly Violation[]>;
+  readonly step: (checkedAt: Date, graced: boolean) => Promise<readonly Violation[]>;
   readonly settled: () => Promise<readonly Violation[]>;
 };
 
@@ -664,6 +671,7 @@ const helpers = (workflows: readonly Workflow[], everyMs: number) => sql`
   went_missing as (
     select l.task_id, l.gate from lost_approval l
     where not exists (select 1 from prior) or exists (select 1 from prior p where age(l.xmin) < age(p.xid))),
+  held_leases as (select * from jsonb_to_recordset(coalesce(before->'leases', '[]')) as l(id bigint, lease_until timestamptz)),
   carried as (select * from jsonb_to_recordset(coalesce(before->'missing', '[]')) as c(id bigint, missing text[])),
   gated as (
     select t.id, held.approved, held.passed,
@@ -680,7 +688,7 @@ const helpers = (workflows: readonly Workflow[], everyMs: number) => sql`
     ) held)`;
 
 const install = (workflows: readonly Workflow[], everyMs: number) => sql`
-  create function check_step(before jsonb, checked_at timestamptz) returns jsonb language plpgsql as $check$
+  create function check_step(before jsonb, checked_at timestamptz, graced boolean) returns jsonb language plpgsql as $check$
   declare
     own constant xid := pg_current_xact_id()::xid;
     deadline constant timestamptz := clock_timestamp() + interval '1 second';
@@ -705,6 +713,7 @@ const install = (workflows: readonly Workflow[], everyMs: number) => sql`
           'tasks', coalesce((select jsonb_agg(jsonb_build_object('id', id, 'step', step, 'state', state, 'waiting_on', waiting_on,
             'retries', retries, 'lost', lost, 'input_waits', input_waits, 'counts', counts, 'approved', approved, 'outputs', outputs,
             'latest', latest, 'latest_verdict', latest_verdict)) from record), '[]'::jsonb),
+          'leases', coalesce((select jsonb_agg(jsonb_build_object('id', id, 'lease_until', lease_until)) from attempt where finished_at is null), '[]'::jsonb),
           'missing', coalesce((select jsonb_agg(jsonb_build_object('id', id, 'missing', missing)) from gated), '[]'::jsonb))));
   end
   $check$`;
@@ -722,13 +731,13 @@ export async function watch(db: Database, workflows: readonly Workflow[], everyM
   }
   await db.executeQuery(compiled);
   let before: z.infer<typeof answer>['state'] = null;
-  const step = async (checkedAt: Date): Promise<readonly Violation[]> => {
-    const { rows } = await sql<{ result: unknown }>`select check_step(${before === null ? null : JSON.stringify(before)}::jsonb, ${checkedAt}::timestamptz) as result`.execute(db);
+  const step = async (checkedAt: Date, graced: boolean): Promise<readonly Violation[]> => {
+    const { rows } = await sql<{ result: unknown }>`select check_step(${before === null ? null : JSON.stringify(before)}::jsonb, ${checkedAt}::timestamptz, ${graced}::boolean) as result`.execute(db);
     const checked = answer.parse(rows[0]?.result);
     before = checked.state;
     return checked.violations;
   };
-  const atStart = await step(startedAt);
+  const atStart = await step(startedAt, false);
   return {
     atStart,
     step,
@@ -739,7 +748,7 @@ export async function watch(db: Database, workflows: readonly Workflow[], everyM
 const namesOf = (found: readonly Violation[]): readonly PropertyName[] => [...new Set(found.map(violation => violation.property))];
 
 const checksAt: Readonly<Record<Moment, (watched: Watch, checkedAt: Date) => Promise<readonly Violation[]>>> = {
-  'each-step': (watched, checkedAt) => watched.step(checkedAt),
+  'each-step': (watched, checkedAt) => watched.step(checkedAt, false),
   'after-quiet-phase': watched => watched.settled(),
 };
 

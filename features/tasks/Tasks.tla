@@ -58,7 +58,8 @@ CONSTANTS
     LaterReviewParks,
     OutsideApprovalNeedsAWait,
     RetryKeepsApprovals,
-    LostApprovalStaysLost
+    LostApprovalStaysLost,
+    LapsedLeaseCannotRenew
 
 CodeChangeSteps == <<"specify", "implement", "verify", "land">>
 
@@ -288,6 +289,7 @@ Hang(w) ==
     /\ UNCHANGED <<task, attempt, lateResults, humanActions, claimEpoch, runnable, runAs, reassignments>>
 
 Wake(w) ==
+    /\ ~LapsedLeaseCannotRenew
     /\ worker[w] = "hung"
     /\ worker' = [worker EXCEPT ![w] = "busy"]
     /\ UNCHANGED <<task, attempt, lateResults, humanActions, claimEpoch, runnable, runAs, reassignments>>
@@ -389,7 +391,7 @@ WorkersProgress ==
     /\ \A t \in Tasks : WF_vars(NoOneToRunAs(t))
     /\ \A w \in Workers : WF_vars(Finish(w))
 
-ReaperProgress == \A w \in Workers : SF_vars(Reap(w))
+ReaperProgress == \A w \in Workers : WF_vars(Reap(w))
 
 OutsideApprovalsStop == <>[][\A t \in Tasks : ~OutsideApproval(t)]_vars
 
@@ -495,6 +497,8 @@ EndStagePassIsDone ==
     [][\A w \in Workers : \A t \in Tasks :
           attempt[w] = t /\ task[t].step = task[t].end /\ Gates(t) \subseteq task[t].approved /\ Finishes(w, "pass") =>
               task'[t].state = "done"]_vars
+
+LapsedLeaseNeverRenews == [][\A w \in Workers : worker[w] = "hung" => worker'[w] # "busy"]_vars
 
 EveryTaskSettles == \A t \in Tasks : <>[](task[t].state \in Settled)
 
