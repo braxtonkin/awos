@@ -9,6 +9,8 @@ export type ConnectorScope = "personal" | "team";
 
 export type CredentialState = "invalid" | "unknown" | "valid";
 
+export type DraftLeaves = "at-once" | "when-green";
+
 export type Generated<T> = T extends ColumnType<infer S, infer I, infer U>
   ? ColumnType<S, I | undefined, U>
   : ColumnType<T, T | undefined, T>;
@@ -136,9 +138,12 @@ export interface Person {
 
 export interface Repository {
   branch: string;
+  draft_leaves: Generated<DraftLeaves>;
   fast_test_command: string | null;
   github: string;
   id: Generated<Int8>;
+  ignorable_checks: Generated<string[]>;
+  ignored_reviewers: Generated<string[]>;
   saved_by: string;
   verify_provider: Generated<string>;
 }

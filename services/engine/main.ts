@@ -4,9 +4,11 @@ import { checkLoop } from '../../features/credentials/check-loop.ts';
 import { checksFor } from '../../features/credentials/checks.ts';
 import { githubApi } from '../../features/credentials/github-check.ts';
 import { sealingKey, type SealingKey } from '../../features/credentials/seal.ts';
-import { writeBack } from '../../features/credentials/store.ts';
+import { open, writeBack } from '../../features/credentials/store.ts';
 import { providerProblems, reconcile } from '../../features/environments/lifecycle.ts';
 import { providersByName } from '../../features/environments/provider.ts';
+import { clientsFrom, type OpenToken } from '../../features/github/client.ts';
+import { githubPerformers, outboxOwedAt } from '../../features/github/performers.ts';
 import { outboxLoops, registryOf } from '../../features/outbox/perform.ts';
 import { scheduleSource } from '../../features/routines/schedule-source.ts';
 import { postgresNow, scheduler } from '../../features/routines/scheduler.ts';
@@ -14,7 +16,7 @@ import { sourcesByKind } from '../../features/routines/source.ts';
 import { reaper } from '../../features/tasks/reaper.ts';
 import { startProblems } from '../../features/tasks/start.ts';
 import type { OwedKinds, Performers } from '../../shared/actions.ts';
-import { connect } from '../../shared/db/client.ts';
+import { connect, type Database } from '../../shared/db/client.ts';
 import { realClock, runLoop, type Loop } from '../../shared/loop.ts';
 import type { Workflow } from '../../shared/workflow.ts';
 import { workflows } from './workflows.ts';
@@ -49,15 +51,24 @@ const providers = providersByName([]);
 
 type ActionKind = OwedKinds<Workflow>;
 
-const performers = {} satisfies Performers<ActionKind>;
+const githubToken =
+  (db: Database, key: SealingKey | undefined): OpenToken =>
+  async actsAs => {
+    if (key === undefined) return { failed: 'The engine has no CREDENTIAL_KEY, so it cannot open a GitHub token.' };
+    const opened = await open(db, key, { connector: 'github', owner: actsAs });
+    return 'secret' in opened ? { token: opened.secret } : { failed: opened.reason };
+  };
 
-const actions = registryOf(performers);
+const performersFor = (db: Database, given: Settings, key: SealingKey | undefined) =>
+  ({
+    ...githubPerformers({ clientFor: clientsFrom(githubToken(db, key), given.GITHUB_API_URL), owedAt: outboxOwedAt(db) }),
+  }) satisfies Performers<ActionKind>;
 
-const loopsFor = (given: Settings, key: SealingKey | undefined): readonly Loop[] => [
+const loopsFor = (db: Database, given: Settings, key: SealingKey | undefined): readonly Loop[] => [
   reaper({ everyMs: given.REAPER_EVERY_MS, leaseMs: given.LEASE_MS }),
   scheduler({ everyMs: given.SCHEDULER_EVERY_MS, leaseMs: given.ROUTINE_LEASE_MS, sources, workflows, now: postgresNow }),
   reconcile({ providers, everyMs: given.ENVIRONMENTS_EVERY_MS, startDeadlineMs: given.ENVIRONMENT_START_DEADLINE_MS }),
-  ...outboxLoops({ everyMs: given.OUTBOX_EVERY_MS, leaseMs: given.OUTBOX_LEASE_MS, marginMs: given.OUTBOX_MARGIN_MS, maxTries: given.OUTBOX_MAX_TRIES, clock: realClock, registry: actions }),
+  ...outboxLoops({ everyMs: given.OUTBOX_EVERY_MS, leaseMs: given.OUTBOX_LEASE_MS, marginMs: given.OUTBOX_MARGIN_MS, maxTries: given.OUTBOX_MAX_TRIES, clock: realClock, registry: registryOf(performersFor(db, given, key)) }),
   ...(key === undefined
     ? []
     : [
@@ -98,7 +109,7 @@ async function run(given: Settings, key: SealingKey | undefined): Promise<void> 
       process.exitCode = 1;
       return;
     }
-    const loops = loopsFor(given, key);
+    const loops = loopsFor(db, given, key);
     if (key === undefined) say('The engine has no CREDENTIAL_KEY, so it opens and checks no credentials.');
     say(`The engine runs the workflows ${[...workflows.keys()].join(', ')}, the Verify providers ${[...providers.keys()].join(', ')}, and the loops ${loops.map(loop => `${loop.name} every ${String(loop.everyMs)} ms`).join(', ')}.`);
     await Promise.all(loops.map(loop => runLoop(loop, db, realClock, stop.signal, say)));
