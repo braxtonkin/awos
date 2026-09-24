@@ -177,8 +177,11 @@ async function roundTrip(world: World, image: string, label: string, plan: (stor
   await addTask(world, key, 'Change titleCase in src/words.ts so it returns the text with the first letter of each space-separated word in upper case and the rest unchanged. The behavior is fully specified here, so plan without asking questions.');
   const engine = startEngine(world.store, engineSettings(world, image), world.out);
   try {
-    const specify = await waitForAttempt(world, key, 'specify');
+    await waitForAttempt(world, key, 'specify');
     const reason = await waitForWait(world, key, label === 'real' ? realWaitMs : stepWaitMs);
+    const specifies = (await attemptsOf(world, key)).filter(attempt => attempt.step === 'specify');
+    world.out(`${label}: Specify attempts ${specifies.map(attempt => `${attempt.id} ${attempt.verdict ?? 'live'}`).join(', ')}`);
+    const specify = specifies.at(-1);
     const evidence = specify === undefined ? undefined : await world.store.db.selectFrom('evidence').select('body').where('attempt_id', '=', specify.id).executeTakeFirst();
     const stored = z.object({ plan: z.string() }).safeParse(evidence?.body);
     const model = specify === undefined ? undefined : await world.store.db.selectFrom('attempt_event').select(sql<string>`body -> 'result' ->> 'model'`.as('model')).where('attempt_id', '=', specify.id).where(sql<boolean>`body ->> 'id' = 'bridge-thread-start'`).executeTakeFirst();
