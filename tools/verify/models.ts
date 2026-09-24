@@ -52,7 +52,7 @@ type Kind = 'invariant' | 'action' | 'liveness';
 const kinds: Readonly<Record<Kind, { readonly section: Section; readonly violation: (property: string) => string; readonly tlc: TlcOptions }>> = {
   invariant: { section: 'INVARIANTS', violation: property => `Invariant ${property} is violated`, tlc: { workers: '1' } },
   action: { section: 'PROPERTIES', violation: property => `Action property ${property} is violated`, tlc: { workers: '1' } },
-  liveness: { section: 'PROPERTIES', violation: () => 'Temporal properties were violated', tlc: { workers: 'auto' } },
+  liveness: { section: 'PROPERTIES', violation: () => 'Temporal properties were violated', tlc: { workers: 'auto', liveness: 'final' } },
 };
 
 const isLiveness = (model: Model, property: string): boolean => model.liveness?.includes(property) === true;
