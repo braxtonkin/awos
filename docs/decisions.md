@@ -28,6 +28,35 @@ Rejected options:
 - **A session advisory lock.** A hung worker held its task forever, and its late write was accepted. Both break the spec.
 - **A cap of 2 or 5 lost attempts.** Two parks a task after one crash and one node restart. Five lets a task that always crashes run five times. Three matches the other caps.
 
+### Outbox rows are claimed with a lease
+
+Decided 23 Sep 2026. An engine copy claims an outbox row before it performs the row's action. The claim is one statement that Postgres refuses while another claim's lease on the row is live, and an expired lease frees the row. These rules go with the claim:
+
+- The rows that a state change owes commit in the same transaction as that change.
+- A row can be claimed only when every earlier row of its task is done, so a row that failed for good holds the rows behind it until a person acts. A task's next stage cannot be claimed while any of its rows is owed.
+- When the target cannot catch a duplicate, as with a Jira comment, the performer first looks on the target for the row's marker. If the marker is there, it marks the row done without calling.
+- The performer checks its lease right before the call that performs the action. The call's deadline is the lease's end less a margin, so the call cannot outlast the lease.
+- A row is marked done only after its action took effect.
+- A call that fails only records its error on the row. The claim stays until its lease runs out, and a lease that runs out without a done mark counts as a failed try, whether the call failed, the performer crashed, or it stalled. At the cap, the row fails and its task waits for a person in the same transaction, with the row's last error as the note. A lapse can also come after the action took effect, so a row can fail although its action landed.
+- A person's Retry on a waiting task owes its failed rows again with their tries reset. The first try then finds the marker, or the duplicate, of an action that did land, and marks the row done.
+
+The TLA+ model in `features/outbox/` settled this. It runs two engine copies over two tasks with two rows each. One target catches a duplicate by key, as GitHub refuses a second pull request from one branch, and the other cannot. A failed call's request may land later or never. A performer can crash between any two of its steps, twice in all, and can stall once, after its marker check. A person can press Retry once. Each night the model also runs with three rows per task, three crashes, and two stalls. The crash budgets only keep the model small. Every lapsed claim costs a try, so the model also holds with crashes unbounded. With every rule in place, TLC finds no action that takes effect twice, no row done before its effect, no effect of a state change that rolled back, no row performed out of order, no next stage claimed before every row of its task is done, no row with two live claims, and no owed row that is never done or handed to a person. The model removes each rule in turn, and each removal breaks one of these. Three of the removals settle the question:
+
+- Without the claim, two copies both look for the marker, find none, and both post the same comment.
+- Without the marker check, a copy that crashes after posting and before marking the row done leaves the row owed, and the next copy posts it again.
+- Without the lease check right before the call, a copy that stalls after its marker check wakes and posts after another copy already did.
+
+The model rests on two assumptions that the outbox's code and its connectors must make true:
+
+- A request reaches its target, or is lost, before the lease it was sent under ends by the database's clock. A pause between the lease check and the send, a retry inside the client, or clock skew beyond the margin breaks this.
+- Each action kind's target either catches a duplicate or lets the performer look for the marker. Catching a duplicate means that a repeat is refused or changes nothing, whatever happened since, and the performer reads the refusal as its own earlier success and fetches the result. An action that sets state, such as moving a ticket or a branch, qualifies only when it names the state it expects to replace. A marker qualifies only when the action's own request writes it, nothing removes it, it cannot be guessed, it counts only when the row's own identity wrote it, and the lookup reads every page and every earlier write. A lookup that fails counts as a failed call. A kind whose target meets neither condition, such as a message that cannot be looked up afterwards, cannot be performed at most once across a crash, so it needs its own rule before it is added.
+
+Rejected options:
+
+- **No claim, as the data model draft had it.** Two engine copies post the same comment twice, because a Jira comment or a chat post does not catch a duplicate.
+- **A claim without the marker check.** A crash between the post and the done mark makes the next performer post again.
+- **Release a row as soon as its call fails, and retry after a backoff.** A request still in flight can land after the retry posted, so the comment appears twice. Counting only failed calls also never caps a row whose every try crashes its performer.
+
 ### Each attempt runs in its own Kubernetes Job
 
 Decided 23 Sep 2026. The engine starts one Kubernetes Job per attempt, in the engine's own namespace. The Job clones the repo and runs Codex. It gets only its owner's credentials for that run, and no database or Kubernetes API access. The engine watches the Job, saves what it did as evidence, and records the verdict. This matches how the current AutoWorker runs delivery attempts.
@@ -375,7 +404,6 @@ Each open question names the current lean or default. A lean is not a decision.
 
 - **What the dashboard's Overview shows first.** The lean is what needs the person picked, with the pipeline board and the history one click away.
 - **When AutoWorker posts to chat.** The default is to post when a task parks as waiting, when a routine is overdue, and once a day as a digest.
-- **Whether outbox rows need a claim.** The data model draft has no claim on outbox rows, and Jira comments and chat posts are not idempotent on the other side. The outbox's TLA+ model settles this before the outbox is built.
 - **When sign-in becomes necessary.** Runs now carry personal logins, so picking a person runs an agent with that person's GitHub token and ChatGPT account. The lean is to add sign-in before the first run with real personal credentials.
 - **How a person gives AutoWorker a Codex login.** The lean is a Connect button that has the engine run `codex login --device-auth` and show the person its link and code, so the login is made for AutoWorker by construction.
 - **How a worker that keeps stalling loses its task.** The TLA+ model in `features/tasks/` assumes that a lease that keeps lapsing is reaped at one of its lapses, which it states as strong fairness for the reaper. Nothing guarantees that yet, and the reaper's ticket, AUTO-10, picks the mechanism.
