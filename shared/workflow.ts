@@ -6,7 +6,7 @@ type Capital = 'A' | 'B' | 'C' | 'D' | 'E' | 'F' | 'G' | 'H' | 'I' | 'J' | 'K' |
 
 export type Instruction = `${Capital}${string}.`;
 
-export type StepVerdict = Exclude<Verdict, 'lost' | 'stopped'>;
+export type StepVerdict = Exclude<Verdict, 'lost' | 'stopped' | 'handed_off'>;
 
 type FailureVerdict = Exclude<StepVerdict, 'pass'>;
 

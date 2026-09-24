@@ -3,6 +3,8 @@ import { createServer } from 'node:http';
 import { hostname } from 'node:os';
 import { z } from 'zod';
 import { bridgeListener, noStepRunner, rules } from '../../features/bridge/engine.ts';
+import { landLoops } from '../../features/code-change/land-loop.ts';
+import { coreReview } from '../../features/code-change/land.ts';
 import { checkLoop } from '../../features/credentials/check-loop.ts';
 import { checksFor } from '../../features/credentials/checks.ts';
 import { githubApi } from '../../features/credentials/github-check.ts';
@@ -12,6 +14,7 @@ import { open, writeBack } from '../../features/credentials/store.ts';
 import { providerProblems, reconcile } from '../../features/environments/lifecycle.ts';
 import { providersByName } from '../../features/environments/provider.ts';
 import { clientsFrom, type OpenToken } from '../../features/github/client.ts';
+import { mergeStateReader } from '../../features/github/merge-state.ts';
 import { githubPerformers, outboxOwedAt } from '../../features/github/performers.ts';
 import type { JiraAccess } from '../../features/jira/client.ts';
 import { jiraPerformers } from '../../features/jira/performers.ts';
@@ -19,10 +22,13 @@ import { jiraSearch } from '../../features/jira/source.ts';
 import { connectCluster } from '../../features/jobs/launch.ts';
 import { jobSettings } from '../../features/jobs/settings.ts';
 import { sweep } from '../../features/jobs/sweep.ts';
+import { enqueue } from '../../features/outbox/enqueue.ts';
 import { outboxLoops, registryOf } from '../../features/outbox/perform.ts';
 import { scheduleSource } from '../../features/routines/schedule-source.ts';
 import { postgresNow, scheduler } from '../../features/routines/scheduler.ts';
 import { sourcesByKind } from '../../features/routines/source.ts';
+import { advance, approveFromOutside, handOff } from '../../features/tasks/advance.ts';
+import { claim, renew } from '../../features/tasks/claim.ts';
 import { reaper } from '../../features/tasks/reaper.ts';
 import { startProblems } from '../../features/tasks/start.ts';
 import type { OwedKinds, Performers } from '../../shared/actions.ts';
@@ -53,6 +59,8 @@ const settings = z.object({
   OUTBOX_MAX_TRIES: z.coerce.number().int().positive().default(3),
   ENVIRONMENTS_EVERY_MS: milliseconds.default(30_000),
   ENVIRONMENT_START_DEADLINE_MS: milliseconds.default(600_000),
+  LAND_EVERY_MS: milliseconds.default(10_000),
+  LAND_READ_TIMEOUT_MS: milliseconds.default(20_000),
   ...jobSettings,
   BRIDGE_PORT: z.coerce.number().int().min(0).max(65_535).default(4520),
   BRIDGE_POLL_MS: milliseconds.default(250),
@@ -77,15 +85,26 @@ const githubToken =
 const loopsFor = (given: Settings, key: SealingKey | undefined, db: Database): readonly Loop[] => {
   const jira: JiraAccess = { site: given.JIRA_SITE, timeoutMs: given.JIRA_TIMEOUT_MS, logins: person => openJiraLogin(db, key, person) };
   const sources = sourcesByKind([scheduleSource, jiraSearch(jira)]);
+  const clientFor = clientsFrom(githubToken(db, key), given.GITHUB_API_URL);
   const performers = {
     ...jiraPerformers(jira, db),
-    ...githubPerformers({ clientFor: clientsFrom(githubToken(db, key), given.GITHUB_API_URL), owedAt: outboxOwedAt(db) }),
+    ...githubPerformers({ clientFor, owedAt: outboxOwedAt(db) }),
   } satisfies Performers<ActionKind>;
   const actions = registryOf(performers);
   return [
     reaper({ everyMs: given.REAPER_EVERY_MS, leaseMs: given.LEASE_MS }),
     scheduler({ everyMs: given.SCHEDULER_EVERY_MS, leaseMs: given.ROUTINE_LEASE_MS, sources, workflows, now: postgresNow }),
     reconcile({ providers, everyMs: given.ENVIRONMENTS_EVERY_MS, startDeadlineMs: given.ENVIRONMENT_START_DEADLINE_MS }),
+    ...landLoops({
+      everyMs: given.LAND_EVERY_MS,
+      leaseMs: given.LEASE_MS,
+      read: mergeStateReader(db, clientFor),
+      readTimeoutMs: given.LAND_READ_TIMEOUT_MS,
+      review: coreReview,
+      enqueue,
+      clock: realClock,
+      tasks: { claim, renew, handOff, approveFromOutside, finish: (writer, attempt, report, now, then) => advance(writer, workflows, attempt, report, now, then) },
+    }),
     ...(given.JOB_IMAGE === undefined ? [] : [sweep({ everyMs: given.SWEEP_EVERY_MS, cluster: connectCluster(given.JOB_NAMESPACE) })]),
     ...outboxLoops({ everyMs: given.OUTBOX_EVERY_MS, leaseMs: given.OUTBOX_LEASE_MS, marginMs: given.OUTBOX_MARGIN_MS, maxTries: given.OUTBOX_MAX_TRIES, clock: realClock, registry: actions }),
     ...(key === undefined
