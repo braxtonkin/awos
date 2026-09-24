@@ -15,6 +15,7 @@ import { parkedScenario } from './parked.ts';
 import { seconds } from './report.ts';
 import { roundTripScenario } from './round-trip.ts';
 import { kindAddress } from '../../tools/verify/cluster.ts';
+import { kind } from '../../tools/verify/kind.ts';
 import { startLocalWorld } from './local-world.ts';
 import { worldScenario } from './world-lane.ts';
 import { sandboxWorld, worldNames, type World, type WorldName } from './world.ts';
@@ -38,6 +39,8 @@ const openWorld = (name: WorldName, repository: string): Promise<World> => {
 };
 
 async function localWorld(repository: string): Promise<World> {
+  const broken = (await kind.run(['up'])).find(check => !check.passed);
+  if (broken !== undefined) throw new Error(`kind did not come up: ${broken.name}, ${broken.detail}`);
   const local = await startLocalWorld(await kindAddress(), repository);
   return {
     name: 'local',
