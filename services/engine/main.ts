@@ -8,17 +8,21 @@ import { coreReview } from '../../features/code-change/land.ts';
 import { checkLoop } from '../../features/credentials/check-loop.ts';
 import { checksFor } from '../../features/credentials/checks.ts';
 import { githubApi } from '../../features/credentials/github-check.ts';
+import { openJiraLogin } from '../../features/credentials/jira-login.ts';
 import { sealingKey, type SealingKey } from '../../features/credentials/seal.ts';
 import { open, writeBack } from '../../features/credentials/store.ts';
 import { providerProblems, reconcile } from '../../features/environments/lifecycle.ts';
 import { providersByName } from '../../features/environments/provider.ts';
-import { enqueue } from '../../features/outbox/enqueue.ts';
+import { clientsFrom, type OpenToken } from '../../features/github/client.ts';
+import { mergeStateReader } from '../../features/github/merge-state.ts';
+import { githubPerformers, outboxOwedAt } from '../../features/github/performers.ts';
+import type { JiraAccess } from '../../features/jira/client.ts';
+import { jiraPerformers } from '../../features/jira/performers.ts';
+import { jiraSearch } from '../../features/jira/source.ts';
 import { connectCluster } from '../../features/jobs/launch.ts';
 import { jobSettings } from '../../features/jobs/settings.ts';
 import { sweep } from '../../features/jobs/sweep.ts';
-import { clientsFrom, type ClientFor, type OpenToken } from '../../features/github/client.ts';
-import { mergeStateReader } from '../../features/github/merge-state.ts';
-import { githubPerformers, outboxOwedAt } from '../../features/github/performers.ts';
+import { enqueue } from '../../features/outbox/enqueue.ts';
 import { outboxLoops, registryOf } from '../../features/outbox/perform.ts';
 import { scheduleSource } from '../../features/routines/schedule-source.ts';
 import { postgresNow, scheduler } from '../../features/routines/scheduler.ts';
@@ -47,6 +51,8 @@ const settings = z.object({
   CHECK_LEASE_MS: milliseconds.default(300_000),
   CHECK_TIMEOUT_MS: milliseconds.default(120_000),
   GITHUB_API_URL: z.url({ protocol: /^https?$/ }).default(githubApi),
+  JIRA_SITE: z.url({ protocol: /^https?$/ }).optional(),
+  JIRA_TIMEOUT_MS: milliseconds.default(30_000),
   OUTBOX_EVERY_MS: milliseconds.default(1_000),
   OUTBOX_LEASE_MS: milliseconds.default(60_000),
   OUTBOX_MARGIN_MS: milliseconds.default(5_000),
@@ -64,8 +70,6 @@ const settings = z.object({
 
 type Settings = z.infer<typeof settings>;
 
-const sources = sourcesByKind([scheduleSource]);
-
 const providers = providersByName([]);
 
 type ActionKind = OwedKinds<Workflow>;
@@ -78,43 +82,50 @@ const githubToken =
     return 'secret' in opened ? { token: opened.secret } : { failed: opened.reason };
   };
 
-const githubClients = (db: Database, given: Settings, key: SealingKey | undefined): ClientFor => clientsFrom(githubToken(db, key), given.GITHUB_API_URL);
-
-const performersFor = (db: Database, given: Settings, key: SealingKey | undefined) =>
-  ({
-    ...githubPerformers({ clientFor: githubClients(db, given, key), owedAt: outboxOwedAt(db) }),
-  }) satisfies Performers<ActionKind>;
-
-const loopsFor = (db: Database, given: Settings, key: SealingKey | undefined): readonly Loop[] => [
-  reaper({ everyMs: given.REAPER_EVERY_MS, leaseMs: given.LEASE_MS }),
-  scheduler({ everyMs: given.SCHEDULER_EVERY_MS, leaseMs: given.ROUTINE_LEASE_MS, sources, workflows, now: postgresNow }),
-  reconcile({ providers, everyMs: given.ENVIRONMENTS_EVERY_MS, startDeadlineMs: given.ENVIRONMENT_START_DEADLINE_MS }),
-  ...landLoops({
-    everyMs: given.LAND_EVERY_MS,
-    leaseMs: given.LEASE_MS,
-    read: mergeStateReader(db, githubClients(db, given, key)),
-    readTimeoutMs: given.LAND_READ_TIMEOUT_MS,
-    review: coreReview,
-    enqueue,
-    clock: realClock,
-    tasks: { claim, renew, handOff, approveFromOutside, finish: (db, attempt, report, now, then) => advance(db, workflows, attempt, report, now, then) },
-  }),
-  ...(given.JOB_IMAGE === undefined ? [] : [sweep({ everyMs: given.SWEEP_EVERY_MS, cluster: connectCluster(given.JOB_NAMESPACE) })]),
-  ...outboxLoops({ everyMs: given.OUTBOX_EVERY_MS, leaseMs: given.OUTBOX_LEASE_MS, marginMs: given.OUTBOX_MARGIN_MS, maxTries: given.OUTBOX_MAX_TRIES, clock: realClock, registry: registryOf(performersFor(db, given, key)) }),
-  ...(key === undefined
-    ? []
-    : [
-        checkLoop({
-          everyMs: given.CHECKS_EVERY_MS,
-          leaseMs: given.CHECK_LEASE_MS,
-          key,
-          checks: checksFor({ codex: { timeoutMs: given.CHECK_TIMEOUT_MS }, github: { baseUrl: given.GITHUB_API_URL, timeoutMs: given.CHECK_TIMEOUT_MS } }),
-          checker: `engine ${hostname()} ${String(process.pid)}`,
-          now: () => new Date(),
-          writeBack,
-        }),
-      ]),
-];
+const loopsFor = (given: Settings, key: SealingKey | undefined, db: Database): readonly Loop[] => {
+  const jira: JiraAccess = { site: given.JIRA_SITE, timeoutMs: given.JIRA_TIMEOUT_MS, logins: person => openJiraLogin(db, key, person) };
+  const sources = sourcesByKind([scheduleSource, jiraSearch(jira)]);
+  const clientFor = clientsFrom(githubToken(db, key), given.GITHUB_API_URL);
+  const performers = {
+    ...jiraPerformers(jira, db),
+    ...githubPerformers({ clientFor, owedAt: outboxOwedAt(db) }),
+  } satisfies Performers<ActionKind>;
+  const actions = registryOf(performers);
+  return [
+    reaper({ everyMs: given.REAPER_EVERY_MS, leaseMs: given.LEASE_MS }),
+    scheduler({ everyMs: given.SCHEDULER_EVERY_MS, leaseMs: given.ROUTINE_LEASE_MS, sources, workflows, now: postgresNow }),
+    reconcile({ providers, everyMs: given.ENVIRONMENTS_EVERY_MS, startDeadlineMs: given.ENVIRONMENT_START_DEADLINE_MS }),
+    ...landLoops({
+      everyMs: given.LAND_EVERY_MS,
+      leaseMs: given.LEASE_MS,
+      read: mergeStateReader(db, clientFor),
+      readTimeoutMs: given.LAND_READ_TIMEOUT_MS,
+      review: coreReview,
+      enqueue,
+      clock: realClock,
+      tasks: { claim, renew, handOff, approveFromOutside, finish: (writer, attempt, report, now, then) => advance(writer, workflows, attempt, report, now, then) },
+    }),
+    ...(given.JOB_IMAGE === undefined ? [] : [sweep({ everyMs: given.SWEEP_EVERY_MS, cluster: connectCluster(given.JOB_NAMESPACE) })]),
+    ...outboxLoops({ everyMs: given.OUTBOX_EVERY_MS, leaseMs: given.OUTBOX_LEASE_MS, marginMs: given.OUTBOX_MARGIN_MS, maxTries: given.OUTBOX_MAX_TRIES, clock: realClock, registry: actions }),
+    ...(key === undefined
+      ? []
+      : [
+          checkLoop({
+            everyMs: given.CHECKS_EVERY_MS,
+            leaseMs: given.CHECK_LEASE_MS,
+            key,
+            checks: checksFor({
+              codex: { timeoutMs: given.CHECK_TIMEOUT_MS },
+              github: { baseUrl: given.GITHUB_API_URL, timeoutMs: given.CHECK_TIMEOUT_MS },
+              jira: { site: given.JIRA_SITE, timeoutMs: given.CHECK_TIMEOUT_MS },
+            }),
+            checker: `engine ${hostname()} ${String(process.pid)}`,
+            now: () => new Date(),
+            writeBack,
+          }),
+        ]),
+  ];
+};
 
 const say = (line: string): void => {
   process.stdout.write(`${line}\n`);
@@ -156,7 +167,7 @@ async function run(given: Settings, key: SealingKey | undefined): Promise<void> 
     });
     const address = bridge.address();
     say(`The engine serves the bridge on port ${typeof address === 'object' && address !== null ? String(address.port) : String(given.BRIDGE_PORT)}.`);
-    const loops = loopsFor(db, given, key);
+    const loops = loopsFor(given, key, db);
     if (key === undefined) say('The engine has no CREDENTIAL_KEY, so it opens and checks no credentials.');
     if (given.JOB_IMAGE === undefined) say('The engine has no JOB_IMAGE, so it launches no Jobs and sweeps none.');
     say(`The engine runs the workflows ${[...workflows.keys()].join(', ')}, the Verify providers ${[...providers.keys()].join(', ')}, and the loops ${loops.map(loop => `${loop.name} every ${String(loop.everyMs)} ms`).join(', ')}.`);
