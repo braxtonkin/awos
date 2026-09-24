@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises';
 import { parseArgs } from 'node:util';
 import type { z } from 'zod';
 import { fail, pass, type Check, type Scenario } from '../../tools/verify/check.ts';
-import { accessCopy, faultNames, runAsNames, type Fault, type RunAs } from './autoworker.ts';
+import { accessCopy, fakeCodexLogin, faultNames, runAsNames, standInImage, type Fault, type RunAs } from './autoworker.ts';
 import { Catalog, catalog, type Entry } from './catalog.ts';
 import { cleanScenarios } from './clean-lanes.ts';
 import { driverNames, type DriverName } from './driver.ts';
@@ -14,6 +14,9 @@ import { parsePayload, PayloadRejected } from './payload.ts';
 import { parkedScenario } from './parked.ts';
 import { seconds } from './report.ts';
 import { roundTripScenario } from './round-trip.ts';
+import { kindAddress } from '../../tools/verify/cluster.ts';
+import { startLocalWorld } from './local-world.ts';
+import { worldScenario } from './world-lane.ts';
 import { sandboxWorld, worldNames, type World, type WorldName } from './world.ts';
 
 const defaultRepository = 'braxtonkdev/autoworker-oss';
@@ -30,9 +33,26 @@ const openWorld = (name: WorldName, repository: string): Promise<World> => {
     case 'sandbox':
       return Promise.resolve(sandboxWorld(repository, accessCopy));
     case 'local':
-      return Promise.reject(new Error('the local world is not wired yet'));
+      return localWorld(repository);
   }
 };
+
+async function localWorld(repository: string): Promise<World> {
+  const local = await startLocalWorld(await kindAddress(), repository);
+  return {
+    name: 'local',
+    jira: local.jira,
+    github: local.github,
+    engine: {
+      settings: { ...local.engine.settings },
+      secrets: { github: local.engine.secrets.GITHUB_TOKEN, jiraLogin: local.engine.secrets.AUTOWORKER_JIRA_LOGIN },
+      codexLogin: () => Promise.resolve(fakeCodexLogin()),
+      image: standInImage,
+      trustLogins: true,
+    },
+    stop: local.stop,
+  };
+}
 
 const shuffled = <T>(items: readonly T[]): readonly T[] =>
   items
@@ -264,4 +284,4 @@ const e2ePayload: Scenario = {
   },
 };
 
-export const scenarios: readonly Scenario[] = [e2e, p7Lane, e2eBranch, e2ePayload, ...cleanScenarios, roundTripScenario, parkedScenario];
+export const scenarios: readonly Scenario[] = [e2e, p7Lane, worldScenario, e2eBranch, e2ePayload, ...cleanScenarios, roundTripScenario, parkedScenario];
