@@ -174,7 +174,7 @@ async function overheadOf(world: World, attempt: string): Promise<Overhead | und
 
 async function roundTrip(world: World, image: string, label: string, plan: (stored: string) => boolean): Promise<readonly Check[]> {
   const key = `${label}-a`;
-  await addTask(world, key, 'Make titleCase capitalize each word.');
+  await addTask(world, key, 'Change titleCase in src/words.ts so it returns the text with the first letter of each space-separated word in upper case and the rest unchanged. The behavior is fully specified here, so plan without asking questions.');
   const engine = startEngine(world.store, engineSettings(world, image), world.out);
   try {
     const specify = await waitForAttempt(world, key, 'specify');

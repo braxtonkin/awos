@@ -5,7 +5,7 @@ import type { AgentSteps, Earlier, Evidence, Ran } from '../../shared/agent-step
 import type { Database } from '../../shared/db/client.ts';
 import { finalMessage, reduce } from '../../shared/items.ts';
 import type { Transacting } from '../../shared/transaction.ts';
-import { outputSchema, type StepKind, type Workflow } from '../../shared/workflow.ts';
+import { outputSchema, runByAgent, type AgentStepKind, type Workflow } from '../../shared/workflow.ts';
 import { advanceWithin, type Then } from './advance.ts';
 import { taskBranch, taskBranchHead } from './continuation.ts';
 import type { Workflows } from './start.ts';
@@ -21,12 +21,13 @@ export type Step = {
   readonly title: string;
   readonly number: number;
   readonly workflow: Workflow;
-  readonly kind: StepKind;
+  readonly kind: AgentStepKind;
   readonly agent: AgentSteps;
   readonly routine: string;
   readonly version: number;
   readonly goal: string;
   readonly startStatus: string | null;
+  readonly endStatus: string | null;
   readonly repository: { readonly github: string; readonly branch: string; readonly fastTestCommand: string | null; readonly jobImage: string | null } | null;
   readonly runAs: { readonly id: string; readonly name: string; readonly email: string };
   readonly branch: string | null;
@@ -59,6 +60,7 @@ export async function stepOf(db: Database, runner: StepRunner, attempt: string):
       'task.workflow',
       'version.goal',
       'version.jira_start_status',
+      'version.jira_end_status',
       'person.id as person_id',
       'person.name as person_name',
       'person.email as person_email',
@@ -73,7 +75,7 @@ export async function stepOf(db: Database, runner: StepRunner, attempt: string):
   const workflow = runner.workflows.get(row.workflow);
   const kind = workflow?.steps.find(candidate => candidate.name === row.step);
   const agent = runner.agents.get(row.workflow);
-  if (workflow === undefined || kind === undefined || agent === undefined || kind.runBy !== 'agent') {
+  if (workflow === undefined || kind === undefined || agent === undefined || !runByAgent(kind)) {
     throw new Error(`Attempt ${attempt} is at ${row.step} of ${row.workflow}, which no agent runs in this engine.`);
   }
   return {
@@ -89,6 +91,7 @@ export async function stepOf(db: Database, runner: StepRunner, attempt: string):
     version: row.routine_version,
     goal: row.goal,
     startStatus: row.jira_start_status,
+    endStatus: row.jira_end_status,
     repository:
       row.github === null || row.repository_branch === null
         ? null
@@ -300,6 +303,8 @@ const owing =
       pullRequestOwed: opened.length > 0,
       firstPass: earlierPasses.length === 0,
       startStatus: step.startStatus,
+      endStatus: step.endStatus,
+      ends: standing.state === 'done',
       output,
       evidence,
     });

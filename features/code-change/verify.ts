@@ -81,7 +81,8 @@ function settleChecks(): readonly Check[] {
 
 function promptCheck(): Check {
   const name = "Verify's core prompt names each command the engine matches exactly";
-  const prompt = workflow.steps.find(kind => kind.name === 'verify')?.prompt ?? '';
+  const found = workflow.steps.find(kind => kind.name === 'verify');
+  const prompt = found?.runBy === 'agent' ? found.prompt : '';
   const missing = [reproduction.show, reproduction.before, reproduction.after].filter(command => !prompt.includes(`\`${command}\``));
   return missing.length === 0 ? pass(name, 'all 3') : fail(name, `missing ${missing.join(', ')}`);
 }

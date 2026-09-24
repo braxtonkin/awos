@@ -113,8 +113,6 @@ export const workflows: readonly [Workflow, ...Workflow[]] = [
         name: 'land',
         reads: ['implement', 'verify'],
         runBy: 'engine',
-        prompt: 'Simulated land.',
-        startsEnvironment: false,
         needsRepository: true,
         canEnd: true,
         owes: [{ kind: 'pr.merge', irreversible: true }],

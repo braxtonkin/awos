@@ -31,6 +31,8 @@ export type Verdicted = {
   readonly pullRequestOwed: boolean;
   readonly firstPass: boolean;
   readonly startStatus: string | null;
+  readonly endStatus: string | null;
+  readonly ends: boolean;
   readonly output: unknown;
   readonly evidence: Evidence | null;
 };

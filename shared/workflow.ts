@@ -33,12 +33,11 @@ const builtBySteps = new WeakSet<object>();
 
 type Judge = ((output: unknown) => StepVerdict) & { readonly [judged]: true };
 
-export type StepKind<K extends string = string> = {
+export type RunBy = { readonly runBy: 'agent'; readonly prompt: string; readonly startsEnvironment: boolean } | { readonly runBy: 'engine' };
+
+type Common<K extends string> = {
   readonly name: string;
   readonly reads: readonly string[];
-  readonly runBy: 'agent' | 'engine';
-  readonly prompt: string;
-  readonly startsEnvironment: boolean;
   readonly needsRepository: boolean;
   readonly canEnd: boolean;
   readonly owes: readonly OwedAction<K>[];
@@ -49,7 +48,13 @@ export type StepKind<K extends string = string> = {
   readonly judge: Judge;
 };
 
-type Declared<O extends Review, F extends Failures, K extends string> = Omit<StepKind<K>, 'output' | 'failures' | 'blocked' | 'judge'> & {
+export type StepKind<K extends string = string> = Common<K> & RunBy;
+
+export type AgentStepKind<K extends string = string> = StepKind<K> & { readonly runBy: 'agent' };
+
+export const runByAgent = (kind: StepKind): kind is AgentStepKind => kind.runBy === 'agent';
+
+type Declared<O extends Review, F extends Failures, K extends string> = Omit<Common<K>, 'output' | 'failures' | 'blocked' | 'judge'> & RunBy & {
   readonly output: z.ZodType<O>;
   readonly failures: F;
   readonly blocked: keyof F & Unasked;

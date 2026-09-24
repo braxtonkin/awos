@@ -146,7 +146,14 @@ function implemented(verdicted: Verdicted): readonly Owe<Kind>[] {
   return [...advanced, ...opened, ...comment(named.key, 'AutoWorker pushed the change to its draft pull request.', true), ...deletions(verdicted)];
 }
 
+const ended = ({ ends, endStatus, startStatus, ticket: named }: Verdicted): readonly Owe<Kind>[] =>
+  ends && endStatus !== null && isTicket(named.key) ? [owe(actionKinds.ticketTransition, { ticket: named.key, status: endStatus, from: startStatus })] : [];
+
 function owes(verdicted: Verdicted): readonly Owe<Kind>[] {
+  return [...stepOwes(verdicted), ...ended(verdicted)];
+}
+
+function stepOwes(verdicted: Verdicted): readonly Owe<Kind>[] {
   const { step, verdict, ticket: named, evidence } = verdicted;
   switch (step) {
     case 'specify': {

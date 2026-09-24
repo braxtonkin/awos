@@ -77,8 +77,6 @@ export const workflow = {
       name: 'land',
       reads: ['implement', 'verify'],
       runBy: 'engine',
-      prompt: "Bring the pull request to a state GitHub reports mergeable under the repository's own rules. Summarize its checks and reviews in a text block.",
-      startsEnvironment: false,
       needsRepository: true,
       canEnd: true,
       owes: [{ kind: actionKinds.prMerge.kind, irreversible: true }],
