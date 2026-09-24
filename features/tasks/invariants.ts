@@ -64,6 +64,21 @@ const atLand: readonly Statement[] = [
   sql`update task set step = 'land', approved = '{specify}' where id = 1`,
 ];
 
+const lostApprovalLog = sql`create table lost_approval (task_id bigint not null references task, gate text not null)`;
+
+const approvalsGoMissing = (task: string) => sql`with lost as (update task set approved = '{}' where id = ${task} and approved <> '{}' returning id, old.approved)
+  insert into lost_approval (task_id, gate) select id, unnest(approved)::text from lost`;
+
+export async function logLostApprovals(db: Database): Promise<void> {
+  await lostApprovalLog.execute(db);
+}
+
+export async function loseApprovals(db: Database, task: string): Promise<void> {
+  await approvalsGoMissing(task).execute(db);
+}
+
+const lostAtLand: readonly Statement[] = [...atLand, approvalsGoMissing('1')];
+
 const liveAttemptAtLand = sql`insert into attempt (task_id, routine_id, routine_version, step, epoch, run_as_id, started_at, lease_until)
   values (1, 1, 1, 'land', 0, 1, ${t0} + interval '11 seconds', ${t0} + interval '41 seconds')`;
 
@@ -89,10 +104,12 @@ export const properties = {
     breaks: sql`select t.id, t.step, t.retries, t.lost, t.input_waits, t.counts from task t
       where least(t.retries, t.lost, t.input_waits) < 0
         or exists (select 1 from jsonb_each(t.counts) c where jsonb_typeof(c.value) <> 'number' or (c.value)::int < 0)
-        or not exists (select 1 from facts f where f.workflow = t.workflow and f.step = t.step)`,
+        or not exists (select 1 from facts f where f.workflow = t.workflow and f.step = t.step)
+        or exists (select 1 from unnest(t.approved) a where not exists (select 1 from facts f where f.workflow = t.workflow and f.step = a::text and not f.is_last))`,
     plants: [
       { setup: [], violation: sql`update task set lost = -1 where id = 1` },
       { setup: [], violation: sql`update task set counts = '{"rounds": -1}' where id = 1` },
+      { setup: [], violation: sql`update task set approved = '{land}' where id = 1` },
     ],
   },
   OneLiveAttempt: {
@@ -214,25 +231,21 @@ export const properties = {
   },
   ApprovalsMatchGatesPassed: {
     moment: 'each-step',
-    breaks: sql`select t.id, t.approved, v.gates
-      from task t
-      join versions v on v.id = t.id
-      join facts fh on fh.workflow = t.workflow and fh.step = t.step
-      cross join lateral (
-        select array(select a::text from unnest(t.approved) a order by 1) as approved,
-               array(select g from unnest(v.gates) g join facts f on f.workflow = t.workflow and f.step = g where f.position < fh.position order by g) as passed
-      ) held
-      where case when fh.irreversible then not (held.approved <@ held.passed) else held.approved is distinct from held.passed end`,
+    breaks: sql`select g.id, g.approved, g.passed, g.missing from gated g
+      where g.approved is distinct from array(select p from unnest(g.passed) p where p <> all(g.missing) order by 1)`,
     plants: [
       { setup: [], violation: sql`update task set approved = '{specify}' where id = 1` },
       { setup: atLand, violation: sql`update task set approved = '{implement,specify}' where id = 1` },
+      { setup: atLand, violation: sql`update task set approved = '{}' where id = 1` },
+      { setup: lostAtLand, violation: sql`update task set step = 'implement', approved = '{specify}' where id = 1` },
     ],
   },
   StoppedTaskCanResume: {
     moment: 'each-step',
     breaks: sql`select s.id, s.was_step, s.step, s.was_approved, s.approved from diff s
-      where s.id in (select task_id from acted) and s.was_state = 'stopped' and s.state = 'ready'
-        and (s.step <> s.was_step
+      where s.id in (select task_id from acted where kind = 'retry_task') and s.was_state = 'stopped'
+        and (s.state <> 'ready'
+             or s.step <> s.was_step
              or s.approved is distinct from s.was_approved
              or not (s.was_outputs <@ s.outputs)
              or exists (select 1 from charges c where c.workflow = s.workflow and c.kind = 'review'
@@ -248,6 +261,14 @@ export const properties = {
         violation: sql`with retried as (insert into human_action (id, at, person_id, kind, task_id)
                          values ('00000000-0000-4000-8000-000000000007', ${t0} + interval '3 seconds', 1, 'retry_task', 1) returning task_id)
                        update task set state = 'ready', stopped_by = null, approved = '{}' from retried where task.id = retried.task_id`,
+      },
+      {
+        setup: [
+          personActs('stop_task', '00000000-0000-4000-8000-000000000006'),
+          sql`update task set state = 'stopped', stopped_by = '00000000-0000-4000-8000-000000000006' where id = 1`,
+        ],
+        violation: sql`insert into human_action (id, at, person_id, kind, task_id)
+                       values ('00000000-0000-4000-8000-000000000007', ${t0} + interval '3 seconds', 1, 'retry_task', 1)`,
       },
     ],
   },
@@ -346,6 +367,7 @@ export const properties = {
                  and (s.step, s.retries, s.lost, s.input_waits, s.counts, s.approved, s.outputs)
                      = (s.was_step, s.was_retries, s.was_lost, s.was_input_waits, s.was_counts, s.was_approved, s.was_outputs))
         and not (exists (select 1 from facts f where f.workflow = s.workflow and f.step = s.was_step and f.irreversible) and s.approved = '{}'
+                 and s.id in (select task_id from went_missing)
                  and (s.step, s.state, s.waiting_on, s.retries, s.lost, s.input_waits, s.counts, s.outputs)
                      is not distinct from (s.was_step, s.was_state, s.was_waiting_on, s.was_retries, s.was_lost, s.was_input_waits, s.was_counts, s.was_outputs))`,
     plants: [
@@ -373,6 +395,7 @@ export const properties = {
         violation: sql`update task set approved = '{}' where id = 1`,
       },
       { setup: atLand, violation: sql`update task set approved = '{}', retries = 1 where id = 1` },
+      { setup: atLand, violation: sql`update task set approved = '{}' where id = 1` },
     ],
   },
   AttemptEndsOnlyWithItsTask: {
@@ -386,12 +409,16 @@ export const properties = {
     breaks: sql`select s.id, c.counter, s.step, s.state from diff s
       join charges c on c.workflow = s.workflow and c.kind = 'return'
       where coalesce((s.counts ->> c.counter)::int, 0) > coalesce((s.was_counts ->> c.counter)::int, 0)
-        and not (s.step = c.to_step or s.state = 'waiting')`,
+        and not (s.step = c.to_step or (s.state = 'waiting' and s.waiting_on = 'retry'))`,
     plants: [
       { setup: [], violation: sql`update task set counts = '{"rounds": 1}' where id = 1` },
       {
         setup: [finishedAttempt('specify', 'pass'), finishedAttempt('implement', 'pass'), finishedAttempt('verify', 'pass'), sql`update task set step = 'land', approved = '{specify}' where id = 1`],
         violation: sql`update task set counts = '{"landRounds": 1}' where id = 1`,
+      },
+      {
+        setup: atLand,
+        violation: sql`update task set counts = '{"landRounds": 1}', state = 'waiting', waiting_on = 'outside_approval', waiting_reason = 'Planted.' where id = 1`,
       },
     ],
   },
@@ -512,6 +539,13 @@ export const properties = {
       where a.id = any(p.live) and a.verdict = 'lost' and a.lease_until >= checked_at`,
     plants: [{ setup: [liveAttempt], violation: sql`update attempt set finished_at = ${t0} + interval '20 seconds', verdict = 'lost' where id = 1`, checkedAtSeconds: 20 }],
   },
+  LapsedLeaseNeverRenews: {
+    moment: 'each-step',
+    breaks: sql`select a.id as attempt, a.task_id, l.lease_until as lapsed_at, a.lease_until, checked_at as renewed_by
+      from attempt a join held_leases l on l.id = a.id
+      where not graced and a.finished_at is null and l.lease_until < checked_at and a.lease_until > l.lease_until`,
+    plants: [{ setup: [liveAttempt], violation: sql`update attempt set lease_until = ${t0} + interval '90 seconds' where id = 1` }],
+  },
   ReviewsOnlyGrow: {
     moment: 'each-step',
     breaks: sql`select s.id, c.counter, s.was_counts ->> c.counter as was, s.counts ->> c.counter as count
@@ -566,7 +600,7 @@ export type Violation = { readonly property: PropertyName; readonly row: unknown
 
 export type Watch = {
   readonly atStart: readonly Violation[];
-  readonly step: (checkedAt: Date) => Promise<readonly Violation[]>;
+  readonly step: (checkedAt: Date, graced: boolean) => Promise<readonly Violation[]>;
   readonly settled: () => Promise<readonly Violation[]>;
 };
 
@@ -647,10 +681,28 @@ const helpers = (workflows: readonly Workflow[], everyMs: number) => sql`
            w.latest as was_latest, w.latest_verdict as was_latest_verdict, r.waiting_reason,
            exists (select 1 from attempt a, prior p where a.task_id = r.id and a.id = any(p.live)) as was_live,
            r.runs_as
-    from record r join was w on w.id = r.id)`;
+    from record r join was w on w.id = r.id),
+  went_missing as (
+    select l.task_id, l.gate from lost_approval l
+    where not exists (select 1 from prior) or exists (select 1 from prior p where age(l.xmin) < age(p.xid))),
+  held_leases as (select * from jsonb_to_recordset(coalesce(before->'leases', '[]')) as l(id bigint, lease_until timestamptz)),
+  carried as (select * from jsonb_to_recordset(coalesce(before->'missing', '[]')) as c(id bigint, missing text[])),
+  gated as (
+    select t.id, held.approved, held.passed,
+           array(select p from unnest(held.passed) p
+                 where p = any(coalesce(c.missing, '{}')) or exists (select 1 from went_missing m where m.task_id = t.id and m.gate = p)
+                 order by 1) as missing
+    from task t
+    join versions v on v.id = t.id
+    join facts fh on fh.workflow = t.workflow and fh.step = t.step
+    left join carried c on c.id = t.id
+    cross join lateral (
+      select array(select a::text from unnest(t.approved) a order by 1) as approved,
+             array(select g from unnest(v.gates) g join facts f on f.workflow = t.workflow and f.step = g where f.position < fh.position order by g) as passed
+    ) held)`;
 
 const install = (workflows: readonly Workflow[], everyMs: number) => sql`
-  create function check_step(before jsonb, checked_at timestamptz) returns jsonb language plpgsql as $check$
+  create function check_step(before jsonb, checked_at timestamptz, graced boolean) returns jsonb language plpgsql as $check$
   declare
     own constant xid := pg_current_xact_id()::xid;
     deadline constant timestamptz := clock_timestamp() + interval '1 second';
@@ -674,7 +726,9 @@ const install = (workflows: readonly Workflow[], everyMs: number) => sql`
           'live', coalesce((select jsonb_agg(id) from attempt where finished_at is null), '[]'::jsonb),
           'tasks', coalesce((select jsonb_agg(jsonb_build_object('id', id, 'step', step, 'state', state, 'waiting_on', waiting_on,
             'retries', retries, 'lost', lost, 'input_waits', input_waits, 'counts', counts, 'approved', approved, 'outputs', outputs,
-            'latest', latest, 'latest_verdict', latest_verdict)) from record), '[]'::jsonb))));
+            'latest', latest, 'latest_verdict', latest_verdict)) from record), '[]'::jsonb),
+          'leases', coalesce((select jsonb_agg(jsonb_build_object('id', id, 'lease_until', lease_until)) from attempt where finished_at is null), '[]'::jsonb),
+          'missing', coalesce((select jsonb_agg(jsonb_build_object('id', id, 'missing', missing)) from gated), '[]'::jsonb))));
   end
   $check$`;
 
@@ -691,13 +745,13 @@ export async function watch(db: Database, workflows: readonly Workflow[], everyM
   }
   await db.executeQuery(compiled);
   let before: z.infer<typeof answer>['state'] = null;
-  const step = async (checkedAt: Date): Promise<readonly Violation[]> => {
-    const { rows } = await sql<{ result: unknown }>`select check_step(${before === null ? null : JSON.stringify(before)}::jsonb, ${checkedAt}::timestamptz) as result`.execute(db);
+  const step = async (checkedAt: Date, graced: boolean): Promise<readonly Violation[]> => {
+    const { rows } = await sql<{ result: unknown }>`select check_step(${before === null ? null : JSON.stringify(before)}::jsonb, ${checkedAt}::timestamptz, ${graced}::boolean) as result`.execute(db);
     const checked = answer.parse(rows[0]?.result);
     before = checked.state;
     return checked.violations;
   };
-  const atStart = await step(startedAt);
+  const atStart = await step(startedAt, false);
   return {
     atStart,
     step,
@@ -708,7 +762,7 @@ export async function watch(db: Database, workflows: readonly Workflow[], everyM
 const namesOf = (found: readonly Violation[]): readonly PropertyName[] => [...new Set(found.map(violation => violation.property))];
 
 const checksAt: Readonly<Record<Moment, (watched: Watch, checkedAt: Date) => Promise<readonly Violation[]>>> = {
-  'each-step': (watched, checkedAt) => watched.step(checkedAt),
+  'each-step': (watched, checkedAt) => watched.step(checkedAt, false),
   'after-quiet-phase': watched => watched.settled(),
 };
 
@@ -716,7 +770,7 @@ async function provePlant(postgres: TestPostgres, workflows: readonly Workflow[]
   const scratch = await postgres.scratch();
   const db = connect(scratch.url, 1);
   try {
-    for (const statement of [...world, ...plant.setup]) await statement.execute(db);
+    for (const statement of [lostApprovalLog, ...world, ...plant.setup]) await statement.execute(db);
     const checkedAt = new Date(plantedAt + (plant.checkedAtSeconds ?? plantCheckedAtSeconds) * 1000);
     const watched = await watch(db, workflows, plantedEveryMs, checkedAt);
     const atStart = await checksAt[moment](watched, checkedAt);
