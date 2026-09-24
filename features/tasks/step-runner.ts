@@ -184,7 +184,7 @@ async function lostSummary(db: Database, step: Step): Promise<readonly string[]>
 async function routineStep(db: Database, step: Step): Promise<{ readonly instructions: string; readonly skills: readonly string[] }> {
   const row = await db
     .selectFrom('routine_step')
-    .select(['routine_step.instructions', 'routine_step.skills'])
+    .select(['routine_step.instructions', sql<string[]>`routine_step.skills::text[]`.as('skills')])
     .where('routine_step.routine_id', '=', step.routine)
     .where('routine_step.version', '=', step.version)
     .where('routine_step.step', '=', step.kind.name)
