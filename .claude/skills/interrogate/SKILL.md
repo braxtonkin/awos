@@ -1,7 +1,6 @@
 ---
 name: interrogate
 description: "Use for \"interrogate\", \"adversarial review\", \"multi-model review\", \"panel review\", \"challenge this\", \"stress test this code\", \"find blind spots\", or \"tear this apart\". Several independent Opus 5.5 reviewers challenge changes from distinct lenses."
-disable-model-invocation: true
 model: claude-opus-5-5
 ---
 
