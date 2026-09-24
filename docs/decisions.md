@@ -445,6 +445,40 @@ Rejected options:
 - **A separate private sandbox repository.** Where AutoWorker runs later may not reach a private repository under the owner's account.
 - **Merge sandbox changes into main.** Every run would add commits to main and run main's CI, and runs would stop starting from the same code.
 
+### Stop does not recall a pull request from the merge queue
+
+Decided 24 Sep 2026. Once Land has put a pull request in GitHub's merge queue, GitHub owns the merge. Stop ends AutoWorker's own work on the task, and the pull request may still merge. The task page says so. `main` in this repository has no merge queue, so the case can't arise here yet.
+
+When the queue ejects a pull request, the `pr.merge` row records the ejection and its reason, and Land fails that attempt once. Land's next pass reads the pull request past that ejection. Red checks or a conflict send the task back to Implement with the reason, and a ready pull request joins the queue again. These failures count toward the stage's retries, and after them the task waits for a person.
+
+Rejected options:
+
+- **Stop owes a `pr.dequeue` action.** It needs a change to the Land model and one more GitHub performer, for a case no repository here has yet.
+
+### Retry after a Stop at a gate resumes waiting at the gate
+
+Decided 24 Sep 2026. Take a task that a person stops while it waits at a gate. Retry returns it to waiting for Approve on the same review. The gated step already passed, so its work stays. A person who wants the step done again uses Send back, which takes a note. Today's code still reruns the step. The task model and Retry change to this rule in a later unit.
+
+Rejected options:
+
+- **Rerun the gated step.** It repeats work that passed, and Send back already covers a redo with a note.
+
+### Run branches keep the harness's sandbox status
+
+Decided 24 Sep 2026. Ruleset 23901469 requires the `sandbox` check on `e2e/run-*` branches. It accepts that check from any source, and it applies the rule when a branch is created. So the end-to-end harness posts a `sandbox` success on each seed commit, which lets it create a run branch. The check stays open to other posters, such as a future Verify environment.
+
+Rejected options:
+
+- **Accept `sandbox` only from GitHub Actions.** Only CI could mark the check passed, and the token would need no commit-status write, but nothing else could post `sandbox`.
+
+### Database grants keep stored credentials write-only for the dashboard
+
+Decided 24 Sep 2026. The dashboard seals new credentials with the same AES-256-GCM key the engine uses to open them. Write-only rests on the database grants, because the dashboard's role can't read the `ciphertext` column. This is the simpler design, both for people adding credentials and for the people who maintain it. Revisit it before the first real deployment.
+
+Rejected options:
+
+- **Seal with a public key.** Only the engine could open a credential. It changes the Stack line, the sealing code, and key rotation, and it means re-sealing every stored credential.
+
 ## Open
 
 Each open question names the current lean or default. A lean is not a decision.
