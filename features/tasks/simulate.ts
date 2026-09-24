@@ -614,6 +614,16 @@ async function refused(write: () => Promise<unknown>, guard: string): Promise<'a
   }
 }
 
+async function outsideApproves(db: Database, task: string): Promise<'moved' | 'found nothing' | 'refused by review_wait_names_its_review'> {
+  try {
+    return (await approveFromOutside(db, task)) ? 'moved' : 'found nothing';
+  } catch (error) {
+    const found = refusal(error);
+    if (found !== undefined && 'name' in found && found.name === 'review_wait_names_its_review') return 'refused by review_wait_names_its_review';
+    throw error;
+  }
+}
+
 async function attemptInfo(db: Database, attempt: string): Promise<{ readonly workflow: string; readonly step: string } | undefined> {
   return db
     .selectFrom('attempt')
@@ -859,10 +869,10 @@ const rules: Readonly<Record<Move, Rule>> = {
       const stray = random() < 0.3;
       const task = stray ? pick(random, world.tasks) : pick(random, await tasksWhere(db, 'outside'))?.id;
       if (task === undefined) return 'no task awaits an outside approval';
-      const moved = await approveFromOutside(db, task);
+      const outcome = await outsideApproves(db, task);
       const aimed = stray ? 'outside approval at any task' : 'outside approval';
-      count(world, `${aimed} ${moved ? 'moved' : 'found nothing'}`);
-      return `task ${task}: ${aimed} ${moved ? 'moved it' : 'found nothing'}`;
+      count(world, `${aimed} ${outcome}`);
+      return `task ${task}: ${aimed} ${outcome}`;
     },
   },
   doubleDecision: {
