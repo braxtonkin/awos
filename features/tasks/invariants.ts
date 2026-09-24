@@ -676,7 +676,7 @@ export const properties = {
                                                   and not exists (select 1 from fresh f where f.id = o.id)) then 1 else 0 end),
           ('branch.delete', case when c.owes and j.verdict = 'pass'
                                  then (select count(*) from attempt b where b.task_id = j.task_id and b.step = j.step and b.branch is not null
-                                       and (b.last_pushed is not null or b.verdict = 'lost'))::int
+                                       and (b.last_pushed is not null or b.verdict in ('lost', 'stopped')))::int
                                  else 0 end)
         ) k(kind, owed)
       ) owed

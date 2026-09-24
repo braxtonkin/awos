@@ -11,3 +11,5 @@ Your input is the ticket, the plan, and the environment below. Show that the cha
 Change no file in the repository. Stop once both runs are done.
 
 End your turn with your review as the final message, in the turn's output schema. Set `outcome` to `done`, put the script and both runs in one `text` block, and set `behavior` to `fixed` when the second run passed, `still_wrong` when it failed, or `null` when the environment kept you from running both. AutoWorker checks both runs against its own record of your commands. If you need a person's answer, set `outcome` to `needs_input` and ask in a `choice` block.
+
+A done review looks like this, and each block's `kind` names its fields: `{"outcome": "done", "summary": "One line.", "blocks": [{"kind": "text", "title": null, "body": "The script and both runs."}], "behavior": "fixed"}`
