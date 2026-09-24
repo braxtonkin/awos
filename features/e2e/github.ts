@@ -72,13 +72,38 @@ const needs = (answer: Response): string => {
 
 const refPath = (branch: string): string => branch.split('/').map(encodeURIComponent).join('/');
 
+export type GitHubSettings = {
+  readonly apiUrl: string;
+  readonly token: string;
+  readonly repository: string;
+  readonly webUrl: string;
+  readonly cloneUrl: string;
+  readonly pushEnvironment: Readonly<Record<string, string>>;
+};
+
 export function githubFromEnvironment(env: NodeJS.ProcessEnv, repository: string): GitHub {
   const keys = GitHubKeys.safeParse(env);
   if (!keys.success) throw new Error('GITHUB_TOKEN is not usable');
   const token = keys.data.GITHUB_TOKEN;
+  return githubAt({
+    apiUrl: api,
+    token,
+    repository,
+    webUrl: `https://github.com/${repository}`,
+    cloneUrl: `https://github.com/${repository}.git`,
+    pushEnvironment: {
+      GIT_CONFIG_COUNT: '1',
+      GIT_CONFIG_KEY_0: 'http.https://github.com/.extraheader',
+      GIT_CONFIG_VALUE_0: `AUTHORIZATION: basic ${Buffer.from(`x-access-token:${token}`).toString('base64')}`,
+    },
+  });
+}
+
+export function githubAt(settings: GitHubSettings): GitHub {
+  const { apiUrl, token, repository } = settings;
 
   const send = async (method: Method, path: string, body?: unknown): Promise<Response> =>
-    fetch(`${api}${path}`, {
+    fetch(`${apiUrl}${path}`, {
       method,
       headers: {
         authorization: `Bearer ${token}`,
@@ -144,12 +169,8 @@ export function githubFromEnvironment(env: NodeJS.ProcessEnv, repository: string
       const answer = await send('DELETE', `${repo}/git/refs/heads/${refPath(branch)}`);
       if (!answer.ok && answer.status !== 422) throw new Error(`GitHub DELETE ref answered ${String(answer.status)}`);
     },
-    commitLink: sha => `https://github.com/${repository}/commit/${sha}`,
-    cloneUrl: `https://github.com/${repository}.git`,
-    pushEnvironment: {
-      GIT_CONFIG_COUNT: '1',
-      GIT_CONFIG_KEY_0: 'http.https://github.com/.extraheader',
-      GIT_CONFIG_VALUE_0: `AUTHORIZATION: basic ${Buffer.from(`x-access-token:${token}`).toString('base64')}`,
-    },
+    commitLink: sha => `${settings.webUrl}/commit/${sha}`,
+    cloneUrl: settings.cloneUrl,
+    pushEnvironment: settings.pushEnvironment,
   };
 }
