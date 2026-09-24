@@ -17,7 +17,7 @@ const stale = failedSeeds
   .filter(entry => entry.fingerprint !== fingerprint)
   .map(
     entry =>
-      `${label(entry.profile, entry.seed, entry.mutant)} was recorded under simulator ${entry.fingerprint}, and moves or profiles have changed since, so the seed no longer replays the run that failed. Re-record it: find a seed that fails the same way under simulator ${fingerprint} with the fix reverted, and record that seed with this fingerprint.`,
+      `${label(entry.profile, entry.seed, entry.mutant)} was recorded under simulator ${entry.fingerprint}, and moves or profiles have changed since, so the seed no longer replays the run that failed. Re-record it: revert the fix, run npm run verify -- tasks-sim ${entry.mutant === undefined ? `--profile ${entry.profile}` : `--mutant ${entry.mutant}`} --seeds 60 --steps ${String(entry.steps)} until a seed fails the same way under simulator ${fingerprint}, and record that seed with this fingerprint.`,
   );
 
 const replayed: readonly Plan[] = failedSeeds
