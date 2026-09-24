@@ -186,7 +186,9 @@ async function roundTrip(world: World, image: string, label: string, plan: (stor
     const implementBefore = (await attemptsOf(world, key)).filter(attempt => attempt.step === 'implement');
     const checks: Check[] = [
       stored.success && plan(stored.data.plan) ? pass(`${label} 3: Postgres holds the plan`, stored.data.plan.slice(0, 200)) : fail(`${label} 3: Postgres holds the plan`, `${JSON.stringify(evidence?.body ?? null)}; ${engine.said().slice(-1500)}`),
-      reason?.includes(`Approve specify for task ${key}`) === true ? pass(`${label} 3: the task waits for Approve`, reason) : fail(`${label} 3: the task waits for Approve`, reason ?? 'the task never waited'),
+      reason?.includes(`Approve specify for task ${key}`) === true
+        ? pass(`${label} 3: the task waits for Approve`, reason)
+        : fail(`${label} 3: the task waits for Approve`, `${reason ?? 'the task never waited'}; the review: ${JSON.stringify(specify === undefined ? null : ((await world.store.db.selectFrom('attempt').select('output').where('id', '=', specify.id).executeTakeFirst())?.output ?? null)).slice(0, 1500)}`),
       specifyGone === true ? pass(`${label} 3: the Specify pod is gone`, `attempt ${specify?.id ?? ''}`) : fail(`${label} 3: the Specify pod is gone`, 'a pod still runs'),
       implementBefore.length === 0 ? pass(`${label} 3: no Implement attempt before Approve`, 'none') : fail(`${label} 3: no Implement attempt before Approve`, JSON.stringify(implementBefore)),
       await overheadCheck(world, label, specify?.id),
