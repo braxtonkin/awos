@@ -5,7 +5,7 @@ import { z } from 'zod';
 import { fail, pass, type Check, type Scenario } from '../../tools/verify/check.ts';
 import { defineModel, type Shape } from '../../tools/verify/models.ts';
 import { withPostgres, type TestPostgres } from '../../tools/verify/postgres.ts';
-import type { TlcRun } from '../../tools/verify/tlc.ts';
+import { actionsOf, realStates, variablesIn, type TlcRun } from '../../tools/verify/tlc.ts';
 import { provePlants } from './invariants.ts';
 import {
   checkCatalog,
@@ -45,9 +45,6 @@ type TraceView = Pick<TlcRun, 'loopActions' | 'stutters'> & {
   readonly loop: readonly StateView[];
 };
 
-const variablesIn = (text: string): ReadonlyMap<string, string> =>
-  new Map([...text.replace(/["\s]/g, '').matchAll(/\/\\(\w+)=([^/]*)/g)].map(([, name = '', value = '']): [string, string] => [name, value]));
-
 const entriesIn = (value: string): ReadonlyMap<string, string> =>
   new Map([...value.matchAll(/(<<[^>]*>>|\w+):>(\[[^\]]*\]|\w+)/g)].map(([, key = '', entry = '']): [string, string] => [key, entry]));
 
@@ -80,9 +77,9 @@ function viewOf(text: string): StateView {
 }
 
 function traceViewOf(run: TlcRun): TraceView {
-  const real = run.trace.filter(state => state.action !== 'Stuttering');
+  const real = realStates(run);
   return {
-    actions: run.trace.map(state => state.action),
+    actions: actionsOf(run),
     last: viewOf(real.at(-1)?.text ?? ''),
     beforeLast: viewOf(real.at(-2)?.text ?? ''),
     loop: run.loop.map(state => viewOf(state.text)),
@@ -435,6 +432,7 @@ export const scenarios: readonly Scenario[] = [
       const options = parseSimulationOptions(args);
       return withPostgres(postgres => simulationChecks(postgres, options));
     },
+    nightly: day => profileName.options.map(profile => ['--profile', profile, '--seeds', '200', '--steps', '300', '--from', String(day * 1000), '--trace', 'traces/outbox-sim']),
   },
   {
     name: 'outbox-perf',

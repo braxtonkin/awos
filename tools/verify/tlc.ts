@@ -33,7 +33,9 @@ function parseTrace(output: string): Pick<TlcRun, 'trace' | 'loop' | 'loopAction
   return { trace, loop, loopActions, stutters: trace.at(-1)?.action === 'Stuttering' };
 }
 
-export function checkModel(folder: string, module: string, config: string, workers: 'auto' | '1' = 'auto'): TlcRun {
+export type TlcOptions = { readonly workers?: 'auto' | '1'; readonly liveness?: 'final' };
+
+export function checkModel(folder: string, module: string, config: string, { workers = 'auto', liveness }: TlcOptions = {}): TlcRun {
   const work = mkdtempSync(join(tmpdir(), 'tlc-'));
   const configFile = join(work, `${module}.cfg`);
   writeFileSync(configFile, config);
@@ -41,7 +43,7 @@ export function checkModel(folder: string, module: string, config: string, worke
   try {
     const result = spawnSync(
       'java',
-      ['-XX:+UseParallelGC', '-cp', tlaTools, 'tlc2.TLC', '-workers', workers, '-metadir', join(work, 'states'), '-config', configFile, `${module}.tla`],
+      ['-XX:+UseParallelGC', '-cp', tlaTools, 'tlc2.TLC', '-workers', workers, ...(liveness === undefined ? [] : ['-lncheck', liveness]), '-metadir', join(work, 'states'), '-config', configFile, `${module}.tla`],
       { cwd: folder, encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 },
     );
     const output = result.error === undefined ? `${result.stdout}${result.stderr}` : `TLC did not run: ${result.error.message}`;
@@ -57,4 +59,18 @@ export function checkModel(folder: string, module: string, config: string, worke
   } finally {
     rmSync(work, { recursive: true, force: true });
   }
+}
+
+export const actionsOf = (run: TlcRun): readonly string[] => run.trace.map(state => state.action);
+
+export const realStates = (run: TlcRun): readonly TraceState[] => run.trace.filter(state => state.action !== 'Stuttering');
+
+export const lastRealState = (run: TlcRun): TraceState | undefined => realStates(run).at(-1);
+
+export const variablesIn = (text: string): ReadonlyMap<string, string> =>
+  new Map([...text.replace(/["\s]/g, '').matchAll(/\/\\(\w+)=([^/]*)/g)].map(([, name = '', value = '']): [string, string] => [name, value]));
+
+export function traceLine(run: TlcRun): string {
+  const ending = run.loop.length > 0 ? `, then loops back over the last ${String(run.loop.length)} states` : '';
+  return `${actionsOf(run).join(' -> ')}${ending}`;
 }

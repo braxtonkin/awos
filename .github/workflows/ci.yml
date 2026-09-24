@@ -33,6 +33,17 @@ jobs:
       - run: docker compose run --rm verify npm ci
       - run: docker compose run --rm verify npm run verify -- models
 
+  sims:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - run: docker compose build verify
+      - run: docker compose run --rm verify npm ci
+      - run: docker compose run --rm verify npm run verify -- sims --mutant all
+
   simulation:
     runs-on: ubuntu-24.04
     timeout-minutes: 20

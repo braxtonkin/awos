@@ -13,7 +13,7 @@ import type { Workflow } from '../../shared/workflow.ts';
 import { fail, pass, type Check, type Scenario } from '../../tools/verify/check.ts';
 import { defineModel, type Shape } from '../../tools/verify/models.ts';
 import { withPostgres, type TestPostgres } from '../../tools/verify/postgres.ts';
-import type { TlcRun, TraceState } from '../../tools/verify/tlc.ts';
+import { lastRealState, type TlcRun, type TraceState } from '../../tools/verify/tlc.ts';
 import { provePlants } from './invariants.ts';
 import { scheduleSource } from './schedule-source.ts';
 import { scheduler } from './scheduler.ts';
@@ -65,8 +65,6 @@ const hasDueSlot = (state: TraceState): boolean => {
   const asked = rowsIn(state, 'asked');
   return unpausedIn(state).some(routine => newest.get(routine) !== 'done' || runNow.get(routine) !== 'none' || Number(asked.get(routine)) > 0);
 };
-
-const lastRealState = (run: TlcRun): TraceState | undefined => run.trace.filter(state => state.action !== 'Stuttering').at(-1);
 
 const startedIn = (run: TlcRun): readonly Hold[] => {
   const [before, last] = run.trace.slice(-2);
@@ -539,6 +537,7 @@ export const scenarios: readonly Scenario[] = [
       const given = parseOptions(args);
       return withPostgres(postgres => simulationChecks(postgres, given));
     },
+    nightly: day => profileName.options.map(profile => ['--profile', profile, '--seeds', '200', '--steps', '300', '--from', String(day * 1000), '--trace', 'traces/routines-sim']),
   },
   {
     name: 'routines-engine',

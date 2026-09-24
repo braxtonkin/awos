@@ -1,6 +1,6 @@
 import type { Scenario } from '../../tools/verify/check.ts';
 import { defineModel, type Shape } from '../../tools/verify/models.ts';
-import type { TlcRun } from '../../tools/verify/tlc.ts';
+import { actionsOf, realStates, variablesIn, type TlcRun } from '../../tools/verify/tlc.ts';
 
 const settings = { Checks: 2, Ignorable: 1, QueueSettings: 2, ReviewSettings: 2, DraftSettings: 2 } as const;
 
@@ -28,9 +28,6 @@ type TraceView = Pick<TlcRun, 'loopActions' | 'stutters'> & {
   readonly beforeLast: StateView;
   readonly loop: readonly StateView[];
 };
-
-const variablesIn = (text: string): ReadonlyMap<string, string> =>
-  new Map([...text.replace(/["\s]/g, '').matchAll(/\/\\(\w+)=([^/]*)/g)].map(([, name = '', value = '']): [string, string] => [name, value]));
 
 const entriesIn = (value: string): ReadonlyMap<string, string> =>
   new Map([...value.matchAll(/(\w+):>(\w+)/g)].map(([, key = '', entry = '']): [string, string] => [key, entry]));
@@ -65,9 +62,9 @@ function viewOf(text: string): StateView {
 }
 
 function traceViewOf(run: TlcRun): TraceView {
-  const real = run.trace.filter(state => state.action !== 'Stuttering');
+  const real = realStates(run);
   return {
-    actions: run.trace.map(state => state.action),
+    actions: actionsOf(run),
     states: run.trace.map(state => viewOf(state.text)),
     last: viewOf(real.at(-1)?.text ?? ''),
     beforeLast: viewOf(real.at(-2)?.text ?? ''),

@@ -281,6 +281,7 @@ export const scenarios: readonly Scenario[] = [
       const options = parseSimulationOptions(args);
       return withPostgres(postgres => simulationChecks(postgres, options));
     },
+    nightly: () => profileName.options.map(profile => ['--profile', profile, '--seeds', '200']),
   },
   {
     name: 'environments-live',

@@ -1048,6 +1048,7 @@ export const scenarios: readonly Scenario[] = [
       const options = parseSimulationOptions(args);
       return withPostgres(postgres => simulationChecks(postgres, options));
     },
+    nightly: () => [['--seeds', '1000']],
   },
   {
     name: 'credentials',

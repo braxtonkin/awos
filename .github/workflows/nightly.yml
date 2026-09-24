@@ -4,12 +4,19 @@ on:
   schedule:
     - cron: '23 8 * * *'
   workflow_dispatch:
+    inputs:
+      jobs:
+        description: Which jobs to run
+        type: choice
+        options: [all, models, sims]
+        default: all
 
 permissions:
   contents: read
 
 jobs:
   models:
+    if: github.event_name == 'schedule' || inputs.jobs == 'all' || inputs.jobs == 'models'
     runs-on: ubuntu-24.04
     timeout-minutes: 240
     steps:
@@ -21,21 +28,22 @@ jobs:
       - run: docker compose run --rm verify npm run verify -- models nightly
 
   simulation:
+    if: github.event_name == 'schedule' || inputs.jobs == 'all' || inputs.jobs == 'sims'
     runs-on: ubuntu-24.04
     timeout-minutes: 240
     strategy:
       fail-fast: false
       matrix:
-        profile: [default, races, hangs, verdicts, people, needs-input, mixed, behavior, environment]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
       - run: docker compose build verify
       - run: docker compose run --rm verify npm ci
-      - run: docker compose run --rm verify npm run verify -- tasks-sim --profile ${{ matrix.profile }} --seeds 1000 --steps 1000 --from $(( $(date -u +%s) / 86400 * 1000 )) --trace traces
+      - run: docker compose run --rm verify npm run verify -- sims nightly --shard ${{ matrix.shard }}/12
       - if: failure() || cancelled()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: tasks-sim-${{ matrix.profile }}-traces
+          name: sims-shard-${{ matrix.shard }}-traces
           path: traces/
