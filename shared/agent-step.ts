@@ -8,7 +8,7 @@ export type Evidence = Readonly<Record<string, unknown>>;
 
 export type Earlier = { readonly step: string; readonly verdict: Verdict; readonly output: unknown; readonly evidence: Evidence | null };
 
-export type Ticket = { readonly key: string; readonly title: string };
+export type Ticket = { readonly key: string; readonly title: string; readonly description: string | null };
 
 export type StepInput = {
   readonly step: string;

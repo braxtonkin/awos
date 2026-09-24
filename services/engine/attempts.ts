@@ -26,6 +26,7 @@ export type AttemptSettings = {
   readonly gitBaseUrl: string;
   readonly providers: Providers;
   readonly startDeadlineMs: number;
+  readonly describeTicket: (key: string, actsAs: string) => Promise<string | null>;
 };
 
 const isInstruction = (text: string): text is Instruction => /^[A-Z][\s\S]*\.$/.test(text);
@@ -71,6 +72,7 @@ export function attempts(settings: AttemptSettings): Loop {
       return 'refused' in token ? token : { head: await remoteHead(repositoryUrl(settings.gitBaseUrl, github), branch, token.token) };
     },
     startEnvironment: environmentOf(settings),
+    describeTicket: settings.describeTicket,
     issueToken: (db, attempt) => issueToken(db, attemptId.parse(attempt)),
     startTurn: async (db, attempt, { prompt, outputSchema }, now) => {
       const sent = await sendCommand(db, attemptId.parse(attempt), { kind: 'turn.start', prompt, outputSchema }, now);

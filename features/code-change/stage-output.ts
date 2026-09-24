@@ -62,8 +62,8 @@ function cameBack(earlier: readonly Earlier[]): string | null {
   return [`The task came back from ${after.step} with ${after.verdict}.`, evidence ?? textOf(after.output) ?? JSON.stringify(after.output)].join('\n\n');
 }
 
-function input({ step, ticket: { key, title }, base, earlier }: StepInput): string {
-  const named = `Ticket ${key}: ${title}`;
+function input({ step, ticket: { key, title, description }, base, earlier }: StepInput): string {
+  const named = description === null ? `Ticket ${key}: ${title}` : `Ticket ${key}: ${title}\n\n${description.trim()}`;
   switch (step) {
     case 'specify':
       return named;

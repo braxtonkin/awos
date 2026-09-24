@@ -17,7 +17,7 @@ import { clientsFrom, type OpenToken } from '../../features/github/client.ts';
 import { githubPerformers, outboxOwedAt } from '../../features/github/performers.ts';
 import type { JiraAccess } from '../../features/jira/client.ts';
 import { jiraPerformers } from '../../features/jira/performers.ts';
-import { currentAssignee, jiraSearch } from '../../features/jira/source.ts';
+import { currentAssignee, jiraSearch, ticketDescription } from '../../features/jira/source.ts';
 import { connectCluster } from '../../features/jobs/launch.ts';
 import { jobSettings } from '../../features/jobs/settings.ts';
 import { sweep } from '../../features/jobs/sweep.ts';
@@ -90,7 +90,7 @@ const checkSettings = (given: Settings, key: SealingKey): CheckLoopSettings => (
   writeBack,
 });
 
-const workerLoops = (db: Database, given: Settings, key: SealingKey | undefined, runAs: RunAsRule): readonly Loop[] =>
+const workerLoops = (db: Database, given: Settings, key: SealingKey | undefined, runAs: RunAsRule, describeTicket: (ticket: string, actsAs: string) => Promise<string | null>): readonly Loop[] =>
   key === undefined || given.JOB_IMAGE === undefined || given.JOB_ENGINE_URL === undefined
     ? []
     : [
@@ -106,6 +106,7 @@ const workerLoops = (db: Database, given: Settings, key: SealingKey | undefined,
           gitBaseUrl: given.GIT_BASE_URL,
           providers,
           startDeadlineMs: given.ENVIRONMENT_START_DEADLINE_MS,
+          describeTicket,
         }),
       ];
 
@@ -133,7 +134,7 @@ const loopsFor = (given: Settings, key: SealingKey | undefined, db: Database): r
     ...(given.JOB_IMAGE === undefined ? [] : [sweep({ everyMs: given.SWEEP_EVERY_MS, cluster: connectCluster(given.JOB_NAMESPACE) })]),
     ...outboxLoops({ everyMs: given.OUTBOX_EVERY_MS, leaseMs: given.OUTBOX_LEASE_MS, marginMs: given.OUTBOX_MARGIN_MS, maxTries: given.OUTBOX_MAX_TRIES, clock: realClock, registry: actions }),
     ...(key === undefined ? [] : [checkLoop(checkSettings(given, key))]),
-    ...workerLoops(db, given, key, runAs),
+    ...workerLoops(db, given, key, runAs, given.JIRA_SITE === undefined ? () => Promise.resolve(null) : ticketDescription(jira)),
   ];
 };
 

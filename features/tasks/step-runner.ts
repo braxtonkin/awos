@@ -207,9 +207,9 @@ async function baseOf(db: Database, task: string): Promise<string | null> {
 
 export type Prompt = { readonly prompt: string; readonly outputSchema: Readonly<Record<string, unknown>> };
 
-export async function promptFor(db: Database, step: Step, environment: string | null): Promise<Prompt> {
+export async function promptFor(db: Database, step: Step, environment: string | null, description: string | null): Promise<Prompt> {
   const { instructions, skills } = await routineStep(db, step);
-  const input = step.agent.input({ step: step.kind.name, ticket: { key: step.key, title: step.title }, base: await baseOf(db, step.task), earlier: await earlierOf(db, step) });
+  const input = step.agent.input({ step: step.kind.name, ticket: { key: step.key, title: step.title, description }, base: await baseOf(db, step.task), earlier: await earlierOf(db, step) });
   const sections = [
     step.kind.prompt.trim(),
     ...(instructions === '' ? [] : [section("The routine's instructions", instructions)]),
@@ -292,7 +292,7 @@ const owing =
     const actions = step.agent.owes({
       step: step.kind.name,
       verdict: standing.verdict,
-      ticket: { key: step.key, title: step.title },
+      ticket: { key: step.key, title: step.title, description: null },
       repository: { github: repository.github, branch: repository.branch },
       taskBranch: { name: taskBranch(step.key), head: await taskBranchHead(tx, step.task) },
       attempt: { branch: step.branch, start: step.start, lastPushed: attempt.last_pushed },

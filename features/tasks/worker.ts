@@ -35,6 +35,7 @@ export type WorkerSettings = {
   readonly issueToken: (db: Database, attempt: string) => Promise<string | undefined>;
   readonly startTurn: (db: Database, attempt: string, prompt: Prompt, now: Date) => Promise<void>;
   readonly ready: (db: Database, runAs: string) => Promise<Ready>;
+  readonly describeTicket: (key: string, actsAs: string) => Promise<string | null>;
   readonly launch: (db: Database, request: JobRequest) => Promise<Launched>;
 };
 
@@ -81,7 +82,7 @@ async function launchAttempt(db: Database, settings: WorkerSettings, attempt: st
   }
   if (environment !== null && 'ended' in environment) return `attempt ${attempt} of task ${step.key} ended before its environment started`;
   if (environment !== null && (await renew(db, attempt, new Date(), settings.startLeaseMs)) === 'lost') return `attempt ${attempt} of task ${step.key} ended while its environment started`;
-  const prompt = await promptFor(db, step, environment?.started ?? null);
+  const prompt = await promptFor(db, step, environment?.started ?? null, await settings.describeTicket(step.key, step.runAs.id));
   const token = await settings.issueToken(db, attempt);
   if (token === undefined) return `attempt ${attempt} of task ${step.key} ended before its Job launched, so this pass launched nothing`;
   await settings.startTurn(db, attempt, prompt, now);
