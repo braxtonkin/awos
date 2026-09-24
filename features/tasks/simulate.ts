@@ -768,18 +768,28 @@ const rules: Readonly<Record<Move, Rule>> = {
       if (live === undefined || kind === undefined || chosen === undefined) return `attempt ${worker.attempt}: lost before the race`;
       const action: PersonAction = random() < 0.5 ? { kind: 'stop' } : { kind: 'retry', note: null };
       const report = reportFor(random, kind, chosen.verdict);
+      const settle = async <T,>(work: Promise<T>): Promise<T | { readonly guard: string }> => {
+        try {
+          return await work;
+        } catch (error) {
+          const found = refusal(error);
+          if (turn.plan.mutant === undefined || found === undefined) throw error;
+          return { guard: 'name' in found ? found.name : `${found.table}.${found.column}` };
+        }
+      };
       const [finished, acted, ...claims] = await Promise.all([
-        advance(db, byName, worker.attempt, report, now),
-        act(db, byName, live.task_id, { id: randomUUID(), person, at: now }, action),
-        claim(db, live.task_id, now, profile.leaseMs),
-        claim(db, live.task_id, now, profile.leaseMs),
+        settle(advance(db, byName, worker.attempt, report, now)),
+        settle(act(db, byName, live.task_id, { id: randomUUID(), person, at: now }, action)),
+        settle(claim(db, live.task_id, now, profile.leaseMs)),
+        settle(claim(db, live.task_id, now, profile.leaseMs)),
       ]);
       const won = claims.flatMap(outcome => ('attempt' in outcome ? [outcome.attempt] : []));
       const taker = pick(random, idleWorkers(world));
       const [winner] = won;
       if (taker !== undefined && winner !== undefined && won.length === 1) world.workers[taker] = { state: 'busy', attempt: winner };
-      const finishing = 'finished' in finished ? `finish found it ${finished.finished ?? 'unfinished'}` : `finish left it ${finished.state}`;
-      const acting = 'refused' in acted ? `${action.kind} refused ${acted.refused}` : `${action.kind} recorded`;
+      const finishing =
+        'guard' in finished ? `finish refused by ${finished.guard}` : 'finished' in finished ? `finish found it ${finished.finished ?? 'unfinished'}` : `finish left it ${finished.state}`;
+      const acting = 'guard' in acted ? `${action.kind} refused by ${acted.guard}` : 'refused' in acted ? `${action.kind} refused ${acted.refused}` : `${action.kind} recorded`;
       count(world, `race: ${finishing}, ${acting}, ${String(won.length)} claims won`);
       return `task ${live.task_id}: ${finishing}, ${acting}, ${String(won.length)} of 2 claims won`;
     },

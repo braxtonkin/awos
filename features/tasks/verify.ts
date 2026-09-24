@@ -12,6 +12,7 @@ import { withPostgres, type TestPostgres } from '../../tools/verify/postgres.ts'
 import { modelShape, shapeDrift } from '../../tools/verify/model-shape.ts';
 import { checkModel, type TlcRun, type TraceState } from '../../tools/verify/tlc.ts';
 import { checkCatalog, type Catalog } from './catalog.ts';
+import { lostTooOften } from './claim.ts';
 import { provePlants, type PlantProof } from './invariants.ts';
 import { badEnd, mutantName, parks, profileName, profiles, simulate, mutants as storeMutants, workflows, type MutantName, type ProfileName, type Run } from './simulate.ts';
 
@@ -458,8 +459,8 @@ async function profileChecks(postgres: TestPostgres, profile: ProfileName, optio
     badVersionsPark(profile, runs),
     ...(profile === 'races' ? [everyBurstHasOneWinner(runs)] : []),
     ...(profile === 'hangs' ? [everyHungAttemptLost(runs)] : []),
-    ...(profile === 'behavior' ? [checksParkAtTheirCap(runs, parks.rounds, 'every task that reached Verify waits after 3 rounds with the instruction for that wait')] : []),
-    ...(profile === 'environment' ? [checksParkAtTheirCap(runs, parks.reruns, 'every task that reached Verify parked at the rerun cap, and no round was charged')] : []),
+    ...(profile === 'behavior' ? [checksParkAtTheirCap(runs, parks.rounds, 'every task that reached Verify waits after 3 rounds with the instruction for that wait, unless its attempts were lost first')] : []),
+    ...(profile === 'environment' ? [checksParkAtTheirCap(runs, parks.reruns, 'every task that reached Verify parked at the rerun cap, unless its attempts were lost first, and no round was charged')] : []),
   ];
 }
 
@@ -476,7 +477,8 @@ function badVersionsPark(profile: ProfileName, runs: readonly Run[]): Check {
 function checksParkAtTheirCap(runs: readonly Run[], reason: string, name: string): Check {
   const settled = runs.flatMap(run => run.tasks.map(task => ({ seed: run.seed, ...task })));
   const atVerify = settled.filter(task => task.workflow === 'code-change' && task.step === 'verify');
-  const wrong = atVerify.filter(task => task.state !== 'waiting' || task.reason !== reason);
+  const wrong = atVerify.filter(task => task.state !== 'waiting' || (task.reason !== reason && task.reason !== lostTooOften));
+  const lostThere = atVerify.filter(task => task.reason === lostTooOften).length;
   const beyond = settled.filter(task => task.workflow === 'code-change' && task.step === 'land');
   const rounds = reason === parks.reruns ? settled.filter(task => typeof task.counts === 'object' && task.counts !== null && 'rounds' in task.counts) : [];
   const problems = [
@@ -485,7 +487,7 @@ function checksParkAtTheirCap(runs: readonly Run[], reason: string, name: string
     ...rounds.slice(0, 3).map(task => `seed ${String(task.seed)} task ${task.key} was charged a round`),
   ];
   return atVerify.length > 0 && problems.length === 0
-    ? pass(name, `${String(atVerify.length)} tasks waited at verify with: ${reason}`)
+    ? pass(name, `${String(atVerify.length - lostThere)} tasks waited at verify with: ${reason} ${String(lostThere)} more parked there first because their attempts were lost.`)
     : fail(name, problems.length === 0 ? 'no task reached verify' : problems.join('; '));
 }
 

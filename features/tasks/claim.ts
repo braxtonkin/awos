@@ -7,7 +7,7 @@ import type { Workflows } from './start.ts';
 
 export const caps = { lost: 3, stageRetries: 2, inputWaits: 3 } as const;
 
-const lostTooOften: Instruction = `Its last ${String(caps.lost)} attempts were lost before they finished. Read their logs on this page, fix what stopped them, then press Retry to run this step again.`;
+export const lostTooOften: Instruction = `Its last ${String(caps.lost)} attempts were lost before they finished. Read their logs on this page, fix what stopped them, then press Retry to run this step again.`;
 
 export type Claim =
   | { readonly attempt: string }
