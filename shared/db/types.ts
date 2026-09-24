@@ -7,7 +7,7 @@ export type AttemptEventKind = "app" | "end" | "pushed";
 
 export type CheckOutcome = "invalid" | "lost" | "unknown" | "valid";
 
-export type ConnectorKind = "codex" | "github";
+export type ConnectorKind = "codex" | "github" | "jira";
 
 export type ConnectorScope = "personal" | "team";
 
@@ -231,6 +231,8 @@ export interface RoutineVersion {
   gates: Generated<string[]>;
   goal: string;
   ignore_later_reviews: Generated<boolean>;
+  jira_end_status: string | null;
+  jira_start_status: string | null;
   last_step: string | null;
   name: string;
   needs_repository: boolean;

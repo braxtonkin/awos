@@ -1,6 +1,7 @@
 import { sql } from 'kysely';
 import { refusal, type Database } from '../../shared/db/client.ts';
-import type { Claimed, WorkItem } from './source.ts';
+import type { WorkItem } from '../../shared/routine-source.ts';
+import type { Claimed } from './source.ts';
 
 export type Search = { readonly found: readonly WorkItem[] } | { readonly failed: string };
 

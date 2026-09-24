@@ -8,10 +8,14 @@ import { bridgeListener, rules } from '../../features/bridge/engine.ts';
 import { checkLoop, type CheckLoopSettings } from '../../features/credentials/check-loop.ts';
 import { checksFor } from '../../features/credentials/checks.ts';
 import { githubApi } from '../../features/credentials/github-check.ts';
+import { openJiraLogin } from '../../features/credentials/jira-login.ts';
 import { sealingKey, type SealingKey } from '../../features/credentials/seal.ts';
 import { writeBack } from '../../features/credentials/store.ts';
 import { providerProblems, reconcile } from '../../features/environments/lifecycle.ts';
 import { providersByName } from '../../features/environments/provider.ts';
+import type { JiraAccess } from '../../features/jira/client.ts';
+import { jiraPerformers } from '../../features/jira/performers.ts';
+import { currentAssignee, jiraSearch } from '../../features/jira/source.ts';
 import { connectCluster } from '../../features/jobs/launch.ts';
 import { jobSettings } from '../../features/jobs/settings.ts';
 import { sweep } from '../../features/jobs/sweep.ts';
@@ -21,7 +25,7 @@ import { scheduleSource } from '../../features/routines/schedule-source.ts';
 import { postgresNow, scheduler } from '../../features/routines/scheduler.ts';
 import { sourcesByKind } from '../../features/routines/source.ts';
 import { reaper } from '../../features/tasks/reaper.ts';
-import { coreRunAs } from '../../features/tasks/run-as.ts';
+import { coreRunAs, type RunAsRule } from '../../features/tasks/run-as.ts';
 import { finishStep, type StepRunner } from '../../features/tasks/step-runner.ts';
 import { startProblems } from '../../features/tasks/start.ts';
 import type { OwedKinds, Performers } from '../../shared/actions.ts';
@@ -45,6 +49,8 @@ const settings = z.object({
   CHECK_LEASE_MS: milliseconds.default(300_000),
   CHECK_TIMEOUT_MS: milliseconds.default(120_000),
   GITHUB_API_URL: z.url({ protocol: /^https?$/ }).default(githubApi),
+  JIRA_SITE: z.url({ protocol: /^https?$/ }).optional(),
+  JIRA_TIMEOUT_MS: milliseconds.default(30_000),
   OUTBOX_EVERY_MS: milliseconds.default(1_000),
   OUTBOX_LEASE_MS: milliseconds.default(60_000),
   OUTBOX_MARGIN_MS: milliseconds.default(5_000),
@@ -64,31 +70,27 @@ const settings = z.object({
 
 type Settings = z.infer<typeof settings>;
 
-const sources = sourcesByKind([scheduleSource]);
-
 const providers = providersByName([]);
 
 type ActionKind = OwedKinds<Workflow>;
 
-const performers = {} satisfies Performers<ActionKind>;
-
-const actions = registryOf(performers);
-
 const runner: StepRunner = { workflows, agents: new Map([[codeChange.name, agentSteps]]), enqueue };
-
-const runAs = coreRunAs(null);
 
 const checkSettings = (given: Settings, key: SealingKey): CheckLoopSettings => ({
   everyMs: given.CHECKS_EVERY_MS,
   leaseMs: given.CHECK_LEASE_MS,
   key,
-  checks: checksFor({ codex: { timeoutMs: given.CHECK_TIMEOUT_MS }, github: { baseUrl: given.GITHUB_API_URL, timeoutMs: given.CHECK_TIMEOUT_MS } }),
+  checks: checksFor({
+    codex: { timeoutMs: given.CHECK_TIMEOUT_MS },
+    github: { baseUrl: given.GITHUB_API_URL, timeoutMs: given.CHECK_TIMEOUT_MS },
+    jira: { site: given.JIRA_SITE, timeoutMs: given.CHECK_TIMEOUT_MS },
+  }),
   checker: `engine ${hostname()} ${String(process.pid)}`,
   now: () => new Date(),
   writeBack,
 });
 
-const workerLoops = (db: Database, given: Settings, key: SealingKey | undefined): readonly Loop[] =>
+const workerLoops = (db: Database, given: Settings, key: SealingKey | undefined, runAs: RunAsRule): readonly Loop[] =>
   key === undefined || given.JOB_IMAGE === undefined || given.JOB_ENGINE_URL === undefined
     ? []
     : [
@@ -107,15 +109,22 @@ const workerLoops = (db: Database, given: Settings, key: SealingKey | undefined)
         }),
       ];
 
-const loopsFor = (db: Database, given: Settings, key: SealingKey | undefined): readonly Loop[] => [
-  reaper({ everyMs: given.REAPER_EVERY_MS, leaseMs: given.LEASE_MS }),
-  scheduler({ everyMs: given.SCHEDULER_EVERY_MS, leaseMs: given.ROUTINE_LEASE_MS, sources, workflows, now: postgresNow }),
-  reconcile({ providers, everyMs: given.ENVIRONMENTS_EVERY_MS, startDeadlineMs: given.ENVIRONMENT_START_DEADLINE_MS }),
-  ...(given.JOB_IMAGE === undefined ? [] : [sweep({ everyMs: given.SWEEP_EVERY_MS, cluster: connectCluster(given.JOB_NAMESPACE) })]),
-  ...outboxLoops({ everyMs: given.OUTBOX_EVERY_MS, leaseMs: given.OUTBOX_LEASE_MS, marginMs: given.OUTBOX_MARGIN_MS, maxTries: given.OUTBOX_MAX_TRIES, clock: realClock, registry: actions }),
-  ...(key === undefined ? [] : [checkLoop(checkSettings(given, key))]),
-  ...workerLoops(db, given, key),
-];
+const loopsFor = (given: Settings, key: SealingKey | undefined, db: Database): readonly Loop[] => {
+  const jira: JiraAccess = { site: given.JIRA_SITE, timeoutMs: given.JIRA_TIMEOUT_MS, logins: person => openJiraLogin(db, key, person) };
+  const sources = sourcesByKind([scheduleSource, jiraSearch(jira)]);
+  const performers = { ...jiraPerformers(jira, db) } satisfies Performers<ActionKind>;
+  const actions = registryOf(performers);
+  const runAs = coreRunAs(given.JIRA_SITE === undefined ? null : currentAssignee(jira));
+  return [
+    reaper({ everyMs: given.REAPER_EVERY_MS, leaseMs: given.LEASE_MS }),
+    scheduler({ everyMs: given.SCHEDULER_EVERY_MS, leaseMs: given.ROUTINE_LEASE_MS, sources, workflows, now: postgresNow }),
+    reconcile({ providers, everyMs: given.ENVIRONMENTS_EVERY_MS, startDeadlineMs: given.ENVIRONMENT_START_DEADLINE_MS }),
+    ...(given.JOB_IMAGE === undefined ? [] : [sweep({ everyMs: given.SWEEP_EVERY_MS, cluster: connectCluster(given.JOB_NAMESPACE) })]),
+    ...outboxLoops({ everyMs: given.OUTBOX_EVERY_MS, leaseMs: given.OUTBOX_LEASE_MS, marginMs: given.OUTBOX_MARGIN_MS, maxTries: given.OUTBOX_MAX_TRIES, clock: realClock, registry: actions }),
+    ...(key === undefined ? [] : [checkLoop(checkSettings(given, key))]),
+    ...workerLoops(db, given, key, runAs),
+  ];
+};
 
 const say = (line: string): void => {
   process.stdout.write(`${line}\n`);
@@ -157,7 +166,7 @@ async function run(given: Settings, key: SealingKey | undefined): Promise<void> 
     });
     const address = bridge.address();
     say(`The engine serves the bridge on port ${typeof address === 'object' && address !== null ? String(address.port) : String(given.BRIDGE_PORT)}.`);
-    const loops = loopsFor(db, given, key);
+    const loops = loopsFor(given, key, db);
     if (key === undefined) say('The engine has no CREDENTIAL_KEY, so it opens and checks no credentials.');
     if (given.JOB_IMAGE === undefined) say('The engine has no JOB_IMAGE, so it launches no Jobs and sweeps none.');
     else if (given.JOB_ENGINE_URL === undefined) say('The engine has no JOB_ENGINE_URL, so its Jobs could not reach the bridge, and it launches none.');

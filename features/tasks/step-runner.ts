@@ -26,6 +26,7 @@ export type Step = {
   readonly routine: string;
   readonly version: number;
   readonly goal: string;
+  readonly startStatus: string | null;
   readonly repository: { readonly github: string; readonly branch: string; readonly fastTestCommand: string | null; readonly jobImage: string | null } | null;
   readonly runAs: { readonly id: string; readonly name: string; readonly email: string };
   readonly branch: string | null;
@@ -57,6 +58,7 @@ export async function stepOf(db: Database, runner: StepRunner, attempt: string):
       'task.title',
       'task.workflow',
       'version.goal',
+      'version.jira_start_status',
       'person.id as person_id',
       'person.name as person_name',
       'person.email as person_email',
@@ -86,6 +88,7 @@ export async function stepOf(db: Database, runner: StepRunner, attempt: string):
     routine: row.routine_id,
     version: row.routine_version,
     goal: row.goal,
+    startStatus: row.jira_start_status,
     repository:
       row.github === null || row.repository_branch === null
         ? null
@@ -295,6 +298,7 @@ const owing =
       branches: standing.verdict === 'pass' ? await branchesToDelete(tx, step) : [],
       pullRequestOwed: opened.length > 0,
       firstPass: earlierPasses.length === 0,
+      startStatus: step.startStatus,
       output,
       evidence,
     });

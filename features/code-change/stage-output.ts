@@ -132,7 +132,9 @@ function owes(verdicted: Verdicted): readonly Owe<Kind>[] {
     case 'specify': {
       if (verdict !== 'pass') return [];
       const plan = planEvidence.safeParse(evidence);
-      return [...(plan.success ? comment(named.key, `AutoWorker's plan:\n\n${plan.data.plan}`, false) : []), ...deletions(verdicted)];
+      const moved =
+        verdicted.firstPass && verdicted.startStatus !== null && isTicket(named.key) ? [owe(actionKinds.ticketTransition, { ticket: named.key, status: verdicted.startStatus, from: null })] : [];
+      return [...(plan.success ? comment(named.key, `AutoWorker's plan:\n\n${plan.data.plan}`, false) : []), ...moved, ...deletions(verdicted)];
     }
     case 'implement':
       return verdict === 'pass' ? implemented(verdicted) : [];

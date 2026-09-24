@@ -10,7 +10,8 @@ import type { TestPostgres } from '../../tools/verify/postgres.ts';
 import { pause, resume, runNow } from './actions.ts';
 import { ticketTable, watch, type PropertyName, type Violation, type Watch } from './invariants.ts';
 import { scheduler, type SchedulerSettings } from './scheduler.ts';
-import { sourcesByKind, type RoutineRun, type Source, type WorkItem } from './source.ts';
+import type { RoutineRun, Source, WorkItem } from '../../shared/routine-source.ts';
+import { sourcesByKind } from './source.ts';
 
 export const profileName = z.enum(['default', 'two-engines', 'downtime', 'pause', 'hangs', 'run-now', 'shared-key', 'assignee']);
 
