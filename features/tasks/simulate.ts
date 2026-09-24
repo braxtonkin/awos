@@ -261,7 +261,7 @@ const mostlyPass = { pass: 10, fail: 1, ask: 0.3, return: 0.6, rerun: 0.6, revie
 
 const everyEffect = { pass: 5, fail: 2, ask: 1, return: 2, rerun: 2, review: 1, await: 1 } as const;
 
-const t2Faults = { hang: 1, wake: 1, crash: 1, burst: 1, late: 2, reassign: 1, doubleDecision: 0.2, doneWrite: 0.2, bareIntake: 0.2, noteless: 0.2, strayTarget: 0.3, race: 0.5, badName: 0.2, restart: 0, pause: 0, loseApproval: 0.5, latePush: 1, badReply: 0.5 } as const;
+const t2Faults = { hang: 1, wake: 1, crash: 1, burst: 1, late: 2, reassign: 1, doubleDecision: 0.2, doneWrite: 0.2, bareIntake: 0.2, noteless: 0.2, strayTarget: 0.3, race: 0.5, badName: 0.2, restart: 0, pause: 0, loseApproval: 0, latePush: 1, badReply: 0.5 } as const;
 
 const oneEngine = { engines: 1, outage: { realMs: 0, virtualMs: 0 } } as const;
 
