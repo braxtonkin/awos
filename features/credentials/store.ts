@@ -1,7 +1,7 @@
 import { refusal, type Database } from '../../shared/db/client.ts';
 import type { ConnectorKind } from '../../shared/db/types.ts';
 import { read, type Secret, type Unread } from './kinds.ts';
-import { seal, unseal, type SealingKey } from './seal.ts';
+import { seal, unseal, type Sealed, type SealingKey } from './seal.ts';
 
 export type Slot = { readonly connector: ConnectorKind; readonly owner: string | null };
 
@@ -89,6 +89,36 @@ export async function open(db: Database, key: SealingKey, slot: Slot): Promise<O
   const unsealed = unseal(key, { ciphertext: row.ciphertext, keyVersion: row.key_version }, context(owned));
   return 'secret' in unsealed ? { credential: row.id, replacement: row.action_id, secret: unsealed.secret, expiresAt: row.expires_at } : unsealed;
 }
+
+export const sealFor = (key: SealingKey, slot: Slot, text: string): Sealed => seal(key, text, context(canonical(slot)));
+
+export type Held = { readonly credential: string; readonly replacement: string; readonly expiresAt: Date | null; readonly slot: Slot };
+
+export type WrittenBack =
+  | { readonly written: true; readonly expiresAt: Date }
+  | { readonly written: false; readonly reason: string };
+
+export type WriteBack = (db: Database, key: SealingKey, held: Held, login: string) => Promise<WrittenBack>;
+
+export const writeBack: WriteBack = async (db, key, held, login) => {
+  const found = read({ connector: 'codex', login, madeForAutoWorker: true });
+  if ('refused' in found) return { written: false, reason: `Codex rewrote the login into one the store refuses: ${found.reason}` };
+  if (found.expiresAt === null || (held.expiresAt !== null && found.expiresAt <= held.expiresAt)) {
+    return { written: false, reason: 'Codex rewrote the login, but its access token expires no later than the stored one, so the stored login stays.' };
+  }
+  const slot = canonical(held.slot);
+  const sealed = sealFor(key, slot, found.text);
+  const { numUpdatedRows } = await db
+    .updateTable('credential')
+    .set({ ciphertext: sealed.ciphertext, key_version: sealed.keyVersion, expires_at: found.expiresAt })
+    .where('id', '=', held.credential)
+    .where('action_id', '=', held.replacement)
+    .where('expires_at', 'is not distinct from', held.expiresAt)
+    .executeTakeFirst();
+  return numUpdatedRows === 1n
+    ? { written: true, expiresAt: found.expiresAt }
+    : { written: false, reason: `Someone replaced ${described(slot)}, or another check refreshed it, since this check opened it, so the stored login stays.` };
+};
 
 export async function expiring(db: Database, until: Date): Promise<readonly Expiring[]> {
   const rows = await db

@@ -1,17 +1,23 @@
-import { execFile } from 'node:child_process';
+import { execFile, spawn, spawnSync } from 'node:child_process';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isDeepStrictEqual, parseArgs, promisify } from 'node:util';
 import { sql } from 'kysely';
 import { getContainerRuntimeClient } from 'testcontainers';
+import ts from 'typescript';
 import { z } from 'zod';
 import { connect, type Database } from '../../shared/db/client.ts';
 import { fail, pass, type Check, type Scenario } from '../../tools/verify/check.ts';
 import { withPostgres, type TestPostgres } from '../../tools/verify/postgres.ts';
+import { provePlants } from './invariants.ts';
 import type { Secret } from './kinds.ts';
+import { checksModel } from './checks-model.ts';
+import { liveScenarios } from './live.ts';
+import { mutantName, mutants, noMutantYet, simulate, type MutantName, type Plan, type Run } from './simulate.ts';
 import { mutantEntries, mutantOption } from './mutants.ts';
 import { seal, sealingKey, unseal } from './seal.ts';
 import { expiring, open, replace, type Replaced, type Replacement, type Slot } from './store.ts';
@@ -450,6 +456,7 @@ const storeChecks: readonly Entry[] = [
   { name: 'a Codex login with a refresh token is stored only when marked made for AutoWorker', run: inScratch(refreshNeedsMark) },
   { name: 'every connector kind has its connector row', run: inScratch(everyKindHasARow) },
   { name: 'sealing and opening one token takes at most 1 ms at the median of 3 runs of 10,000', run: offline(sealAndOpenSpeed) },
+  { name: 'tsc rejects a Checks record that misses a connector kind, and a raw login where AccessOnlyLogin is required', run: offline(typeGuards) },
 ];
 
 const repositoryRoot = fileURLToPath(new URL('../../', import.meta.url));
@@ -462,14 +469,14 @@ const setupTables = ['person', 'credential', 'human_action', 'repository', 'rout
 
 const childFailure = z.object({ code: z.number(), stdout: z.string(), stderr: z.string() });
 
-type Run = { readonly code: number; readonly stdout: string; readonly stderr: string; readonly ms: number };
+type SetupRun = { readonly code: number; readonly stdout: string; readonly stderr: string; readonly ms: number };
 
 type SetupWorld = {
   readonly url: string;
   readonly engine: Database;
   readonly env: Readonly<Record<string, string>>;
   readonly secrets: readonly string[];
-  readonly apply: (file: object, env?: Readonly<Record<string, string>>) => Promise<Run>;
+  readonly apply: (file: object, env?: Readonly<Record<string, string>>) => Promise<SetupRun>;
   readonly rows: () => Promise<Readonly<Record<string, number>>>;
 };
 
@@ -496,9 +503,9 @@ const firstRun = ['people 1 added, 0 changed', 'team accounts 0 added, 0 changed
 
 const repeatRun = ['people 0 added, 0 changed', 'team accounts 0 added, 0 changed', 'logins 0 sealed', 'repositories 0 added', 'routines 0 added, 0 changed', ''].join('\n');
 
-const describeRun = (run: Run): string => `exit ${String(run.code)}, stdout ${JSON.stringify(run.stdout)}, stderr ${JSON.stringify(run.stderr)}`;
+const describeRun = (run: SetupRun): string => `exit ${String(run.code)}, stdout ${JSON.stringify(run.stdout)}, stderr ${JSON.stringify(run.stderr)}`;
 
-const leaks = (secrets: readonly string[], runs: readonly Run[]): readonly string[] =>
+const leaks = (secrets: readonly string[], runs: readonly SetupRun[]): readonly string[] =>
   runs.flatMap((run, index) => (secrets.some(secret => run.stdout.includes(secret) || run.stderr.includes(secret)) ? [`run ${String(index + 1)} printed a secret`] : []));
 
 const nothingWritten = (rows: Readonly<Record<string, number>>): readonly string[] =>
@@ -506,7 +513,7 @@ const nothingWritten = (rows: Readonly<Record<string, number>>): readonly string
 
 const lineWith = (text: string, needle: string): string => text.split('\n').find(line => line.includes(needle))?.trim() ?? '';
 
-async function runSetup(folder: string, file: object, env: Readonly<Record<string, string>>): Promise<Run> {
+async function runSetup(folder: string, file: object, env: Readonly<Record<string, string>>): Promise<SetupRun> {
   const path = join(folder, `setup-${randomUUID()}.json`);
   await writeFile(path, JSON.stringify(file, null, 2));
   const started = performance.now();
@@ -795,6 +802,58 @@ async function runEntries(postgres: TestPostgres, entries: readonly Entry[]): Pr
   return checks;
 }
 
+const root = fileURLToPath(new URL('../../', import.meta.url));
+
+function typeErrors(planted: string): readonly string[] {
+  const file = join(root, 'features', 'credentials', 'planted.ts');
+  const parsed = ts.getParsedCommandLineOfConfigFile(join(root, 'tsconfig.json'), {}, { ...ts.sys, onUnRecoverableConfigFileDiagnostic: () => undefined });
+  if (parsed === undefined) throw new Error('tsconfig.json did not parse');
+  const host = ts.createCompilerHost(parsed.options);
+  const readFile = host.readFile.bind(host);
+  const fileExists = host.fileExists.bind(host);
+  host.readFile = path => (resolve(path) === file ? planted : readFile(path));
+  host.fileExists = path => resolve(path) === file || fileExists(path);
+  const program = ts.createProgram([file], parsed.options, host);
+  return ts.getPreEmitDiagnostics(program, program.getSourceFile(file)).map(diagnostic => ts.flattenDiagnosticMessageText(diagnostic.messageText, ' '));
+}
+
+type TypePlant = { readonly what: string; readonly source: string; readonly rejectedWith: string | undefined };
+
+const giveToJob = "import { accessOnly, type AccessOnlyLogin } from './kinds.ts';\nconst launch = (login: AccessOnlyLogin): string => login;\n";
+
+const typePlants: readonly TypePlant[] = [
+  {
+    what: 'a Checks record with no check for github',
+    source: "import type { Checks } from './checks.ts';\nexport const planted: Checks = { codex: { rotates: () => false, run: () => Promise.reject(new Error('planted')) } };\n",
+    rejectedWith: "Property 'github' is missing",
+  },
+  {
+    what: 'a Checks record with a check for every kind',
+    source:
+      "import type { Checks } from './checks.ts';\nimport type { Check } from './kinds.ts';\nconst check: Check = { rotates: () => false, run: () => Promise.reject(new Error('planted')) };\nexport const planted: Checks = { codex: check, github: check };\n",
+    rejectedWith: undefined,
+  },
+  {
+    what: 'a raw login passed where AccessOnlyLogin is required',
+    source: `${giveToJob}export const planted = launch('{"tokens": {"refresh_token": "rt"}}');\nexport const made = accessOnly;\n`,
+    rejectedWith: `is not assignable to parameter of type 'string & $brand<"AccessOnlyLogin">'`,
+  },
+  {
+    what: 'a login that accessOnly made, passed where AccessOnlyLogin is required',
+    source: `${giveToJob}const copy = accessOnly('{}');\nexport const planted = 'login' in copy ? launch(copy.login) : copy.reason;\n`,
+    rejectedWith: undefined,
+  },
+];
+
+function typeGuards(): Outcome {
+  const problems = typePlants.flatMap(({ what, source, rejectedWith }) => {
+    const errors = typeErrors(source);
+    if (rejectedWith === undefined) return errors.length === 0 ? [] : [`tsc rejected ${what}: ${errors.join('; ')}`];
+    return errors.some(error => error.includes(rejectedWith)) ? [] : [`tsc did not reject ${what} with "${rejectedWith}"; it said ${errors.length === 0 ? 'nothing' : errors.join('; ')}`];
+  });
+  return { problems, detail: typePlants.map(plant => `${plant.what}: ${plant.rejectedWith === undefined ? 'accepted' : 'rejected'}`).join('; ') };
+}
+
 const flags = { mutant: { type: 'string' } } as const;
 
 const options = z.object({ mutant: mutantOption.optional() });
@@ -805,7 +864,191 @@ function parseOptions(args: readonly string[]): z.infer<typeof options> {
   return parsed.data;
 }
 
+const simulationFlags = { seeds: { type: 'string' }, seed: { type: 'string' }, steps: { type: 'string' }, checkers: { type: 'string' }, mutant: { type: 'string' } } as const;
+
+const whole = z.coerce.number().int().positive();
+
+const simulationOptions = z.object({
+  seeds: whole.default(200),
+  seed: whole.optional(),
+  steps: whole.default(150),
+  checkers: whole.default(3),
+  mutant: z.union([mutantName, z.literal('all')]).optional(),
+});
+
+type SimulationOptions = z.infer<typeof simulationOptions>;
+
+const mutantSeeds = 20;
+
+const seedList = (options: SimulationOptions, count: number): readonly number[] =>
+  options.seed === undefined ? Array.from({ length: count }, (_, index) => index + 1) : [options.seed];
+
+const replayOf = (run: Run): string =>
+  `npm run verify -- credentials-sim --seed ${String(run.seed)} --steps ${String(run.plan.steps)} --checkers ${String(run.plan.checkers)}${run.plan.mutant === undefined ? '' : ` --mutant ${run.plan.mutant}`}`;
+
+const failureOf = (run: Run): string =>
+  run.failure === undefined
+    ? ''
+    : `seed ${String(run.seed)} broke ${[...new Set(run.failure.broken.map(found => found.property))].join(', ')} at step ${String(run.failure.step)} after "${run.failure.move}" (${JSON.stringify(run.failure.broken[0]?.row)}); replay with ${replayOf(run)}; last moves: ${run.log.slice(-6).join(' | ')}`;
+
+async function cleanSeeds(postgres: TestPostgres, options: SimulationOptions): Promise<readonly Check[]> {
+  const plan: Plan = { seeds: seedList(options, options.seeds), steps: options.steps, checkers: options.checkers };
+  const started = performance.now();
+  const runs = await simulate(postgres, [plan]);
+  const seconds = (performance.now() - started) / 1000;
+  const failed = runs.filter(run => run.failure !== undefined);
+  const idle = runs.filter(run => run.refreshed === 0);
+  const sum = (pick: (run: Run) => number): number => runs.reduce((total, run) => total + pick(run), 0);
+  const name = `${String(runs.length)} seeds, ${String(failed.length)} violations`;
+  return [
+    failed.length === 0
+      ? pass(name, `${String(options.checkers)} checkers, ${String(options.steps)} steps a seed, in ${seconds.toFixed(1)} s: ${String(sum(run => run.refreshed))} refreshes written back, ${String(sum(run => run.interrupted))} interrupted refreshes caught, ${String(sum(run => run.crashes))} checkers crashed mid-check, ${String(sum(run => run.jobs))} jobs given a login`)
+      : fail(name, failed.slice(0, 3).map(failureOf).join('; ')),
+    idle.length === 0
+      ? pass('every seed wrote at least one refreshed login back', `fewest refreshes in a seed: ${String(Math.min(...runs.map(run => run.refreshed)))}`)
+      : fail('every seed wrote at least one refreshed login back', `seeds ${idle.map(run => String(run.seed)).join(', ')} refreshed nothing`),
+  ];
+}
+
+async function mutantCheck(postgres: TestPostgres, mutant: MutantName, options: SimulationOptions): Promise<Check> {
+  const expected: readonly string[] = mutants[mutant].breaks;
+  const runs = await simulate(postgres, [{ seeds: seedList(options, Math.min(options.seeds, mutantSeeds)), steps: options.steps, checkers: options.checkers, mutant }]);
+  const breaking = runs.filter(run => run.failure?.broken.some(found => expected.includes(found.property)) === true);
+  const name = `${expected.join(' or ')} fails under the ${mutant} mutant`;
+  const first = breaking[0];
+  return first === undefined ? fail(name, `no seed of ${String(runs.length)} broke it`) : pass(name, `${String(breaking.length)} of ${String(runs.length)} seeds; first: ${failureOf(first)}`);
+}
+
+async function plantChecks(postgres: TestPostgres): Promise<Check> {
+  const proofs = await provePlants(postgres);
+  const wrong = proofs.filter(proof => proof.atStart.length > 0 || !proof.reported.includes(proof.property));
+  const name = 'each property reports its planted violation, and nothing before it';
+  return wrong.length === 0 ? pass(name, `${String(proofs.length)} plants: ${proofs.map(proof => proof.property).join(', ')}`) : fail(name, JSON.stringify(wrong));
+}
+
+async function catalogCheck(postgres: TestPostgres): Promise<Check> {
+  const scratch = await postgres.scratch();
+  const db = connect(scratch.url, 1);
+  try {
+    const { rows } = await sql<{ name: string }>`
+      select c.conname as name from pg_constraint c join pg_class t on t.oid = c.conrelid left join pg_attribute a on a.attrelid = c.conrelid and a.attnum = c.conkey[1]
+      where c.conrelid = 'credential_check'::regclass and not (c.contype = 'p' and c.conname = t.relname || '_pkey') and not (c.contype = 'n' and c.conname = t.relname || '_' || a.attname || '_not_null')
+      union all
+      select i.relname from pg_index x join pg_class i on i.oid = x.indexrelid
+      where x.indrelid = 'credential_check'::regclass and not exists (select 1 from pg_constraint c where c.conindid = x.indexrelid and c.contype in ('p', 'u', 'x'))`.execute(db);
+    const guards = rows.map(row => row.name);
+    const listed = [...Object.values(mutants).flatMap(mutant => (mutant.dropIndex === undefined ? [] : [mutant.dropIndex])), ...Object.values(noMutantYet).flat()];
+    const problems = [...guards.filter(guard => !listed.includes(guard)).map(guard => `${guard} is in neither list`), ...listed.filter(name => !guards.includes(name)).map(name => `${name} is listed, but credential_check has no such guard`)];
+    const name = 'every named constraint and index on credential_check has a mutant or a reason in noMutantYet';
+    return problems.length === 0 ? pass(name, guards.join(', ')) : fail(name, problems.join('; '));
+  } finally {
+    await db.destroy();
+    await scratch.drop();
+  }
+}
+
+async function simulationChecks(postgres: TestPostgres, options: SimulationOptions): Promise<readonly Check[]> {
+  if (options.mutant === 'all') {
+    const checks: Check[] = [await plantChecks(postgres), await catalogCheck(postgres)];
+    for (const mutant of mutantName.options) checks.push(await mutantCheck(postgres, mutant, options));
+    return checks;
+  }
+  if (options.mutant !== undefined) return [await mutantCheck(postgres, options.mutant, options)];
+  return [...(await cleanSeeds(postgres, options)), await plantChecks(postgres)];
+}
+
+const engineMain = join(root, 'services', 'engine', 'main.ts');
+
+const expiryHeader = '2026-12-31 23:59:59 UTC';
+
+async function fakeGithub(): Promise<{ readonly url: string; readonly close: () => Promise<void> }> {
+  const server = createServer((request, response) => {
+    response.writeHead(request.url === '/user' ? 200 : 404, { 'content-type': 'application/json', 'github-authentication-token-expiration': expiryHeader });
+    response.end(JSON.stringify({ login: 'ada' }));
+  });
+  await new Promise<void>(ready => server.listen(0, '127.0.0.1', ready));
+  const address = server.address();
+  if (address === null || typeof address === 'string') throw new Error('the fake GitHub server has no port');
+  return { url: `http://127.0.0.1:${String(address.port)}`, close: () =>
+      new Promise(done => {
+        server.close(() => {
+          done();
+        });
+      }),
+  };
+}
+
+async function engineChecksGithub(postgres: TestPostgres): Promise<readonly Check[]> {
+  const scratch = await postgres.scratch();
+  const db = connect(scratch.url, 1);
+  const github = await fakeGithub();
+  const keyText = randomBytes(32).toString('base64');
+  const key = sealingKey({ CREDENTIAL_KEY: keyText, CREDENTIAL_KEY_VERSION: '1' });
+  try {
+    const { id: ada } = await db.insertInto('person').values({ email: 'ada@example.com', name: 'Ada', kind: 'person' }).returning('id').executeTakeFirstOrThrow();
+    const stored = await replace(db, key, { action: randomUUID(), by: ada, at: new Date(), owner: ada, secret: { connector: 'github', token: fakeGithubToken() } });
+    if ('refused' in stored) throw new Error(stored.reason);
+    const env = { ...process.env, DATABASE_URL: scratch.url, CREDENTIAL_KEY: keyText, CREDENTIAL_KEY_VERSION: '1', CHECKS_EVERY_MS: '500', GITHUB_API_URL: github.url };
+    const child = spawn(process.execPath, [engineMain], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+    let said = '';
+    child.stdout.on('data', (chunk: Buffer) => {
+      said += chunk.toString('utf8');
+    });
+    child.stderr.on('data', (chunk: Buffer) => {
+      said += chunk.toString('utf8');
+    });
+    const exited = new Promise<number | null>(done => {
+      child.on('exit', code => {
+        done(code);
+      });
+    });
+    const deadline = performance.now() + 20_000;
+    while (!said.includes('checks: checked the github credential') && performance.now() < deadline) await new Promise(done => setTimeout(done, 50));
+    child.kill('SIGTERM');
+    const code = await exited;
+    const row = await db.selectFrom('credential').select(['state', 'checked_at', 'expires_at']).where('id', '=', stored.credential).executeTakeFirstOrThrow();
+    const checks = await db.selectFrom('credential_check').select(['outcome', 'checker']).where('credential_id', '=', stored.credential).execute();
+    const short = spawnSync(process.execPath, [engineMain], { env: { ...env, CREDENTIAL_KEY: randomBytes(31).toString('base64') }, encoding: 'utf8', timeout: 20_000 });
+    const expected = new Date(Date.parse(expiryHeader.replace(' UTC', 'Z').replace(' ', 'T'))).toISOString();
+    const recorded = { state: row.state, checked: row.checked_at !== null, expiresAt: row.expires_at?.toISOString() ?? null, outcomes: checks.map(check => check.outcome) };
+    const ranName = 'the engine process checks a stored GitHub token on its checks loop, records valid with the expiry header, and exits 0 on SIGTERM';
+    const shortName = 'the engine refuses to start with a 31-byte CREDENTIAL_KEY and names the variable';
+    return [
+      code === 0 && isDeepStrictEqual(recorded, { state: 'valid', checked: true, expiresAt: expected, outcomes: ['valid'] })
+        ? pass(ranName, `${JSON.stringify(recorded)}; checker ${checks[0]?.checker ?? 'none'}`)
+        : fail(ranName, `exit ${String(code)}, recorded ${JSON.stringify(recorded)}; the engine said: ${said.trim().replaceAll('\n', ' | ')}`),
+      short.status === 1 && short.stderr.includes('CREDENTIAL_KEY') ? pass(shortName, short.stderr.trim()) : fail(shortName, `exit ${String(short.status)}: ${short.stdout}${short.stderr}`),
+    ];
+  } finally {
+    await github.close();
+    await db.destroy();
+    await scratch.drop();
+  }
+}
+
+function parseSimulationOptions(args: readonly string[]): SimulationOptions {
+  const parsed = simulationOptions.safeParse(parseArgs({ args: [...args], options: simulationFlags, strict: true, allowPositionals: false }).values);
+  if (!parsed.success) throw new Error(z.prettifyError(parsed.error));
+  return parsed.data;
+}
+
 export const scenarios: readonly Scenario[] = [
+  checksModel,
+  ...liveScenarios,
+  {
+    name: 'engine-checks',
+    summary: "starts the engine's entry point with a sealing key against Postgres and a fake GitHub API, and waits for its checks loop to record a stored token valid",
+    run: () => withPostgres(engineChecksGithub),
+  },
+  {
+    name: 'credentials-sim',
+    summary:
+      'runs several engine checkers against real Postgres and a fake token issuer that refuses a reused refresh token, crashes them mid-refresh, and checks every property of the Checks model after each step; --mutant all proves each guard can fail',
+    run: args => {
+      const options = parseSimulationOptions(args);
+      return withPostgres(postgres => simulationChecks(postgres, options));
+    },
+  },
   {
     name: 'credentials',
     summary: 'stores credentials sealed with AES-256-GCM in real Postgres and proves the dashboard role can neither read one back nor write one except through replace_credential; --mutant all proves each guard and each missing grant can fail',

@@ -37,6 +37,7 @@
   },
   "dependencies": {
     "@kubernetes/client-node": "1.4.0",
+    "@octokit/core": "7.0.8",
     "dbmate": "2.36.0",
     "kysely": "0.29.6",
     "pg": "8.23.0",
