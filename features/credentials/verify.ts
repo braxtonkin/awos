@@ -819,7 +819,7 @@ function typeErrors(planted: string): readonly string[] {
 
 type TypePlant = { readonly what: string; readonly source: string; readonly rejectedWith: string | undefined };
 
-const giveToJob = "import { accessOnly, type AccessOnlyLogin } from './kinds.ts';\nconst launch = (login: AccessOnlyLogin): string => login;\n";
+const giveToJob = "import { accessOnly, type AccessOnlyLogin } from '../../shared/codex-login.ts';\nconst launch = (login: AccessOnlyLogin): string => login;\n";
 
 const typePlants: readonly TypePlant[] = [
   {

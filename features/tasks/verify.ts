@@ -896,7 +896,8 @@ async function sigtermChecks(postgres: TestPostgres): Promise<readonly Check[]> 
       .execute();
     const halfReleased = halves.filter(row => row.lost !== Number(row.lostAttempts ?? '0'));
     const restarted = runEngine(scratch.stableUrl, { REAPER_EVERY_MS: '250', LEASE_MS: '1000' });
-    const finished = await until(15_000, async () => (await lost(backlog)) === backlog.length);
+    const restartedUp = await restarted.waitFor(startLine);
+    const finished = restartedUp && (await until(15_000, async () => (await lost(backlog)) === backlog.length));
     const secondStatus = await restarted.terminate();
     const stopName = 'the engine got SIGTERM in the middle of a reaper pass, finished that pass, and exited 0';
     const halfName = 'no attempt was left half-released: every task counts exactly its lost attempts';
@@ -908,7 +909,7 @@ async function sigtermChecks(postgres: TestPostgres): Promise<readonly Check[]> 
       halfReleased.length === 0 ? pass(halfName, `${String(halves.length)} tasks checked`) : fail(halfName, JSON.stringify(halfReleased)),
       finished && secondStatus === 0
         ? pass(backlogName, restarted.said().replaceAll('\n', ' '))
-        : fail(backlogName, `released ${String(await lost(backlog))} of ${String(backlog.length)}, exit ${String(secondStatus)}: ${restarted.said()} ${restarted.errors()}`),
+        : fail(backlogName, `started ${String(restartedUp)}, released ${String(await lost(backlog))} of ${String(backlog.length)}, exit ${String(secondStatus)}: ${restarted.said()} ${restarted.errors()}`),
     ];
   } finally {
     await db.destroy();

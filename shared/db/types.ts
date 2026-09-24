@@ -139,6 +139,7 @@ export interface Repository {
   fast_test_command: string | null;
   github: string;
   id: Generated<Int8>;
+  job_image: string | null;
   saved_by: string;
   verify_provider: Generated<string>;
 }
