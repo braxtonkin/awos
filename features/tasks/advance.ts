@@ -4,7 +4,7 @@ import type { Database } from '../../shared/db/client.ts';
 import type { DB, HumanActionKind, Verdict } from '../../shared/db/types.ts';
 import type { Answer } from '../../shared/review.ts';
 import { inTransaction, type Transacting } from '../../shared/transaction.ts';
-import type { Instruction, StepVerdict, Unasked, Workflow } from '../../shared/workflow.ts';
+import type { Instruction, Unasked, Workflow } from '../../shared/workflow.ts';
 import { allows, approved, decide, lastStepOf, retried, stopped, waitingOn, type Held, type Next } from './decide.ts';
 import type { Workflows } from './start.ts';
 
@@ -99,7 +99,7 @@ const columnsOf = (next: Next, stoppedBy: string | null = null) => ({
 export type Standing = {
   readonly task: string;
   readonly actsAs: string;
-  readonly verdict: StepVerdict;
+  readonly verdict: Verdict;
   readonly state: Next['standing']['state'];
   readonly waitingOn: string | null;
 };
@@ -156,6 +156,24 @@ export async function abandon(db: Database, attempt: string, reason: Instruction
   });
 }
 
+export async function handOff(db: Database, attempt: string, output: unknown, now: Date, then: Then): Promise<boolean> {
+  return inTransaction(db, async writer => {
+    const found = await writer
+      .selectFrom('attempt')
+      .innerJoin('task', 'task.id', 'attempt.task_id')
+      .select(['attempt.task_id', 'attempt.run_as_id', 'task.state', 'task.waiting_on'])
+      .where('attempt.id', '=', attempt)
+      .where('attempt.finished_at', 'is', null)
+      .forUpdate()
+      .executeTakeFirst();
+    if (found === undefined) return false;
+    await writer.updateTable('attempt').set({ finished_at: now, verdict: 'handed_off', output: JSON.stringify(output) }).where('attempt.id', '=', attempt).execute();
+    await writer.updateTable('task').set({ lost: 0 }).where('task.id', '=', found.task_id).execute();
+    await then(writer, { task: found.task_id, actsAs: found.run_as_id, verdict: 'handed_off', state: found.state, waitingOn: found.waiting_on });
+    return true;
+  });
+}
+
 async function answerFits(writer: Writer, workflow: Workflow, attempt: string, answer: Answer): Promise<boolean> {
   const row = await writer.selectFrom('attempt').select(['attempt.step', 'attempt.output']).where('attempt.id', '=', attempt).executeTakeFirstOrThrow();
   const parsed = workflow.steps.find(kind => kind.name === row.step)?.output.safeParse(row.output);
@@ -188,9 +206,9 @@ const recordOf = (action: PersonAction): { readonly kind: HumanActionKind; reado
 
 export type StopTurn = (writer: Writer, attempt: string, now: Date) => Promise<void>;
 
-const noTurn: StopTurn = () => Promise.resolve();
+export const noTurnToStop: StopTurn = () => Promise.resolve();
 
-export async function act(db: Database, workflows: Workflows, task: string, by: Person, action: PersonAction, stopTurn: StopTurn = noTurn): Promise<Acted> {
+export async function act(db: Database, workflows: Workflows, task: string, by: Person, action: PersonAction, stopTurn: StopTurn): Promise<Acted> {
   return db.transaction().execute(async writer => {
     const live = await writer.selectFrom('attempt').select('attempt.id').where('attempt.task_id', '=', task).where('attempt.finished_at', 'is', null).forUpdate().execute();
     const { held, workflow } = await hold(writer, workflows, task);
@@ -229,3 +247,18 @@ export async function approveFromOutside(db: Database, task: string): Promise<bo
   return numUpdatedRows === 1n;
 }
 
+export type Addressed = { readonly task: string; readonly person: string; readonly review: string | null };
+
+export async function address(db: Database, key: string, email: string, step: string | null): Promise<Addressed | string> {
+  const task = await db
+    .selectFrom('task')
+    .leftJoin('attempt as review', 'review.id', 'task.review_attempt')
+    .select(['task.id', 'task.review_attempt', 'review.step as reviewed'])
+    .where('task.key', '=', key)
+    .executeTakeFirst();
+  if (task === undefined) return `No task has the key ${key}.`;
+  const person = await db.selectFrom('person').select('person.id').where('person.email', '=', email.toLowerCase()).executeTakeFirst();
+  if (person === undefined) return `No person has the email ${email}.`;
+  if (step !== null && task.reviewed !== step) return `Task ${key} waits on no review of ${step}.`;
+  return { task: task.id, person: person.id, review: task.review_attempt };
+}

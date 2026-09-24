@@ -9,7 +9,7 @@ import { runLoop, type Clock, type Loop } from '../../shared/loop.ts';
 import { outcomes, review as reviewSchema, type Answer } from '../../shared/review.ts';
 import { step, type Failure as StepFailure, type StepKind, type StepVerdict, type Workflow } from '../../shared/workflow.ts';
 import type { TestPostgres } from '../../tools/verify/postgres.ts';
-import { act, advance, approveFromOutside, note, type PersonAction, type Report } from './advance.ts';
+import { act, advance, noTurnToStop, approveFromOutside, note, type PersonAction, type Report } from './advance.ts';
 import { claim, claimable, renew } from './claim.ts';
 import { logLostApprovals, loseApprovals, watch, type PropertyName, type Violation } from './invariants.ts';
 import { coreRunAs } from './run-as.ts';
@@ -677,7 +677,7 @@ async function personActs(turn: Turn, pool: 'stoppable' | 'retryable' | 'review'
   if (task === undefined || person === undefined) return `no task to ${label}`;
   const chosen = action(task);
   if (chosen === undefined) return `task ${task.id}: nothing to ${label}`;
-  const outcome = await act(db, byName, task.id, { id: randomUUID(), person, at: now }, chosen);
+  const outcome = await act(db, byName, task.id, { id: randomUUID(), person, at: now }, chosen, noTurnToStop);
   const said = 'refused' in outcome ? `refused ${outcome.refused}` : 'recorded';
   count(world, `${label} ${said}`);
   return `task ${task.id}: ${label} ${said}`;
@@ -866,7 +866,7 @@ const rules: Readonly<Record<Move, Rule>> = {
       const old = pick(random, behindANewerReview.length > 0 && random() < 0.8 ? behindANewerReview : olds);
       const person = pick(random, world.people);
       if (old === undefined || person === undefined) return 'no stale review to approve';
-      const outcome = await act(db, byName, old.task_id, { id: randomUUID(), person, at: now }, { kind: 'approve', review: old.id });
+      const outcome = await act(db, byName, old.task_id, { id: randomUUID(), person, at: now }, { kind: 'approve', review: old.id }, noTurnToStop);
       const said = 'refused' in outcome ? `refused ${outcome.refused}` : 'recorded';
       count(world, `stale approve ${said}`);
       return `task ${old.task_id}: approve of old attempt ${old.id} ${said}`;
@@ -988,7 +988,7 @@ const rules: Readonly<Record<Move, Rule>> = {
       };
       const [finished, acted, ...claims] = await Promise.all([
         settle(advance(db, byName, worker.attempt, report, now)),
-        settle(act(db, byName, live.task_id, { id: randomUUID(), person, at: now }, action)),
+        settle(act(db, byName, live.task_id, { id: randomUUID(), person, at: now }, action, noTurnToStop)),
         settle(claim(db, live.task_id, now, profile.leaseMs, await runsAs(db, live.task_id), null)),
         settle(claim(db, live.task_id, now, profile.leaseMs, await runsAs(db, live.task_id), null)),
       ]);

@@ -1,6 +1,5 @@
 import type { Owe } from './actions.ts';
 import type { Verdict } from './db/types.ts';
-import type { StepVerdict } from './workflow.ts';
 
 export type Ran = { readonly command: string; readonly cwd: string | null; readonly exitCode: number | null; readonly output: string };
 
@@ -23,7 +22,7 @@ export type Settled = { readonly output: unknown; readonly evidence: Evidence | 
 
 export type Verdicted = {
   readonly step: string;
-  readonly verdict: StepVerdict;
+  readonly verdict: Verdict;
   readonly ticket: Ticket;
   readonly repository: { readonly github: string; readonly branch: string };
   readonly taskBranch: { readonly name: string; readonly head: string | null };
