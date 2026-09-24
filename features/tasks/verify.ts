@@ -59,6 +59,16 @@ const loopsBetweenImplementAndVerify: Shape = {
   holds: run => loopedTask(run, views => views.every(view => view.state === 'ready') && ['implement', 'verify'].every(stage => views.some(view => view.stage === stage))),
 };
 
+const loopsFromLandToImplement: Shape = {
+  label: 'by a loop from land back to implement',
+  holds: run => loopedTask(run, views => views.every(view => view.state === 'ready') && ['implement', 'verify', 'land'].every(stage => views.some(view => view.stage === stage))),
+};
+
+const approvesForever: Shape = {
+  label: 'by outside approvals that never stop',
+  holds: run => run.loopActions.includes('OutsideApproval'),
+};
+
 const rerunsVerifyForever: Shape = {
   label: 'by verify rerunning forever',
   holds: run => loopedTask(run, views => views.every(view => view.state === 'ready' && view.stage === 'verify')),
@@ -124,13 +134,14 @@ const action = (guard: string, without: string, property: string, extra: Pick<Mu
   ...extra,
 });
 
-const unsettled = (guard: string, without: string, shape: Shape): Mutant => ({
+const unsettled = (guard: string, without: string, shape: Shape, extra: Pick<Mutant, 'overrides'> = {}): Mutant => ({
   guard,
   without,
   kind: 'PROPERTY',
   property: 'EveryTaskSettles',
   violation: 'Temporal properties were violated',
   shape,
+  ...extra,
 });
 
 const onlyReaps = { MaxHumanActions: '0' };
@@ -161,6 +172,18 @@ const mutants: readonly Mutant[] = [
   invariant('PassResetsStageRetries', 'a pass keeps the stage retries', 'PassLeavesNoStageRetries'),
   action('RetryResetsStageRetries', "a person's retry keeps the stage retries", 'RetryLeavesNoStageRetries'),
   unsettled('ReaperIsFair', 'the reaper has no fairness', hungWorkerHoldsItsTask),
+  invariant('EndStageIsFinal', "passing a routine's end stage does not end the task", 'StopsAtItsEndStage'),
+  action('GateBlocksUntilApproved', 'a gated stage passes straight to the next stage', 'GatePassesOnlyOnApprove'),
+  action('ReturnClearsApprovals', 'a return to Implement keeps the approval of a gate it must pass again', 'GatePassesOnlyOnApprove'),
+  invariant('ReturnClearsApprovals', 'a return to Implement keeps the approval of a gate it must pass again', 'ApprovalsMatchGatesPassed'),
+  action('MergeChecksGates', 'Land merges without checking gates while a gate lets a task through', 'MergeNeedsEveryGate', { overrides: { GateBlocksUntilApproved: 'FALSE' } }),
+  action('MergeWaitsForMergeable', 'Land merges past a red check on a pull request that left draft before its checks were green', 'MergeNeedsEveryGate', { overrides: { IgnoreLaterReviews: '{}' } }),
+  action('MergeWaitsForMergeable', 'Land merges past a later review that its routine ignores', 'MergeNeedsEveryGate', { overrides: { ReadyBeforeGreen: '{}' } }),
+  invariant('ReviewReturnIsCapped', 'every review that asks for changes returns the task to Implement', 'ReviewReturnsCapped'),
+  invariant('RetryResumesStopped', 'Retry cannot resume a stopped task', 'StoppedTaskCanResume'),
+  invariant('RetryKeepsReviews', "a person's retry forgets the review return", 'StoppedTaskCanResume'),
+  unsettled('VerifyPassKeepsLandRounds', 'a Verify pass clears the Land rounds of a task with no gate', loopsFromLandToImplement, { overrides: { ReadyBeforeGreen: '{t1}' } }),
+  unsettled('OutsideApprovalsAreFinite', 'outside approvals may never stop', approvesForever),
 ];
 
 const readConfig = (file: string): string => readFileSync(new URL(file, import.meta.url), 'utf8');
