@@ -1,20 +1,40 @@
 ------------------------------- MODULE Tasks -------------------------------
-EXTENDS Naturals, FiniteSets
+EXTENDS Naturals, Sequences, FiniteSets
 
 CONSTANTS
     Tasks,
     Workers,
     NoTask,
+    Steps,
+    ReturnsTo,
+    Checks,
+    Merges,
+    Asking,
+    EndSteps,
+    GateSteps,
+    Gated,
+    IgnoreLaterReviews,
+    ReadyBeforeGreen,
+    Reassignable,
     MaxRounds,
     MaxEnvReruns,
     MaxLost,
+    MaxStageRetries,
+    MaxInputWaits,
     MaxHumanActions,
+    MaxReassignments,
     ClaimIsExclusive,
     ClaimNeedsReadyTask,
+    ClaimNeedsAPerson,
+    NoOneParksTask,
     LateResultIsRefused,
     RoundsAreCapped,
     EnvRerunsAreCapped,
     LostAttemptsAreCapped,
+    StageRetriesAreCapped,
+    InputWaitsAreCapped,
+    PassResetsStageRetries,
+    RetryResetsStageRetries,
     BehaviorFailureReturnsToImplement,
     BehaviorFailureLeavesVerify,
     EnvironmentFailureStaysInVerify,
@@ -24,37 +44,81 @@ CONSTANTS
     StopEndsAttempt,
     StopSparesDoneTasks,
     EndingSparesOtherTasks,
-    ReaperIsFair
+    ReaperIsFair,
+    EndStageIsFinal,
+    GateBlocksUntilApproved,
+    ReturnClearsApprovals,
+    MergeChecksGates,
+    MergeWaitsForMergeable,
+    ReviewReturnIsCapped,
+    RetryResumesStopped,
+    RetryKeepsReviews,
+    VerifyPassKeepsLandRounds,
+    OutsideApprovalsAreFinite,
+    LaterReviewParks,
+    OutsideApprovalNeedsAWait,
+    RetryKeepsApprovals
+
+CodeChangeSteps == <<"specify", "implement", "verify", "land">>
+
+StepSet == {Steps[i] : i \in DOMAIN Steps}
+
+Rank == [s \in StepSet |-> CHOOSE i \in DOMAIN Steps : Steps[i] = s]
+
+First == Steps[1]
+
+Last == Steps[Len(Steps)]
+
+After == [s \in StepSet \ {Last} |-> Steps[Rank[s] + 1]]
+
+Returning == Checks \cup Merges
+
+Gates(t) == IF t \in Gated THEN GateSteps ELSE {}
+
+EndsFor(t) == {e \in EndSteps : \A g \in Gates(t) : Rank[g] < Rank[e]}
 
 ASSUME NoTask \notin Tasks
 
-ASSUME MaxRounds \in Nat \ {0} /\ MaxEnvReruns \in Nat /\ MaxLost \in Nat \ {0} /\ MaxHumanActions \in Nat
+ASSUME
+    /\ Steps \in Seq(STRING)
+    /\ Len(Steps) > 0
+    /\ Cardinality(StepSet) = Len(Steps)
+    /\ Returning \cup Asking \cup EndSteps \subseteq StepSet
+    /\ Checks \cap Merges = {}
+    /\ ReturnsTo \in StepSet
+    /\ \A r \in Returning : Rank[ReturnsTo] < Rank[r]
+    /\ GateSteps \subseteq DOMAIN After
+    /\ Gated \cup IgnoreLaterReviews \cup ReadyBeforeGreen \cup Reassignable \subseteq Tasks
+    /\ \A t \in Tasks : EndsFor(t) # {}
 
-VARIABLES task, attempt, worker, lateResults, humanActions, claimEpoch
+ASSUME
+    /\ MaxRounds \in Nat \ {0}
+    /\ MaxEnvReruns \in Nat
+    /\ MaxLost \in Nat \ {0}
+    /\ MaxStageRetries \in Nat
+    /\ MaxInputWaits \in Nat
+    /\ MaxHumanActions \in Nat
+    /\ MaxReassignments \in Nat
 
-vars == <<task, attempt, worker, lateResults, humanActions, claimEpoch>>
+VARIABLES task, attempt, worker, lateResults, humanActions, claimEpoch, runnable, runAs, reassignments
 
-Stages == {"specify", "implement", "verify", "land"}
+vars == <<task, attempt, worker, lateResults, humanActions, claimEpoch, runnable, runAs, reassignments>>
 
-Rank == [s \in Stages |->
-    CASE s = "specify" -> 0
-      [] s = "implement" -> 1
-      [] s = "verify" -> 2
-      [] s = "land" -> 3]
+MaxReviewReturns == 1
 
-After == [s \in {"specify", "implement", "verify"} |->
-    CASE s = "specify" -> "implement"
-      [] s = "implement" -> "verify"
-      [] s = "verify" -> "land"]
+Waiting == {"waiting", "gated", "asking", "awaitingApproval"}
 
-TaskStates == {"ready", "waiting", "stopped", "done"}
+TaskStates == {"ready", "stopped", "done"} \cup Waiting
 
-Settled == {"waiting", "stopped", "done"}
+Settled == {"stopped", "done"} \cup Waiting
 
-Outcomes(stage) ==
-    IF stage = "verify"
-    THEN {"pass", "behaviorFail", "environmentFail"}
-    ELSE {"pass", "fail"}
+NoRounds == [r \in Returning |-> 0]
+
+Outcomes(s) ==
+    {"pass"}
+      \cup (IF s \in Checks THEN {"behaviorFail", "environmentFail"} ELSE {"fail"})
+      \cup (IF s \in Asking THEN {"needsInput"} ELSE {})
+      \cup (IF s \in Merges THEN {"red", "changesRequested", "reviewRequired"} ELSE {})
 
 Min(a, b) == IF a < b THEN a ELSE b
 
@@ -66,56 +130,113 @@ SumOver(f, S) == IF S = {} THEN 0 ELSE LET x == CHOOSE x \in S : TRUE IN f[x] + 
 Spent == SumOver(humanActions, Tasks)
 
 TypeOK ==
-    /\ task \in [Tasks -> [stage : Stages,
+    /\ task \in [Tasks -> [step : StepSet,
                            state : TaskStates,
-                           rounds : 0..(MaxRounds + 1),
+                           end : StepSet,
+                           approved : SUBSET DOMAIN After,
+                           reviews : 0..(MaxReviewReturns + 1),
+                           rounds : [Returning -> 0..(MaxRounds + 1)],
                            reruns : 0..(MaxEnvReruns + 1),
                            lost : 0..(MaxLost + 1),
-                           outputs : SUBSET Stages,
+                           retries : 0..(MaxStageRetries + 1),
+                           inputWaits : 0..(MaxInputWaits + 1),
+                           outputs : SUBSET StepSet,
                            passed : BOOLEAN]]
     /\ attempt \in [Workers -> Tasks \cup {NoTask}]
     /\ worker \in [Workers -> {"idle", "busy", "hung"}]
     /\ lateResults \subseteq Tasks
     /\ humanActions \in [Tasks -> 0..MaxHumanActions]
     /\ claimEpoch \in [Workers -> 0..MaxHumanActions]
+    /\ runnable \in [Tasks -> BOOLEAN]
+    /\ runAs \in [Workers -> BOOLEAN]
+    /\ reassignments \in 0..MaxReassignments
 
 Init ==
-    /\ task = [t \in Tasks |-> [stage |-> "specify", state |-> "ready", rounds |-> 0, reruns |-> 0, lost |-> 0, outputs |-> {}, passed |-> FALSE]]
+    /\ \E ends \in [Tasks -> EndSteps] :
+         /\ \A t \in Tasks : ends[t] \in EndsFor(t)
+         /\ task = [t \in Tasks |-> [step |-> First, state |-> "ready", end |-> ends[t], approved |-> {}, reviews |-> 0, rounds |-> NoRounds, reruns |-> 0, lost |-> 0, retries |-> 0, inputWaits |-> 0, outputs |-> {}, passed |-> FALSE]]
     /\ attempt = [w \in Workers |-> NoTask]
     /\ worker = [w \in Workers |-> "idle"]
     /\ lateResults = {}
     /\ humanActions = [t \in Tasks |-> 0]
     /\ claimEpoch = [w \in Workers |-> 0]
+    /\ runnable = [t \in Tasks |-> TRUE]
+    /\ runAs = [w \in Workers |-> FALSE]
+    /\ reassignments = 0
 
-Passed(current, s) ==
-    IF s = "land"
-    THEN [current EXCEPT !.state = "done", !.outputs = @ \cup {s}]
-    ELSE [current EXCEPT !.stage = After[s],
-                         !.outputs = @ \cup {s},
-                         !.rounds = IF s = "verify" THEN 0 ELSE @,
-                         !.reruns = 0]
+Passed(t, current, s) ==
+    LET kept == [current EXCEPT !.outputs = @ \cup {s},
+                                !.rounds = [r \in Returning |-> IF r = s \/ (s \in Checks /\ ~VerifyPassKeepsLandRounds) THEN 0 ELSE @[r]],
+                                !.reruns = 0,
+                                !.inputWaits = 0,
+                                !.retries = IF PassResetsStageRetries THEN 0 ELSE @]
+    IN IF s = Last \/ (EndStageIsFinal /\ s = current.end) THEN [kept EXCEPT !.state = "done"]
+       ELSE IF GateBlocksUntilApproved /\ s \in Gates(t) \ current.approved THEN [kept EXCEPT !.state = "gated"]
+       ELSE [kept EXCEPT !.step = After[s]]
 
-Failed(current) == [current EXCEPT !.state = IF FailureParksTask THEN "waiting" ELSE "stopped"]
+Failed(current) ==
+    IF StageRetriesAreCapped /\ current.retries >= MaxStageRetries
+    THEN [current EXCEPT !.state = IF FailureParksTask THEN "waiting" ELSE "stopped"]
+    ELSE [current EXCEPT !.retries = Min(@ + 1, MaxStageRetries + 1)]
+
+NeedsInput(current) ==
+    IF InputWaitsAreCapped /\ current.inputWaits >= MaxInputWaits
+    THEN Failed(current)
+    ELSE [current EXCEPT !.state = "asking", !.inputWaits = Min(@ + 1, MaxInputWaits + 1)]
+
+SentBack(current, s) ==
+    [current EXCEPT !.step = s,
+                    !.approved = IF ReturnClearsApprovals THEN {g \in @ : Rank[g] < Rank[s]} ELSE @,
+                    !.reruns = 0,
+                    !.retries = 0,
+                    !.inputWaits = 0]
+
+RoundFailed(current, target) ==
+    LET s == current.step
+    IN IF RoundsAreCapped /\ current.rounds[s] + 1 >= MaxRounds
+       THEN [current EXCEPT !.state = "waiting", !.rounds[s] = @ + 1]
+       ELSE [SentBack(current, target) EXCEPT !.rounds[s] = Min(@ + 1, MaxRounds + 1)]
 
 BehaviorFailed(current) ==
-    IF RoundsAreCapped /\ current.rounds + 1 >= MaxRounds
-    THEN [current EXCEPT !.state = "waiting", !.rounds = @ + 1]
-    ELSE [current EXCEPT !.stage = CASE ~BehaviorFailureLeavesVerify -> "verify"
-                                     [] BehaviorFailureReturnsToImplement -> "implement"
-                                     [] OTHER -> "specify",
-                         !.rounds = Min(@ + 1, MaxRounds + 1),
-                         !.reruns = 0]
+    RoundFailed(current, CASE ~BehaviorFailureLeavesVerify -> current.step
+                           [] BehaviorFailureReturnsToImplement -> ReturnsTo
+                           [] OTHER -> First)
 
-EnvironmentFailed(current) ==
-    CASE ~EnvironmentFailureStaysInVerify -> Passed(current, current.stage)
+EnvironmentFailed(t, current) ==
+    CASE ~EnvironmentFailureStaysInVerify -> Passed(t, current, current.step)
       [] EnvRerunsAreCapped /\ current.reruns >= MaxEnvReruns -> [current EXCEPT !.state = "waiting"]
       [] OTHER -> [current EXCEPT !.reruns = Min(@ + 1, MaxEnvReruns + 1)]
 
-Judged(current, v) ==
-    CASE v = "pass" -> Passed(current, current.stage)
+ReviewReturned(current) ==
+    [SentBack(current, ReturnsTo) EXCEPT !.reviews = Min(@ + 1, MaxReviewReturns + 1), !.rounds[current.step] = 0]
+
+AwaitingApproval(current) == [current EXCEPT !.state = "awaitingApproval"]
+
+Merged(t, current) ==
+    IF MergeChecksGates /\ ~(Gates(t) \subseteq current.approved)
+    THEN [current EXCEPT !.state = "waiting", !.retries = 0]
+    ELSE Passed(t, current, current.step)
+
+RedChecked(t, current) ==
+    IF t \notin ReadyBeforeGreen THEN RoundFailed(current, ReturnsTo)
+    ELSE IF MergeWaitsForMergeable THEN Failed(current)
+    ELSE Merged(t, current)
+
+ChangesRequested(t, current) ==
+    IF current.reviews < MaxReviewReturns \/ ~ReviewReturnIsCapped THEN ReviewReturned(current)
+    ELSE IF t \notin IgnoreLaterReviews /\ LaterReviewParks THEN [current EXCEPT !.state = "waiting"]
+    ELSE IF MergeWaitsForMergeable THEN AwaitingApproval(current)
+    ELSE Merged(t, current)
+
+Judged(t, current, v) ==
+    CASE v = "pass" -> IF current.step \in Merges THEN Merged(t, current) ELSE Passed(t, current, current.step)
       [] v = "fail" -> Failed(current)
+      [] v = "needsInput" -> NeedsInput(current)
       [] v = "behaviorFail" -> BehaviorFailed(current)
-      [] v = "environmentFail" -> EnvironmentFailed(current)
+      [] v = "environmentFail" -> EnvironmentFailed(t, current)
+      [] v = "red" -> RedChecked(t, current)
+      [] v = "changesRequested" -> ChangesRequested(t, current)
+      [] v = "reviewRequired" -> AwaitingApproval(current)
 
 LostOnce(current) ==
     IF LostAttemptsAreCapped /\ current.lost + 1 >= MaxLost
@@ -127,26 +248,45 @@ EndAttemptsOn(t) ==
     IN /\ attempt' = [w \in Workers |-> IF Ends(w) THEN NoTask ELSE attempt[w]]
        /\ worker' = [w \in Workers |-> IF Ends(w) THEN "idle" ELSE worker[w]]
        /\ claimEpoch' = [w \in Workers |-> IF Ends(w) THEN 0 ELSE claimEpoch[w]]
+       /\ runAs' = [w \in Workers |-> IF Ends(w) THEN FALSE ELSE runAs[w]]
        /\ lateResults' = IF LiveOn(t) = {} THEN lateResults ELSE lateResults \cup {t}
 
 Claim(w, t) ==
     /\ worker[w] = "idle"
     /\ ClaimNeedsReadyTask => task[t].state = "ready"
     /\ ClaimIsExclusive => LiveOn(t) = {}
+    /\ ClaimNeedsAPerson => runnable[t]
     /\ attempt' = [attempt EXCEPT ![w] = t]
     /\ worker' = [worker EXCEPT ![w] = "busy"]
     /\ claimEpoch' = [claimEpoch EXCEPT ![w] = humanActions[t]]
-    /\ UNCHANGED <<task, lateResults, humanActions>>
+    /\ runAs' = [runAs EXCEPT ![w] = runnable[t]]
+    /\ UNCHANGED <<task, lateResults, humanActions, runnable, reassignments>>
+
+NoOneToRunAs(t) ==
+    /\ task[t].state = "ready"
+    /\ LiveOn(t) = {}
+    /\ ~runnable[t]
+    /\ task' = IF NoOneParksTask THEN [task EXCEPT ![t].state = "waiting"] ELSE task
+    /\ UNCHANGED <<attempt, worker, lateResults, humanActions, claimEpoch, runnable, runAs, reassignments>>
+
+Reassign(t) ==
+    /\ reassignments < MaxReassignments
+    /\ t \in Reassignable
+    /\ task[t].step = First
+    /\ task[t].state = "ready"
+    /\ runnable' = [runnable EXCEPT ![t] = ~@]
+    /\ reassignments' = reassignments + 1
+    /\ UNCHANGED <<task, attempt, worker, lateResults, humanActions, claimEpoch, runAs>>
 
 Hang(w) ==
     /\ worker[w] = "busy"
     /\ worker' = [worker EXCEPT ![w] = "hung"]
-    /\ UNCHANGED <<task, attempt, lateResults, humanActions, claimEpoch>>
+    /\ UNCHANGED <<task, attempt, lateResults, humanActions, claimEpoch, runnable, runAs, reassignments>>
 
 Wake(w) ==
     /\ worker[w] = "hung"
     /\ worker' = [worker EXCEPT ![w] = "busy"]
-    /\ UNCHANGED <<task, attempt, lateResults, humanActions, claimEpoch>>
+    /\ UNCHANGED <<task, attempt, lateResults, humanActions, claimEpoch, runnable, runAs, reassignments>>
 
 Reap(w) ==
     /\ worker[w] = "hung"
@@ -155,65 +295,116 @@ Reap(w) ==
     /\ attempt' = [attempt EXCEPT ![w] = NoTask]
     /\ worker' = [worker EXCEPT ![w] = "idle"]
     /\ claimEpoch' = [claimEpoch EXCEPT ![w] = 0]
-    /\ UNCHANGED humanActions
+    /\ runAs' = [runAs EXCEPT ![w] = FALSE]
+    /\ UNCHANGED <<humanActions, runnable, reassignments>>
 
-Finish(w) ==
+Finishes(w, v) ==
     /\ worker[w] = "busy"
-    /\ \E v \in Outcomes(task[attempt[w]].stage) :
-         task' = [task EXCEPT ![attempt[w]] = [Judged(@, v) EXCEPT !.lost = 0, !.passed = (v = "pass")]]
+    /\ task' = [task EXCEPT ![attempt[w]] = [Judged(attempt[w], @, v) EXCEPT !.lost = 0, !.passed = (v = "pass")]]
     /\ attempt' = [attempt EXCEPT ![w] = NoTask]
     /\ worker' = [worker EXCEPT ![w] = "idle"]
     /\ claimEpoch' = [claimEpoch EXCEPT ![w] = 0]
-    /\ UNCHANGED <<lateResults, humanActions>>
+    /\ runAs' = [runAs EXCEPT ![w] = FALSE]
+    /\ UNCHANGED <<lateResults, humanActions, runnable, reassignments>>
+
+Finish(w) == worker[w] = "busy" /\ \E v \in Outcomes(task[attempt[w]].step) : Finishes(w, v)
 
 LateResult(t) ==
     /\ t \in lateResults
     /\ lateResults' = lateResults \ {t}
     /\ IF LateResultIsRefused
        THEN UNCHANGED task
-       ELSE \E v \in Outcomes(task[t].stage) : task' = [task EXCEPT ![t] = [Judged(@, v) EXCEPT !.passed = (v = "pass")]]
-    /\ UNCHANGED <<attempt, worker, humanActions, claimEpoch>>
+       ELSE \E v \in Outcomes(task[t].step) : task' = [task EXCEPT ![t] = [Judged(t, @, v) EXCEPT !.passed = (v = "pass")]]
+    /\ UNCHANGED <<attempt, worker, humanActions, claimEpoch, runnable, runAs, reassignments>>
 
 Stop(t) ==
     /\ Spent < MaxHumanActions
-    /\ task[t].state \in IF StopSparesDoneTasks THEN {"ready", "waiting"} ELSE {"ready", "waiting", "done"}
+    /\ task[t].state \in IF StopSparesDoneTasks THEN {"ready"} \cup Waiting ELSE {"ready", "done"} \cup Waiting
     /\ task' = [task EXCEPT ![t].state = "stopped", ![t].passed = FALSE]
-    /\ IF StopEndsAttempt THEN EndAttemptsOn(t) ELSE UNCHANGED <<attempt, worker, lateResults, claimEpoch>>
+    /\ IF StopEndsAttempt THEN EndAttemptsOn(t) ELSE UNCHANGED <<attempt, worker, lateResults, claimEpoch, runAs>>
     /\ humanActions' = [humanActions EXCEPT ![t] = @ + 1]
+    /\ UNCHANGED <<runnable, reassignments>>
+
+RetriesFrom == IF RetryResumesStopped THEN {"ready", "stopped"} \cup Waiting ELSE {"ready"} \cup Waiting
+
+Retried(current) ==
+    [current EXCEPT !.state = "ready",
+                    !.rounds = NoRounds,
+                    !.reruns = 0,
+                    !.lost = 0,
+                    !.inputWaits = 0,
+                    !.retries = IF RetryResetsStageRetries THEN 0 ELSE @,
+                    !.reviews = IF RetryKeepsReviews THEN @ ELSE 0,
+                    !.approved = IF RetryKeepsApprovals THEN @ ELSE {},
+                    !.passed = FALSE,
+                    !.outputs = IF RetryKeepsOutputs THEN @ ELSE {}]
 
 Retry(t) ==
     /\ Spent < MaxHumanActions
-    /\ task[t].state \in {"ready", "waiting"}
-    /\ task' = [task EXCEPT ![t].state = "ready",
-                            ![t].rounds = 0,
-                            ![t].reruns = 0,
-                            ![t].lost = 0,
-                            ![t].passed = FALSE,
-                            ![t].outputs = IF RetryKeepsOutputs THEN @ ELSE {}]
-    /\ IF RetryEndsAttempt THEN EndAttemptsOn(t) ELSE UNCHANGED <<attempt, worker, lateResults, claimEpoch>>
+    /\ task[t].state \in RetriesFrom
+    /\ task' = [task EXCEPT ![t] = Retried(@)]
+    /\ IF RetryEndsAttempt THEN EndAttemptsOn(t) ELSE UNCHANGED <<attempt, worker, lateResults, claimEpoch, runAs>>
     /\ humanActions' = [humanActions EXCEPT ![t] = @ + 1]
+    /\ UNCHANGED <<runnable, reassignments>>
+
+Approve(t) ==
+    LET current == task[t]
+    IN /\ Spent < MaxHumanActions
+       /\ current.state \in {"gated", "asking"}
+       /\ task' = [task EXCEPT ![t] = IF current.state = "gated"
+                                       THEN [current EXCEPT !.step = After[current.step], !.state = "ready", !.approved = current.approved \cup {current.step}]
+                                       ELSE [current EXCEPT !.state = "ready", !.retries = 0]]
+       /\ humanActions' = [humanActions EXCEPT ![t] = @ + 1]
+       /\ UNCHANGED <<attempt, worker, lateResults, claimEpoch, runnable, runAs, reassignments>>
+
+OutsideApproval(t) ==
+    /\ OutsideApprovalNeedsAWait => task[t].state = "awaitingApproval"
+    /\ task' = [task EXCEPT ![t].state = "ready"]
+    /\ UNCHANGED <<attempt, worker, lateResults, humanActions, claimEpoch, runnable, runAs, reassignments>>
+
+ApprovalGoesMissing(t) == task[t].step \in Merges /\ task'[t] = [task[t] EXCEPT !.approved = {}]
+
+LoseApproval(t) ==
+    /\ task[t].state = "ready"
+    /\ task[t].step \in Merges
+    /\ task[t].approved # {}
+    /\ LiveOn(t) = {}
+    /\ task' = [task EXCEPT ![t].approved = {}]
+    /\ UNCHANGED <<attempt, worker, lateResults, humanActions, claimEpoch, runnable, runAs, reassignments>>
 
 Terminated == \A t \in Tasks : task[t].state \in Settled
 
 Next ==
     \/ \E w \in Workers, t \in Tasks : Claim(w, t)
     \/ \E w \in Workers : Hang(w) \/ Wake(w) \/ Reap(w) \/ Finish(w)
-    \/ \E t \in Tasks : LateResult(t) \/ Stop(t) \/ Retry(t)
+    \/ \E t \in Tasks : LateResult(t) \/ Stop(t) \/ Retry(t) \/ Approve(t) \/ OutsideApproval(t) \/ LoseApproval(t) \/ NoOneToRunAs(t) \/ Reassign(t)
     \/ Terminated /\ UNCHANGED vars
 
 WorkersProgress ==
     /\ \A t \in Tasks : WF_vars(\E w \in Workers : Claim(w, t))
+    /\ \A t \in Tasks : WF_vars(NoOneToRunAs(t))
     /\ \A w \in Workers : WF_vars(Finish(w))
 
 ReaperProgress == \A w \in Workers : SF_vars(Reap(w))
 
-Spec == Init /\ [][Next]_vars /\ WorkersProgress /\ (IF ReaperIsFair THEN ReaperProgress ELSE TRUE)
+OutsideApprovalsStop == <>[][\A t \in Tasks : ~OutsideApproval(t)]_vars
+
+Spec ==
+    /\ Init
+    /\ [][Next]_vars
+    /\ WorkersProgress
+    /\ IF OutsideApprovalsAreFinite THEN OutsideApprovalsStop ELSE TRUE
+    /\ IF ReaperIsFair THEN ReaperProgress ELSE TRUE
 
 PersonActsOn(t) == humanActions'[t] = humanActions[t] + 1
 
+OutsideApproves(t) == task[t].state = "awaitingApproval" /\ task'[t] = [task[t] EXCEPT !.state = "ready"] /\ humanActions' = humanActions
+
+FoundNoOne(t) == ~runnable[t] /\ task'[t] = [task[t] EXCEPT !.state = "waiting"]
+
 AttemptEndsOn(t) == \E w \in Workers : attempt[w] = t /\ attempt'[w] # t
 
-Advanced(t) == Rank[task'[t].stage] > Rank[task[t].stage] \/ (task'[t].state = "done" /\ task[t].state # "done")
+Advanced(t) == Rank[task'[t].step] > Rank[task[t].step] \/ (task'[t].state = "done" /\ task[t].state # "done")
 
 OneLiveAttempt == \A t \in Tasks : Cardinality(LiveOn(t)) <= 1
 
@@ -221,19 +412,48 @@ LiveAttemptMeansReady == \A w \in Workers : attempt[w] # NoTask => task[attempt[
 
 LiveAttemptIsCurrent == \A w \in Workers : attempt[w] # NoTask => claimEpoch[w] = humanActions[attempt[w]]
 
-OutputsSurvive == \A t \in Tasks : \A s \in Stages : Rank[s] < Rank[task[t].stage] => s \in task[t].outputs
+AttemptRunsAsAPerson == \A w \in Workers : attempt[w] # NoTask => runAs[w]
 
-RoundsCapped == \A t \in Tasks : task[t].rounds <= MaxRounds
+OutputsSurvive == \A t \in Tasks : \A s \in StepSet : Rank[s] < Rank[task[t].step] => s \in task[t].outputs
+
+RoundsCapped == \A t \in Tasks : \A r \in Returning : task[t].rounds[r] <= MaxRounds
 
 EnvRerunsCapped == \A t \in Tasks : task[t].reruns <= MaxEnvReruns
 
 LostAttemptsCapped == \A t \in Tasks : task[t].lost <= MaxLost
 
-TaskChangesOnlyWithItsAttempt == [][\A t \in Tasks : task'[t] # task[t] => AttemptEndsOn(t) \/ PersonActsOn(t)]_vars
+StageRetriesCapped == \A t \in Tasks : task[t].retries <= MaxStageRetries
+
+InputWaitsCapped == \A t \in Tasks : task[t].inputWaits <= MaxInputWaits
+
+PassLeavesNoStageRetries == \A t \in Tasks : task[t].passed => task[t].retries = 0
+
+StopsAtItsEndStage == \A t \in Tasks : Rank[task[t].step] <= Rank[task[t].end] /\ (task[t].state = "done" => task[t].step = task[t].end)
+
+ApprovalsMatchGatesPassed ==
+    \A t \in Tasks : LET passedGates == {g \in Gates(t) : Rank[g] < Rank[task[t].step]}
+                    IN IF task[t].step \in Merges THEN task[t].approved \subseteq passedGates ELSE task[t].approved = passedGates
+
+ReviewReturnsCapped == \A t \in Tasks : task[t].reviews <= MaxReviewReturns
+
+StoppedTaskCanResume ==
+    \A t \in Tasks : task[t].state = "stopped" =>
+        LET resumed == Retried(task[t])
+        IN /\ "stopped" \in RetriesFrom
+           /\ resumed.state = "ready"
+           /\ resumed.step = task[t].step
+           /\ resumed.outputs = task[t].outputs
+           /\ resumed.approved = task[t].approved
+           /\ resumed.reviews = task[t].reviews
+
+TaskChangesOnlyWithItsAttempt ==
+    [][\A t \in Tasks : task'[t] # task[t] => AttemptEndsOn(t) \/ PersonActsOn(t) \/ OutsideApproves(t) \/ FoundNoOne(t) \/ ApprovalGoesMissing(t)]_vars
 
 AttemptEndsOnlyWithItsTask == [][\A t \in Tasks : AttemptEndsOn(t) => task'[t] # task[t] \/ PersonActsOn(t)]_vars
 
-FailedRoundReturnsToImplement == [][\A t \in Tasks : task'[t].rounds > task[t].rounds => task'[t].stage = "implement" \/ task'[t].state = "waiting"]_vars
+FailedRoundReturnsToImplement ==
+    [][\A t \in Tasks : \A r \in Returning : task'[t].rounds[r] > task[t].rounds[r] =>
+          task'[t].step = ReturnsTo \/ task'[t].state = "waiting"]_vars
 
 LateWriteChangesNothing == [][lateResults' \subseteq lateResults /\ lateResults' # lateResults => UNCHANGED <<task, attempt, worker>>]_vars
 
@@ -244,11 +464,33 @@ StageAdvancesOnlyOnPass == [][\A t \in Tasks : Advanced(t) => task'[t].passed]_v
 DoneIsFinal == [][\A t \in Tasks : task[t].state = "done" => task'[t] = task[t]]_vars
 
 StageMovesOneStep ==
-    [][\A t \in Tasks : task'[t].stage # task[t].stage =>
-          \/ Rank[task'[t].stage] = Rank[task[t].stage] + 1
-          \/ task[t].stage = "verify" /\ task'[t].stage = "implement"]_vars
+    [][\A t \in Tasks : task'[t].step # task[t].step =>
+          \/ Rank[task'[t].step] = Rank[task[t].step] + 1
+          \/ task[t].step \in Returning /\ task'[t].step = ReturnsTo]_vars
 
 OnlyAPersonStops == [][\A t \in Tasks : task'[t].state = "stopped" /\ task[t].state # "stopped" => PersonActsOn(t)]_vars
+
+RetryLeavesNoStageRetries == [][\A t \in Tasks : PersonActsOn(t) /\ task'[t].state = "ready" => task'[t].retries = 0]_vars
+
+GatePassesOnlyOnApprove ==
+    [][\A t \in Tasks : \A g \in Gates(t) :
+          Rank[task[t].step] <= Rank[g] /\ Rank[task'[t].step] > Rank[g] => PersonActsOn(t) /\ g \in task'[t].approved]_vars
+
+MergeNeedsEveryGate ==
+    [][\A t \in Tasks : task[t].step \in Merges /\ task[t].state # "done" /\ task'[t].state = "done" =>
+          task'[t].passed /\ Gates(t) \subseteq task[t].approved]_vars
+
+ReviewsOnlyGrow == [][\A t \in Tasks : task'[t].reviews >= task[t].reviews]_vars
+
+LaterReviewWaitsForAPerson ==
+    [][\A w \in Workers : \A t \in Tasks :
+          attempt[w] = t /\ task[t].step \in Merges /\ task[t].reviews >= MaxReviewReturns /\ Finishes(w, "changesRequested") =>
+              (task'[t].state = "waiting" <=> t \notin IgnoreLaterReviews)]_vars
+
+EndStagePassIsDone ==
+    [][\A w \in Workers : \A t \in Tasks :
+          attempt[w] = t /\ task[t].step = task[t].end /\ Gates(t) \subseteq task[t].approved /\ Finishes(w, "pass") =>
+              task'[t].state = "done"]_vars
 
 EveryTaskSettles == \A t \in Tasks : <>[](task[t].state \in Settled)
 

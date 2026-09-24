@@ -18,6 +18,7 @@ out/
 # Logs
 *.log
 npm-debug.log*
+traces/
 
 # OS and editor files
 .DS_Store

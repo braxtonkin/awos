@@ -8,19 +8,37 @@
     "node": ">=24"
   },
   "scripts": {
-    "check": "npm run typecheck && npm run lint -- . && npm run boundaries",
+    "check": "npm run shape && npm run sql-comments && npm run model-names && npm run step-names && npm run typecheck && npm run lint -- . && npm run boundaries && npm run db-types",
     "boundaries": "depcruise --config .dependency-cruiser.json --output-type err .",
+    "db-types": "node tools/db-types/main.ts",
+    "db:types": "node tools/db-types/main.ts --write",
     "lint": "eslint --config eslint.config.ts --max-warnings 0",
+    "model-names": "node tools/model-names/main.ts",
+    "shape": "node tools/shape/main.ts",
+    "step-names": "node tools/step-names/main.ts",
+    "sql-comments": "node tools/sql-comments/main.ts",
+    "test": "vitest run --dir features",
     "typecheck": "tsc --noEmit",
     "verify": "node tools/verify/main.ts"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",
+    "@testcontainers/postgresql": "12.1.0",
     "@types/node": "24.13.6",
     "dependency-cruiser": "18.4.0",
     "eslint": "10.11.0",
     "jiti": "2.7.0",
+    "kysely-codegen": "0.20.0",
+    "testcontainers": "12.1.0",
     "typescript": "6.0.3",
-    "typescript-eslint": "8.70.1"
+    "typescript-eslint": "8.70.1",
+    "vitest": "5.0.1"
+  },
+  "dependencies": {
+    "@octokit/core": "7.0.8",
+    "dbmate": "2.36.0",
+    "kysely": "0.29.6",
+    "pg": "8.23.0",
+    "zod": "4.6.5"
   }
 }

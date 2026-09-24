@@ -1,36 +1,11 @@
 import { randomUUID } from 'node:crypto';
-import { request } from 'node:http';
 import { hostname } from 'node:os';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { fail, pass, type Check, type Scenario } from './check.ts';
+import { docker } from './docker.ts';
 
-type Reply = { readonly status: number; readonly body: unknown };
-
-const socketPath = '/var/run/docker.sock';
 const labelKey = 'autoworker.verify.doctor';
 const siblingAnswer = 'sibling reached';
-
-const docker = (method: string, path: string, body?: object): Promise<Reply> =>
-  new Promise((resolve, reject) => {
-    const payload = body === undefined ? '' : JSON.stringify(body);
-    const headers = payload === '' ? {} : { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) };
-    const outgoing = request({ socketPath, path, method, headers }, incoming => {
-      let text = '';
-      incoming.setEncoding('utf8');
-      incoming.on('data', (chunk: string) => {
-        text += chunk;
-      });
-      incoming.on('end', () => {
-        try {
-          resolve({ status: incoming.statusCode ?? 0, body: text === '' ? null : (JSON.parse(text) as unknown) });
-        } catch (error) {
-          reject(error instanceof Error ? error : new Error(String(error)));
-        }
-      });
-    });
-    outgoing.on('error', reject);
-    outgoing.end(payload);
-  });
 
 const field = (value: unknown, ...path: readonly string[]): unknown =>
   path.reduce<unknown>(

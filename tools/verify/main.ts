@@ -1,6 +1,5 @@
 import { fileURLToPath } from 'node:url';
-import { fail, type Check } from './check.ts';
-import { loadScenarios } from './scenarios.ts';
+import { loadScenarios, runScenario } from './scenarios.ts';
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
 const [name, ...args] = process.argv.slice(2);
@@ -13,14 +12,11 @@ if (scenario === undefined) {
   process.stderr.write(`${problem}\n\nScenarios:\n${listing}\n`);
   process.exitCode = 2;
 } else {
-  const checks: readonly Check[] = await scenario
-    .run(args)
-    .catch((error: unknown) => [fail(`${scenario.name} runs to completion`, error instanceof Error ? error.message : String(error))]);
-  const all = checks.length === 0 ? [fail(`${scenario.name} produces at least one check`, 'it produced none')] : checks;
-  for (const check of all) {
+  const checks = await runScenario(scenario, args);
+  for (const check of checks) {
     process.stdout.write(`${check.passed ? 'PASS' : 'FAIL'}  ${check.name}${check.detail === '' ? '' : `  (${check.detail})`}\n`);
   }
-  const passed = all.filter(check => check.passed).length;
-  process.stdout.write(`${String(passed)} of ${String(all.length)} checks passed\n`);
-  process.exitCode = passed === all.length ? 0 : 1;
+  const passed = checks.filter(check => check.passed).length;
+  process.stdout.write(`${String(passed)} of ${String(checks.length)} checks passed\n`);
+  process.exitCode = passed === checks.length ? 0 : 1;
 }

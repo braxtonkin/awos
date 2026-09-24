@@ -50,6 +50,13 @@
       "to": { "path": "^(features|services|shared)/" }
     },
     {
+      "name": "product-code-imports-no-tools",
+      "severity": "error",
+      "comment": "Services and shared code deploy, so they must not pull in verification tooling from tools/.",
+      "from": { "path": "^(services|shared)/" },
+      "to": { "path": "^tools/", "reachable": true }
+    },
+    {
       "name": "loose-files-import-no-product-code",
       "severity": "error",
       "comment": "Code lives in a feature folder, a service folder, shared/, or tools/, so a file anywhere else cannot carry an import around the other rules.",
