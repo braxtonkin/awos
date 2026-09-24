@@ -1,7 +1,6 @@
 ---
 name: setup-pstack
 description: Configure pstack for Claude Code on Opus 5.5. Confirms every role resolves to Opus 5.5, sets panel sizes and review lenses, and writes ~/.claude/pstack-config.md, which the other pstack skills read. Use for /setup-pstack, "configure pstack", "pstack panel size", or changing pstack's defaults.
-disable-model-invocation: true
 model: claude-opus-5-5
 ---
 
