@@ -7,21 +7,26 @@ import { runLoop, type Clock } from '../../shared/loop.ts';
 import type { TestPostgres } from '../../tools/verify/postgres.ts';
 import { checkLoop, loginForJob, refreshWindowMs, type CheckLoopSettings } from './check-loop.ts';
 import type { Checks } from './checks.ts';
-import { codexLogin, read, refreshable, type Check, type Checked } from './kinds.ts';
+import { refreshUse, type CodexExit } from './codex-check.ts';
+import { codexLogin, read, refreshable, type Check, type Checked, type RefreshUse } from './kinds.ts';
 import { open, replace, sealFor, writeBack, type WriteBack } from './store.ts';
 import { simulatorSchema, violations, type PropertyName, type Violation } from './invariants.ts';
 import { fakeGithubToken, fakeLogin, newKey } from './world.ts';
 
-export const mutantName = z.enum(['one_live_check_per_credential', 'one_refresh_per_login', 'blind-write-back', 'raw-job-copy']);
+export const mutantName = z.enum(['one_live_check_per_credential', 'one_refresh_per_login', 'blind-write-back', 'raw-job-copy', 'death-releases-refresh', 'finished_check_is_final']);
 
 export type MutantName = z.infer<typeof mutantName>;
 
-type Mutant = { readonly breaks: readonly [PropertyName, ...PropertyName[]]; readonly dropIndex?: string };
+type Drop = { readonly index: string } | { readonly trigger: string; readonly on: 'credential' | 'credential_check' };
+
+type Mutant = { readonly breaks: readonly [PropertyName, ...PropertyName[]]; readonly drop?: Drop };
 
 export const mutants: Readonly<Record<MutantName, Mutant>> = {
-  one_live_check_per_credential: { breaks: ['OneLiveCheck'], dropIndex: 'one_live_check_per_credential' },
-  one_refresh_per_login: { breaks: ['NoRefreshTokenReused'], dropIndex: 'one_refresh_per_login' },
-  'blind-write-back': { breaks: ['StoredLoginIsNewest'] },
+  one_live_check_per_credential: { breaks: ['OneLiveCheck'], drop: { index: 'one_live_check_per_credential' } },
+  one_refresh_per_login: { breaks: ['NoRefreshTokenReused'], drop: { index: 'one_refresh_per_login' } },
+  'blind-write-back': { breaks: ['StoredLoginIsNewest'], drop: { trigger: 'stored_login_is_newest', on: 'credential' } },
+  'death-releases-refresh': { breaks: ['NoRefreshTokenReused'] },
+  finished_check_is_final: { breaks: ['FinishedCheckIsFinal'], drop: { trigger: 'finished_check_is_final', on: 'credential_check' } },
   'raw-job-copy': { breaks: ['JobsNeverRefresh'] },
 };
 
@@ -49,11 +54,12 @@ const startedAt = Date.parse('2026-01-01T00:00:00.000Z');
 const loginLifeMs = 30 * 60_000;
 const everyMs = 60_000;
 const leaseMs = 5 * 60_000;
-const moves = ['advance', 'release', 'crash', 'replace', 'job'] as const;
+const jobLimitMs = 10 * 60_000;
+const moves = ['advance', 'release', 'crash', 'die', 'stall', 'replace', 'job'] as const;
 type Move = (typeof moves)[number];
-const weights: Readonly<Record<Move, number>> = { advance: 40, release: 45, crash: 4, replace: 5, job: 6 };
+const weights: Readonly<Record<Move, number>> = { advance: 40, release: 45, crash: 4, die: 2, stall: 2, replace: 5, job: 6 };
 
-export const fingerprint = createHash('sha256').update(JSON.stringify({ moves, weights, loginLifeMs, everyMs, leaseMs, refreshWindowMs })).digest('hex').slice(0, 16);
+export const fingerprint = createHash('sha256').update(JSON.stringify({ moves, weights, loginLifeMs, everyMs, leaseMs, jobLimitMs, refreshWindowMs })).digest('hex').slice(0, 16);
 
 function random(seed: number): () => number {
   let state = seed >>> 0;
@@ -93,7 +99,9 @@ function issuer(db: Database): Issuer {
 
 type Status = 'running' | 'sleeping' | 'gated' | 'crashed' | 'stopped';
 
-type Checker = { readonly id: string; status: Status; release: (() => void) | undefined; readonly stop: AbortController; readonly done: Promise<void> };
+type Gate = { readonly release: (died?: Checked) => void; readonly died: Checked | undefined };
+
+type Checker = { readonly id: string; status: Status; gate: Gate | undefined; readonly stop: AbortController; readonly done: Promise<void> };
 
 type Sleeper = { readonly due: number; readonly wake: () => void; readonly checker: string };
 
@@ -128,41 +136,60 @@ const refreshTokenOf = (login: string): string => {
   return parsed.success ? parsed.data.tokens.refresh_token : '';
 };
 
-function gated(checker: () => Checker | undefined, run: (secret: string, now: Date) => Promise<Checked>): Check['run'] {
+type RefreshUseOf = (exit: CodexExit) => RefreshUse;
+
+const deathLooksClean: RefreshUseOf = exit => refreshUse({ ...exit, ranToItsEnd: true });
+
+const diedAfterPresenting = (use: RefreshUseOf, secret: string): Checked => ({
+  verdict: 'unknown',
+  cause: 'Codex was killed at the check timeout after it presented the refresh token, before it rewrote auth.json',
+  expiresAt: new Date(expiryOf(secret) ?? 0),
+  refresh: use({ ranToItsEnd: false, before: secret, after: secret }),
+});
+
+type Probe = { readonly checked: Checked; readonly presented: boolean };
+
+function gated(checker: () => Checker | undefined, use: RefreshUseOf, run: (secret: string, now: Date) => Promise<Probe>): Check['run'] {
   return async (secret, now) => {
-    const checked = await run(secret, now);
+    const { checked, presented } = await run(secret, now);
     const held = checker();
-    if (held !== undefined) {
-      await new Promise<void>(resolve => {
-        held.status = 'gated';
-        held.release = resolve;
-      });
-      held.status = 'running';
-      held.release = undefined;
-    }
-    return checked;
+    if (held === undefined) return checked;
+    const died = await new Promise<Checked | undefined>(resolve => {
+      held.status = 'gated';
+      held.gate = { release: resolve, died: presented ? diedAfterPresenting(use, secret) : undefined };
+    });
+    held.status = 'running';
+    held.gate = undefined;
+    return died ?? checked;
   };
 }
 
-function fakeChecks(sim: Sim, checker: () => Checker | undefined, by: string): Checks {
+function fakeChecks(sim: Sim, checker: () => Checker | undefined, by: string, use: RefreshUseOf): Checks {
+  const exited = (secret: string, after: string): RefreshUse => use({ ranToItsEnd: true, before: secret, after });
   return {
     codex: {
       rotates: refreshable,
-      run: gated(checker, async (secret, now) => {
+      run: gated(checker, use, async (secret, now) => {
         const expires = expiryOf(secret);
-        if (expires === undefined) return { verdict: 'invalid', cause: 'not a Codex login', expiresAt: null };
+        if (expires === undefined) return { checked: { verdict: 'invalid', cause: 'not a Codex login', expiresAt: null, refresh: exited(secret, secret) }, presented: false };
         const token = refreshTokenOf(secret);
         if (token.trim() !== '' && expires - now.getTime() <= refreshWindowMs) {
           const rotated = await sim.issuer.present(token, by, now.getTime());
-          if (rotated === undefined) return { verdict: 'invalid', cause: 'the issuer refused a reused refresh token (401)', expiresAt: new Date(expires) };
-          return { verdict: 'valid', cause: 'ack after a refresh', expiresAt: new Date(expiryOf(rotated) ?? expires), rotated };
+          if (rotated === undefined) {
+            return { checked: { verdict: 'invalid', cause: 'the issuer refused a reused refresh token (401)', expiresAt: new Date(expires), refresh: exited(secret, secret) }, presented: true };
+          }
+          return { checked: { verdict: 'valid', cause: 'ack after a refresh', expiresAt: new Date(expiryOf(rotated) ?? expires), refresh: exited(secret, rotated) }, presented: true };
         }
-        return expires > now.getTime() ? { verdict: 'valid', cause: 'ack', expiresAt: new Date(expires) } : { verdict: 'invalid', cause: 'expired (401)', expiresAt: new Date(expires) };
+        const checked: Checked =
+          expires > now.getTime()
+            ? { verdict: 'valid', cause: 'ack', expiresAt: new Date(expires), refresh: exited(secret, secret) }
+            : { verdict: 'invalid', cause: 'expired (401)', expiresAt: new Date(expires), refresh: exited(secret, secret) };
+        return { checked, presented: false };
       }),
     },
     github: {
       rotates: () => false,
-      run: gated(checker, () => Promise.resolve({ verdict: 'valid', cause: '200 from GET /user', expiresAt: null })),
+      run: gated(checker, use, () => Promise.resolve({ checked: { verdict: 'valid', cause: '200 from GET /user', expiresAt: null, refresh: { kind: 'unused' } }, presented: false })),
     },
   };
 }
@@ -193,7 +220,7 @@ function settingsFor(sim: Sim, key: CheckLoopSettings['key'], id: string, mutant
     everyMs,
     leaseMs,
     key,
-    checks: fakeChecks(sim, checker, id),
+    checks: fakeChecks(sim, checker, id, mutant === 'death-releases-refresh' ? deathLooksClean : refreshUse),
     checker: id,
     now: () => new Date(sim.time),
     writeBack: mutant === 'blind-write-back' ? blindWriteBack : writeBack,
@@ -209,7 +236,7 @@ function startChecker(sim: Sim, key: CheckLoopSettings['key'], mutant: MutantNam
     const entry = find();
     if (entry !== undefined) entry.status = 'stopped';
   });
-  sim.checkers.push({ id, status: 'running', release: undefined, stop, done });
+  sim.checkers.push({ id, status: 'running', gate: undefined, stop, done });
 }
 
 async function settle(sim: Sim): Promise<void> {
@@ -233,7 +260,11 @@ async function wakeDue(sim: Sim): Promise<void> {
 const pick = <T>(next: () => number, from: readonly T[]): T | undefined => from[Math.floor(next() * from.length)];
 
 function chooseMove(next: () => number, sim: Sim): Move {
-  const open = moves.filter(move => (move === 'release' || move === 'crash' ? sim.checkers.some(checker => checker.status === 'gated') : true));
+  const gatedNow = sim.checkers.filter(checker => checker.status === 'gated');
+  const open = moves.filter(move => {
+    if (move === 'die') return gatedNow.some(checker => checker.gate?.died !== undefined);
+    return move === 'release' || move === 'crash' || move === 'stall' ? gatedNow.length > 0 : true;
+  });
   const total = open.reduce((sum, move) => sum + weights[move], 0);
   let roll = next() * total;
   for (const move of open) {
@@ -258,7 +289,7 @@ async function runJob(sim: Sim, key: CheckLoopSettings['key'], owner: string, mu
   const copy =
     mutant === 'raw-job-copy'
       ? await open(sim.db, key, { connector: 'codex', owner }).then(opened => ('secret' in opened ? opened.secret : undefined))
-      : await loginForJob(sim.db, launcher, owner).then(given => ('login' in given ? given.login : undefined));
+      : await loginForJob(sim.db, launcher, owner, jobLimitMs).then(given => ('login' in given ? given.login : undefined));
   if (copy === undefined) return 'no login to give';
   const token = refreshTokenOf(copy);
   const expires = expiryOf(copy) ?? 0;
@@ -279,9 +310,23 @@ async function applyMove(sim: Sim, move: Move, next: () => number, key: CheckLoo
     }
     case 'release': {
       const checker = pick(next, sim.checkers.filter(entry => entry.status === 'gated'));
-      checker?.release?.();
+      checker?.gate?.release();
       await settle(sim);
       return `released ${checker?.id ?? 'nobody'}`;
+    }
+    case 'die': {
+      const checker = pick(next, sim.checkers.filter(entry => entry.status === 'gated' && entry.gate?.died !== undefined));
+      checker?.gate?.release(checker.gate.died);
+      await settle(sim);
+      return `killed the Codex of ${checker?.id ?? 'nobody'} after it presented the refresh token`;
+    }
+    case 'stall': {
+      const checker = pick(next, sim.checkers.filter(entry => entry.status === 'gated'));
+      sim.time += leaseMs + everyMs;
+      await wakeDue(sim);
+      checker?.gate?.release();
+      await settle(sim);
+      return `stalled ${checker?.id ?? 'nobody'} past its lease, then let it finish`;
     }
     case 'crash': {
       const checker = pick(next, sim.checkers.filter(entry => entry.status === 'gated'));
@@ -327,8 +372,8 @@ async function simulateSeed(postgres: TestPostgres, plan: Plan, seed: number): P
   let failure: Failure | undefined;
   try {
     for (const statement of simulatorSchema) await statement.execute(db);
-    const drop = plan.mutant === undefined ? undefined : mutants[plan.mutant].dropIndex;
-    if (drop !== undefined) await sql`drop index ${sql.id(drop)}`.execute(db);
+    const drop = plan.mutant === undefined ? undefined : mutants[plan.mutant].drop;
+    if (drop !== undefined) await ('index' in drop ? sql`drop index ${sql.id(drop.index)}` : sql`drop trigger ${sql.id(drop.trigger)} on ${sql.table(drop.on)}`).execute(db);
     const people = { ada: await addPerson(db, 'ada@example.com', 'Ada'), bo: await addPerson(db, 'bo@example.com', 'Bo') };
     await storeLogin(sim, key, people.ada, people.ada);
     await storeLogin(sim, key, people.bo, people.bo);

@@ -10,11 +10,13 @@ export type Secret = { readonly [K in ConnectorKind]: { readonly connector: K } 
 
 export type Verdict = CredentialState;
 
+export type RefreshUse = { readonly kind: 'unused' } | { readonly kind: 'maybe-used' } | { readonly kind: 'rotated'; readonly login: string };
+
 export type Checked = {
   readonly verdict: Verdict;
   readonly cause: string;
   readonly expiresAt: Date | null;
-  readonly rotated?: string;
+  readonly refresh: RefreshUse;
 };
 
 export type Check = {

@@ -57,7 +57,7 @@ export const engineMutants: Readonly<Record<EngineMutantName, EngineMutant>> = {
   'no-reaper': { profile: 'crashes', breaks: ['EveryTaskSettles'], loop: () => undefined },
   'early-reap': { profile: 'crashes', breaks: ['ReleasedOnlyAfterItsLease'], loop: loop => ({ ...loop, pass: (db, pass) => loop.pass(db, { ...pass, now: new Date(pass.now.getTime() + loop.everyMs) }) }) },
   'no-grace': { profile: 'db-pause', breaks: ['ReleasedWithinOneInterval'], loop: ({ name, everyMs, pass }) => ({ name, everyMs, pass }) },
-  'no-fence': { profile: 'db-pause', breaks: ['ReleasedWithinOneInterval'], loop: loop => ({ ...loop, pass: (db, { now }) => loop.pass(db, { now, late: () => false }) }) },
+  'no-fence': { profile: 'db-pause', breaks: ['ReleasedWithinOneInterval'], loop: loop => ({ ...loop, pass: (db, { now, stop }) => loop.pass(db, { now, late: () => false, stop }) }) },
 };
 
 const failedToVerify = 'Verify found the behavior still wrong in 3 rounds. Read its evidence on this page, fix the ticket or the plan, then press Retry to run Verify again.';

@@ -79,6 +79,12 @@ const staleTypes = `${generatedTypes} differs from a fresh generation`;
 
 const codeChange = 'code-change';
 
+const noBrandAssertions = 'autoworker/no-brand-assertions';
+
+const accessOnlyLoginFrom = "import { accessOnly, type AccessOnlyLogin } from './kinds.ts';\n\nconst launch = (login: AccessOnlyLogin): string => login;\n";
+
+const plantedCheck = "import type { Checks } from './checks.ts';\nimport type { Check } from './kinds.ts';\n\nconst check: Check = { rotates: () => false, run: () => Promise.reject(new Error('planted')) };\n";
+
 const plantedStep = "name: 'planted', reads: [], prompt: 'Planted.', needsRepository: true, canEnd: true, owes: [], output: review, requires: ['text'], failures: { fail: { kind: 'fail' } }";
 
 const violations: readonly Violation[] = [
@@ -947,6 +953,48 @@ const violations: readonly Violation[] = [
     expect: ['TS2322', 'TS2741'],
   },
   {
+    name: 'tsc rejects a Checks record that has no check for a connector kind',
+    file: 'features/credentials/planted-checks.ts',
+    source: `${plantedCheck}\nexport const planted: Checks = { codex: check };\n`,
+    tool: 'tsc',
+    expect: ['TS2741'],
+  },
+  {
+    name: 'tsc rejects a raw login where AccessOnlyLogin is required',
+    file: 'features/credentials/planted-job.ts',
+    source: `${accessOnlyLoginFrom}\nexport const planted = launch('{"tokens": {"refresh_token": "rt"}}');\nexport const made = accessOnly;\n`,
+    tool: 'tsc',
+    expect: ['TS2345'],
+  },
+  {
+    name: 'eslint rejects a type assertion that makes an AccessOnlyLogin',
+    file: 'features/credentials/planted-assertion.ts',
+    source: "import type { AccessOnlyLogin } from './kinds.ts';\n\nexport const login = '{}' as AccessOnlyLogin;\n",
+    tool: 'eslint',
+    expect: [noBrandAssertions],
+  },
+  {
+    name: 'eslint rejects a double assertion through unknown that makes a SealingKey',
+    file: 'features/credentials/planted-key-assertion.ts',
+    source: "import type { SealingKey } from './seal.ts';\n\nexport const key = {} as unknown as SealingKey;\n",
+    tool: 'eslint',
+    expect: [noBrandAssertions],
+  },
+  {
+    name: 'eslint rejects an angle-bracket assertion to a brand keyed by a symbol the file declares',
+    file: 'features/planted/marked.ts',
+    source: "const mark = Symbol('mark');\n\ntype Marked = string & { readonly [mark]: true };\n\nexport const marked = <Marked>'text';\n",
+    tool: 'eslint',
+    expect: [noBrandAssertions],
+  },
+  {
+    name: 'eslint rejects a type predicate that narrows a string to a zod brand',
+    file: 'features/planted/predicate.ts',
+    source: "import { z } from 'zod';\n\nconst name = z.string().brand<'Name'>();\n\ntype Name = z.infer<typeof name>;\n\nexport const isName = (text: string): text is Name => text !== '';\nexport const parsed = name.parse('ada');\n",
+    tool: 'eslint',
+    expect: [noBrandAssertions],
+  },
+  {
     name: 'tsc rejects a step kind built without step(), so every verdict comes from the declared output',
     file: `features/${codeChange}/planted-kind.ts`,
     source: `import { review } from '../../shared/review.ts';\nimport type { StepKind } from '../../shared/workflow.ts';\n\nexport const planted: StepKind = { ${plantedStep}, blocked: 'fail', judge: () => 'pass' };\n`,
@@ -978,6 +1026,24 @@ const plantedModel: Violation = {
 };
 
 const allowances: readonly Allowance[] = [
+  {
+    name: 'eslint accepts as const, and an assertion that widens a branded value to its base type',
+    file: 'features/planted/assertions.ts',
+    source: "import { z } from 'zod';\n\nconst name = z.string().brand<'Name'>();\n\nexport const names = ['ada'] as const;\nexport const plain = name.parse('ada') as string;\n",
+    tool: 'eslint',
+  },
+  {
+    name: 'tsc accepts a Checks record that has a check for every connector kind',
+    file: 'features/credentials/planted-checks.ts',
+    source: `${plantedCheck}\nexport const planted: Checks = { codex: check, github: check };\n`,
+    tool: 'tsc',
+  },
+  {
+    name: 'tsc accepts a login that accessOnly made where AccessOnlyLogin is required',
+    file: 'features/credentials/planted-job.ts',
+    source: `${accessOnlyLoginFrom}\nconst copy = accessOnly('{}');\nexport const planted = 'login' in copy ? launch(copy.login) : copy.reason;\n`,
+    tool: 'tsc',
+  },
   {
     name: 'eslint accepts a shebang on line 1, as an editor parses it',
     file: 'features/planted/cli.ts',

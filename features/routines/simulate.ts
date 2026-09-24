@@ -3,7 +3,7 @@ import { availableParallelism } from 'node:os';
 import { sql } from 'kysely';
 import { z } from 'zod';
 import { connect, type Database } from '../../shared/db/client.ts';
-import { runLoop, type Clock, type Loop } from '../../shared/loop.ts';
+import { neverStops, runLoop, type Clock, type Loop } from '../../shared/loop.ts';
 import { review } from '../../shared/review.ts';
 import { step, type Workflow } from '../../shared/workflow.ts';
 import type { TestPostgres } from '../../tools/verify/postgres.ts';
@@ -382,7 +382,7 @@ async function innerMove(world: World, index: number, run: RoutineRun, move: Exc
       const other = world.engines.findIndex((candidate, at) => at !== index && candidate !== undefined && !candidate.crashed);
       const peer = world.engines[other];
       if (peer === undefined) return 'no other engine is running';
-      const lines = await peer.loop.pass(peer.db, { now: now(world), late: () => false });
+      const lines = await peer.loop.pass(peer.db, { now: now(world), late: () => false, stop: neverStops });
       world.log.push(...lines.map(line => `engine ${String(other + 1)} ${peer.loop.name}: ${line}`));
       count(world, 'passed during another run');
       return `engine ${String(other + 1)} passed: ${lines.join('; ') || 'nothing due'}`;

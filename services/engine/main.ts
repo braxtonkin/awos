@@ -1,6 +1,6 @@
 import { hostname } from 'node:os';
 import { z } from 'zod';
-import { checkLoop } from '../../features/credentials/check-loop.ts';
+import { checkLeaseMarginMs, checkLoop } from '../../features/credentials/check-loop.ts';
 import { checksFor } from '../../features/credentials/checks.ts';
 import { githubApi } from '../../features/credentials/github-check.ts';
 import { sealingKey, type SealingKey } from '../../features/credentials/seal.ts';
@@ -39,6 +39,9 @@ const settings = z.object({
   OUTBOX_MAX_TRIES: z.coerce.number().int().positive().default(3),
   ENVIRONMENTS_EVERY_MS: milliseconds.default(30_000),
   ENVIRONMENT_START_DEADLINE_MS: milliseconds.default(600_000),
+}).refine(given => given.CHECK_LEASE_MS > given.CHECK_TIMEOUT_MS + checkLeaseMarginMs, {
+  path: ['CHECK_LEASE_MS'],
+  message: `must be more than CHECK_TIMEOUT_MS plus ${String(checkLeaseMarginMs)} ms, so a check that runs until its timeout still holds its lease when it finishes`,
 });
 
 type Settings = z.infer<typeof settings>;

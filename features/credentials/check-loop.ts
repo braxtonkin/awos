@@ -1,6 +1,6 @@
-import { sql } from 'kysely';
+import { sql, type Expression, type ExpressionBuilder, type SqlBool } from 'kysely';
 import { refusal, type Database } from '../../shared/db/client.ts';
-import type { ConnectorKind } from '../../shared/db/types.ts';
+import type { ConnectorKind, DB } from '../../shared/db/types.ts';
 import type { Loop } from '../../shared/loop.ts';
 import type { Checks } from './checks.ts';
 import { accessOnly, type AccessOnlyLogin, type Check, type Checked } from './kinds.ts';
@@ -19,11 +19,19 @@ export type CheckLoopSettings = {
 
 type Stored = { readonly id: string; readonly connector: ConnectorKind; readonly person_id: string | null };
 
-export type JobLogin = { readonly login: AccessOnlyLogin; readonly expiresAt: Date } | { readonly refused: 'missing' | 'unreadable' | 'not-valid'; readonly reason: string };
+export type JobLogin =
+  | { readonly login: AccessOnlyLogin; readonly expiresAt: Date }
+  | { readonly refused: 'missing' | 'unreadable' | 'not-valid' | 'expires-too-soon'; readonly reason: string };
 
-type Claim = { readonly check: string } | { readonly refused: 'busy' | 'refresh-used' };
+type Claim = { readonly check: string } | { readonly refused: 'busy' | 'not-due' | 'refresh-used' };
+
+type Due = (eb: ExpressionBuilder<DB, 'credential'>, now: Date) => Expression<SqlBool>;
 
 export const refreshWindowMs = 5 * 60_000;
+
+export const triesInWindow = 3;
+
+export const checkLeaseMarginMs = 60_000;
 
 const checkedForJobWithinMs = 6 * 3_600_000;
 
@@ -47,42 +55,71 @@ async function reapChecks(db: Database, now: Date): Promise<readonly string[]> {
   );
 }
 
+const windowOpen = sql<Date>`credential.expires_at - make_interval(secs => ${refreshWindowMs / 1000})`;
+
+const checksInWindow = (eb: ExpressionBuilder<DB, 'credential'>) =>
+  eb
+    .selectFrom('credential_check')
+    .whereRef('credential_check.credential_id', '=', 'credential.id')
+    .whereRef('credential_check.replacement', '=', 'credential.action_id')
+    .where(sql<SqlBool>`credential_check.opened_expires_at is not distinct from credential.expires_at`)
+    .where('credential_check.claimed_at', '>=', windowOpen);
+
+const dueForLoop: Due = (eb, now) =>
+  eb.or([
+    eb('credential.state', 'is', null),
+    eb.and([
+      eb('credential.connector', '=', 'codex'),
+      eb(windowOpen, '<=', now),
+      eb.not(eb.exists(checksInWindow(eb).select('credential_check.id').where('credential_check.outcome', 'in', ['valid', 'invalid']))),
+      eb(checksInWindow(eb).select(inner => inner.fn.countAll<string>().as('tries')), '<', String(triesInWindow)),
+    ]),
+  ]);
+
+const dueForJob: Due = (eb, now) => eb.or([eb('credential.checked_at', 'is', null), eb('credential.checked_at', '<', later(now, -checkedForJobWithinMs))]);
+
 async function dueCredentials(db: Database, now: Date): Promise<readonly Stored[]> {
-  const windowOpen = sql<Date>`credential.expires_at - make_interval(secs => ${refreshWindowMs / 1000})`;
   return db
     .selectFrom('credential')
     .select(['credential.id', 'credential.connector', 'credential.person_id'])
-    .where(eb =>
-      eb.or([
-        eb('credential.state', 'is', null),
-        eb.and([
-          eb('credential.connector', '=', 'codex'),
-          eb(windowOpen, '<=', now),
-          eb.or([eb('credential.checked_at', 'is', null), eb('credential.checked_at', '<', windowOpen)]),
-        ]),
-      ]),
-    )
+    .where(eb => dueForLoop(eb, now))
     .where(eb => eb.not(eb.exists(eb.selectFrom('credential_check').select('credential_check.id').whereRef('credential_check.credential_id', '=', 'credential.id').where('credential_check.finished_at', 'is', null))))
     .orderBy('credential.id')
     .execute();
 }
 
-async function claim(db: Database, settings: CheckLoopSettings, held: Held, refreshes: boolean, now: Date): Promise<Claim> {
+async function lockCredential(tx: Database, credential: string): Promise<void> {
+  await tx.selectFrom('credential').select('id').where('id', '=', credential).forUpdate().execute();
+}
+
+async function claim(db: Database, settings: CheckLoopSettings, held: Held, refreshes: boolean, due: Due, now: Date): Promise<Claim> {
   try {
-    const { id } = await db
-      .insertInto('credential_check')
-      .values({
-        credential_id: held.credential,
-        replacement: held.replacement,
-        opened_expires_at: held.expiresAt,
-        refreshes,
-        checker: settings.checker,
-        claimed_at: now,
-        lease_until: later(now, settings.leaseMs),
-      })
-      .returning('id')
-      .executeTakeFirstOrThrow();
-    return { check: id };
+    const inserted = await db.transaction().execute(async tx => {
+      await lockCredential(tx, held.credential);
+      return tx
+        .insertInto('credential_check')
+        .columns(['credential_id', 'replacement', 'opened_expires_at', 'refreshes', 'checker', 'claimed_at', 'lease_until'])
+        .expression(eb =>
+          eb
+            .selectFrom('credential')
+            .select([
+              'credential.id',
+              'credential.action_id',
+              'credential.expires_at',
+              sql<boolean>`cast(${refreshes} as boolean)`.as('refreshes'),
+              sql<string>`cast(${settings.checker} as text)`.as('checker'),
+              sql<Date>`cast(${now} as timestamptz)`.as('claimed_at'),
+              sql<Date>`cast(${later(now, settings.leaseMs)} as timestamptz)`.as('lease_until'),
+            ])
+            .where('credential.id', '=', held.credential)
+            .where('credential.action_id', '=', held.replacement)
+            .where('credential.expires_at', 'is not distinct from', held.expiresAt)
+            .where(inner => due(inner, now)),
+        )
+        .returning('id')
+        .executeTakeFirst();
+    });
+    return inserted === undefined ? { refused: 'not-due' } : { check: inserted.id };
   } catch (error) {
     const found = refusal(error);
     if (found?.kind === 'unique' && found.name === 'one_live_check_per_credential') return { refused: 'busy' };
@@ -99,8 +136,18 @@ async function claim(db: Database, settings: CheckLoopSettings, held: Held, refr
   }
 }
 
-async function recordRefreshUsed(db: Database, settings: CheckLoopSettings, held: Held, now: Date): Promise<void> {
-  await db.transaction().execute(async tx => {
+async function recordRefreshUsed(db: Database, settings: CheckLoopSettings, held: Held, due: Due, now: Date): Promise<boolean> {
+  return db.transaction().execute(async tx => {
+    await lockCredential(tx, held.credential);
+    const { numUpdatedRows } = await tx
+      .updateTable('credential')
+      .set({ state: 'invalid', checked_at: now })
+      .where('id', '=', held.credential)
+      .where('action_id', '=', held.replacement)
+      .where('expires_at', 'is not distinct from', held.expiresAt)
+      .where(eb => due(eb, now))
+      .executeTakeFirst();
+    if (numUpdatedRows !== 1n) return false;
     await tx
       .insertInto('credential_check')
       .values({
@@ -116,13 +163,7 @@ async function recordRefreshUsed(db: Database, settings: CheckLoopSettings, held
         cause: refreshUsed,
       })
       .execute();
-    await tx
-      .updateTable('credential')
-      .set({ state: 'invalid', checked_at: now })
-      .where('id', '=', held.credential)
-      .where('action_id', '=', held.replacement)
-      .where('expires_at', 'is not distinct from', held.expiresAt)
-      .execute();
+    return true;
   });
 }
 
@@ -130,24 +171,30 @@ async function runSafely(check: Check, secret: string, now: Date): Promise<Check
   try {
     return await check.run(secret, now);
   } catch (error) {
-    return { verdict: 'unknown', cause: `The check failed before it reached a verdict: ${error instanceof Error ? error.message : String(error)}`, expiresAt: null };
+    return { verdict: 'unknown', cause: `The check failed before it reached a verdict: ${error instanceof Error ? error.message : String(error)}`, expiresAt: null, refresh: { kind: 'maybe-used' } };
   }
 }
 
 async function finish(db: Database, settings: CheckLoopSettings, check: string, held: Held, checked: Checked): Promise<string> {
+  try {
+    return await recordFinish(db, settings, check, held, checked);
+  } catch (error) {
+    const found = refusal(error);
+    if (found?.kind !== 'final' || found.name !== 'finished_check_is_final') throw error;
+    return `${checked.verdict}, but its lease ended first and the check was released, so nothing is recorded${checked.refresh.kind === 'rotated' ? ' and the refreshed login is dropped' : ''}. ${checked.cause}`;
+  }
+}
+
+async function recordFinish(db: Database, settings: CheckLoopSettings, check: string, held: Held, checked: Checked): Promise<string> {
   const now = settings.now();
   return db.transaction().execute(async tx => {
-    const back = checked.rotated === undefined ? undefined : await settings.writeBack(tx, settings.key, held, checked.rotated);
+    await lockCredential(tx, held.credential);
     await tx
       .updateTable('credential_check')
-      .set(eb => ({
-        refreshes: checked.rotated !== undefined,
-        finished_at: eb.fn.coalesce('finished_at', eb.val(now)),
-        outcome: eb.fn.coalesce('outcome', eb.val(checked.verdict)),
-        cause: eb.fn.coalesce('cause', eb.val(checked.cause)),
-      }))
+      .set({ finished_at: now, outcome: checked.verdict, cause: checked.cause, ...(checked.refresh.kind === 'unused' ? { refreshes: false } : {}) })
       .where('id', '=', check)
       .execute();
+    const back = checked.refresh.kind === 'rotated' ? await settings.writeBack(tx, settings.key, held, checked.refresh.login) : undefined;
     const stored = back?.written === true ? back.expiresAt : held.expiresAt;
     const learned = held.slot.connector === 'github' && checked.expiresAt !== null ? { expires_at: checked.expiresAt } : {};
     const { numUpdatedRows } = await tx
@@ -163,16 +210,23 @@ async function finish(db: Database, settings: CheckLoopSettings, check: string, 
   });
 }
 
-async function checkOne(db: Database, settings: CheckLoopSettings, row: Stored, now: Date): Promise<string> {
+async function checkOne(db: Database, settings: CheckLoopSettings, row: Stored, due: Due, now: Date): Promise<string> {
   const opened = await open(db, settings.key, { connector: row.connector, owner: row.person_id });
   if (!('secret' in opened)) return `could not open ${whose(row)}: ${opened.reason}`;
   const held: Held = { credential: opened.credential, replacement: opened.replacement, expiresAt: opened.expiresAt, slot: { connector: row.connector, owner: row.person_id } };
   const check = settings.checks[row.connector];
-  const claimed = await claim(db, settings, held, check.rotates(opened.secret), now);
+  const claimed = await claim(db, settings, held, check.rotates(opened.secret), due, now);
   if ('refused' in claimed) {
-    if (claimed.refused === 'busy') return `left ${whose(row)} to the checker that holds it`;
-    await recordRefreshUsed(db, settings, held, now);
-    return `marked ${whose(row)} invalid. ${refreshUsed}`;
+    switch (claimed.refused) {
+      case 'busy':
+        return `left ${whose(row)} to the checker that holds it`;
+      case 'not-due':
+        return `left ${whose(row)}, which another check finished or someone replaced since this pass listed it`;
+      case 'refresh-used':
+        return (await recordRefreshUsed(db, settings, held, due, now))
+          ? `marked ${whose(row)} invalid. ${refreshUsed}`
+          : `left ${whose(row)}, which another check finished or someone replaced since this pass listed it`;
+    }
   }
   const checked = await runSafely(check, opened.secret, now);
   return `checked ${whose(row)}: ${await finish(db, settings, claimed.check, held, checked)}`;
@@ -182,29 +236,45 @@ export function checkLoop(settings: CheckLoopSettings): Loop {
   return {
     name: 'checks',
     everyMs: settings.everyMs,
-    pass: async (db, { now }) => {
+    pass: async (db, { now, stop }) => {
       const released = await reapChecks(db, now);
+      const due = await dueCredentials(db, now);
       const lines: string[] = [];
-      for (const row of await dueCredentials(db, now)) lines.push(await checkOne(db, settings, row, settings.now()));
+      for (const [index, row] of due.entries()) {
+        if (stop.aborted) {
+          lines.push(`stopped before checking ${String(due.length - index)} due credentials, because the engine is stopping`);
+          break;
+        }
+        lines.push(await checkOne(db, settings, row, dueForLoop, settings.now()));
+      }
       return [...released, ...lines];
     },
   };
 }
 
-export async function loginForJob(db: Database, settings: CheckLoopSettings, owner: string): Promise<JobLogin> {
+const lastsTheJob = (expiresAt: Date | null, jobLimitMs: number, now: Date): boolean => expiresAt !== null && expiresAt > later(now, jobLimitMs);
+
+const tooSoon = (owner: string, expiresAt: Date | null, jobLimitMs: number, now: Date): JobLogin => ({
+  refused: 'expires-too-soon',
+  reason: `The Codex login of person ${owner} ${expiresAt === null ? 'has no known expiry' : `expires at ${expiresAt.toISOString()}`}, before a Job that starts now reaches its time limit of ${String(jobLimitMs / 1000)} s at ${later(now, jobLimitMs).toISOString()}, so no Job gets it. The engine refreshes the login in its last 5 minutes, or the person can store a new one.`,
+});
+
+export async function loginForJob(db: Database, settings: CheckLoopSettings, owner: string, jobLimitMs: number): Promise<JobLogin> {
   const row = await db
     .selectFrom('credential')
-    .select(['id', 'connector', 'person_id', 'state', 'checked_at'])
+    .select(['id', 'connector', 'person_id', 'state', 'checked_at', 'expires_at'])
     .where('connector', '=', 'codex')
     .where('person_id', '=', owner)
     .executeTakeFirst();
   if (row === undefined) return { refused: 'missing', reason: `Person ${owner} has stored no Codex login. Store one from the dashboard.` };
   const now = settings.now();
-  if (row.checked_at === null || row.checked_at.getTime() < now.getTime() - checkedForJobWithinMs) await checkOne(db, settings, row, now);
+  if (!lastsTheJob(row.expires_at, jobLimitMs, now)) return tooSoon(owner, row.expires_at, jobLimitMs, now);
+  if (row.checked_at === null || row.checked_at.getTime() < now.getTime() - checkedForJobWithinMs) await checkOne(db, settings, row, dueForJob, now);
   const opened = await open(db, settings.key, { connector: 'codex', owner });
   if (!('secret' in opened)) return { refused: 'unreadable', reason: opened.reason };
   const { state } = await db.selectFrom('credential').select('state').where('id', '=', opened.credential).executeTakeFirstOrThrow();
   if (state !== 'valid') return { refused: 'not-valid', reason: `The last check of the Codex login of person ${owner} found it ${state ?? 'unchecked'}, so no Job gets it.` };
   const copy = accessOnly(opened.secret);
-  return 'refused' in copy ? { refused: 'unreadable', reason: copy.reason } : copy;
+  if ('refused' in copy) return { refused: 'unreadable', reason: copy.reason };
+  return lastsTheJob(copy.expiresAt, jobLimitMs, now) ? copy : tooSoon(owner, copy.expiresAt, jobLimitMs, now);
 }
