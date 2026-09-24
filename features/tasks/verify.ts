@@ -229,14 +229,18 @@ const mutants: readonly Mutant[] = [
   action('GateBlocksUntilApproved', 'a gated stage passes straight to the next stage', 'GatePassesOnlyOnApprove'),
   action('ReturnClearsApprovals', 'a return to Implement keeps the approval of a gate it must pass again', 'GatePassesOnlyOnApprove'),
   invariant('ReturnClearsApprovals', 'a return to Implement keeps the approval of a gate it must pass again', 'ApprovalsMatchGatesPassed'),
-  action('MergeChecksGates', 'Land merges without checking gates while a gate lets a task through', 'MergeNeedsEveryGate', { overrides: { GateBlocksUntilApproved: 'FALSE' } }),
+  action('MergeChecksGates', "Land merges a task that a fault left without a gate's approval", 'MergeNeedsEveryGate'),
   action('MergeWaitsForMergeable', 'Land merges past a red check on a pull request that left draft before its checks were green', 'MergeNeedsEveryGate', { overrides: { IgnoreLaterReviews: '{}' } }),
   action('MergeWaitsForMergeable', 'Land merges past a later review that its routine ignores', 'MergeNeedsEveryGate', { overrides: { ReadyBeforeGreen: '{}' } }),
   invariant('ReviewReturnIsCapped', 'every review that asks for changes returns the task to Implement', 'ReviewReturnsCapped'),
   invariant('RetryResumesStopped', 'Retry cannot resume a stopped task', 'StoppedTaskCanResume'),
-  invariant('RetryKeepsReviews', "a person's retry forgets the review return", 'StoppedTaskCanResume'),
-  unsettled('VerifyPassKeepsLandRounds', 'a Verify pass clears the Land rounds of a task with no gate', loopsFromLandToImplement, { overrides: { ReadyBeforeGreen: '{t1}' } }),
+  action('RetryKeepsReviews', "a person's retry forgets the review return", 'ReviewsOnlyGrow'),
+  invariant('RetryKeepsApprovals', "a person's retry forgets the task's approvals", 'StoppedTaskCanResume'),
+  unsettled('VerifyPassKeepsLandRounds', 'a Verify pass clears the Land rounds of a task with no gate', loopsFromLandToImplement),
   unsettled('OutsideApprovalsAreFinite', 'outside approvals may never stop', approvesForever),
+  action('OutsideApprovalNeedsAWait', 'an outside approval resumes a task that is not awaiting one', 'TaskChangesOnlyWithItsAttempt'),
+  action('LaterReviewParks', 'a later review of a routine that does not ignore them waits for an outside approval', 'LaterReviewWaitsForAPerson'),
+  action('EndStageIsFinal', "passing a routine's end stage does not end the task", 'EndStagePassIsDone'),
 ];
 
 const readConfig = (file: string): string => readFileSync(new URL(file, import.meta.url), 'utf8');
@@ -295,19 +299,20 @@ function boundOf(constants: ReadonlyMap<string, string>, bound: Bound): number |
 
 type ConfigReview = { readonly findings: readonly string[]; readonly summary: string };
 
-function reviewConfig(file: string, config: string): ConfigReview {
+function reviewConfig(file: string, config: string, rows: readonly Mutant[] = mutants): ConfigReview {
   const { constants, listed, problems } = parseConfig(config);
   const floor = floors[file];
   const everyListed = [...listed.INVARIANT, ...listed.PROPERTY];
-  const broken = new Set(mutants.map(mutant => mutant.property));
-  const mutated = new Set(mutants.map(mutant => mutant.guard));
+  const broken = new Set(rows.map(mutant => mutant.property));
+  const mutated = new Set(rows.map(mutant => mutant.guard));
   const guards = [...constants].filter(([, value]) => value === 'TRUE').map(([name]) => name);
   const findings = [
     ...problems,
     ...(listed.INVARIANT.has(typeInvariant) ? [] : [`${typeInvariant} is not listed under INVARIANTS`]),
-    ...mutants.filter(mutant => !listed[mutant.kind].has(mutant.property)).map(mutant => `${mutant.property} is not listed under ${mutant.kind === 'INVARIANT' ? 'INVARIANTS' : 'PROPERTIES'}`),
+    ...rows.filter(mutant => !listed[mutant.kind].has(mutant.property)).map(mutant => `${mutant.property} is not listed under ${mutant.kind === 'INVARIANT' ? 'INVARIANTS' : 'PROPERTIES'}`),
     ...everyListed.filter(property => property !== typeInvariant && !broken.has(property)).map(property => `${property} has no mutant`),
     ...guards.filter(guard => !mutated.has(guard)).map(guard => `guard ${guard} has no mutant`),
+    ...rows.flatMap(mutant => Object.keys(mutant.overrides ?? {}).filter(name => constants.get(name) === 'TRUE').map(name => `the mutant of ${mutant.guard} also turns off guard ${name}`)),
     ...(floor === undefined
       ? [`${file} has no floors`]
       : bounds.flatMap(bound => {
@@ -324,7 +329,15 @@ function checkConfig(file: string): Check {
   return findings.length === 0 ? pass(name, summary) : fail(name, findings.join('; '));
 }
 
-type Plant = { readonly change: string; readonly harmful: boolean; readonly edit: (config: string) => string };
+type Plant = {
+  readonly change: string;
+  readonly harmful: boolean;
+  readonly edit: (config: string) => string;
+  readonly rows?: (rows: readonly Mutant[]) => readonly Mutant[];
+};
+
+const withOverride = (guard: string, overrides: Readonly<Record<string, string>>) => (rows: readonly Mutant[]) =>
+  rows.some(row => row.guard === guard) ? rows.map(row => (row.guard === guard ? { ...row, overrides } : row)) : rows;
 
 const plants: readonly Plant[] = [
   { change: 'a comment hides a smaller Tasks', harmful: true, edit: config => config.replace('    Tasks = {t1, t2}', '    Tasks = {t1} \\* {t1, t2}') },
@@ -336,14 +349,17 @@ const plants: readonly Plant[] = [
   { change: 'a line ends in a tab', harmful: false, edit: config => config.replace('    TypeOK\n', '    TypeOK\t\n') },
   { change: 'a blank line holds spaces', harmful: false, edit: config => config.replace('\nINVARIANTS', '\n    \nINVARIANTS') },
   { change: 'lines end in CRLF', harmful: false, edit: config => config.replace(/\n/g, '\r\n') },
+  { change: 'a mutant also turns off another guard', harmful: true, edit: config => config, rows: withOverride('MergeChecksGates', { GateBlocksUntilApproved: 'FALSE' }) },
+  { change: 'a mutant picks a setting', harmful: false, edit: config => config, rows: withOverride('MergeChecksGates', { ReadyBeforeGreen: '{}' }) },
 ];
 
 function checkPlants(file: string): Check {
   const config = readConfig(file);
   const misses = plants.flatMap(plant => {
     const planted = plant.edit(config);
-    if (planted === config) return [`${plant.change} no longer changes ${file}`];
-    const rejected = reviewConfig(file, planted).findings.length > 0;
+    const rows = plant.rows?.(mutants) ?? mutants;
+    if (planted === config && rows === mutants) return [`${plant.change} no longer changes ${file}`];
+    const rejected = reviewConfig(file, planted, rows).findings.length > 0;
     return rejected === plant.harmful ? [] : [`${plant.change} is ${rejected ? 'rejected' : 'accepted'}`];
   });
   const name = `the review of ${file} rejects each harmful plant and accepts each harmless one`;

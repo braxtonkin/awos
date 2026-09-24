@@ -56,7 +56,19 @@ const finishedAttempt = (step: string, verdict: 'pass' | 'lost') => sql`insert i
   values (1, 1, 1, ${sql.lit(step)}, 0, 1, ${t0}, ${t0} + interval '30 seconds', ${t0} + interval '10 seconds', ${sql.lit(verdict)},
           ${verdict === 'pass' ? sql`'{"outcome": "done", "summary": "Planted.", "blocks": []}'` : sql`null`})`;
 
-const personActs = (kind: 'stop_task' | 'retry_task', id: string) =>
+const plantedReview = sql`'{"outcome": "done", "summary": "Planted.", "blocks": []}'`;
+
+const atLand: readonly Statement[] = [
+  finishedAttempt('specify', 'pass'),
+  finishedAttempt('implement', 'pass'),
+  finishedAttempt('verify', 'pass'),
+  sql`update task set step = 'land', approved = '{specify}' where id = 1`,
+];
+
+const liveAttemptAtLand = sql`insert into attempt (task_id, routine_id, routine_version, step, epoch, run_as_id, started_at, lease_until)
+  values (1, 1, 1, 'land', 0, 1, ${t0} + interval '11 seconds', ${t0} + interval '41 seconds')`;
+
+const personActs =(kind: 'stop_task' | 'retry_task', id: string) =>
   sql`insert into human_action (id, at, person_id, kind, task_id) values (${sql.lit(id)}, ${t0} + interval '2 seconds', 1, ${sql.lit(kind)}, 1)`;
 
 const personApproves = (id: string, attempt: number) =>
@@ -486,6 +498,42 @@ export const properties = {
       from attempt a, prior p
       where a.id = any(p.live) and a.verdict = 'lost' and a.lease_until >= checked_at`,
     plants: [{ setup: [liveAttempt], violation: sql`update attempt set finished_at = ${t0} + interval '20 seconds', verdict = 'lost' where id = 1`, checkedAtSeconds: 20 }],
+  },
+  ReviewsOnlyGrow: {
+    moment: 'each-step',
+    breaks: sql`select s.id, c.counter, s.was_counts ->> c.counter as was, s.counts ->> c.counter as count
+      from diff s join charges c on c.workflow = s.workflow and c.kind = 'review'
+      where coalesce((s.counts ->> c.counter)::int, 0) < coalesce((s.was_counts ->> c.counter)::int, 0)`,
+    plants: [{ setup: [sql`update task set counts = '{"reviews": 1}' where id = 1`], violation: sql`update task set counts = '{}' where id = 1` }],
+  },
+  LaterReviewWaitsForAPerson: {
+    moment: 'each-step',
+    breaks: sql`select s.id, s.state, s.waiting_on, v.ignore_later_reviews from diff s
+      join ended e on e.task_id = s.id and e.verdict = 'changes_requested'
+      join charges c on c.workflow = s.workflow and c.step = s.was_step and c.kind = 'review'
+      join task t on t.id = s.id
+      join routine_version v on v.routine_id = t.routine_id and v.version = t.found_version
+      where coalesce((s.was_counts ->> c.counter)::int, 0) >= c.cap
+        and (s.state = 'waiting' and s.waiting_on = 'retry') = v.ignore_later_reviews`,
+    plants: [
+      {
+        setup: [...atLand, sql`update task set counts = '{"reviews": 1}' where id = 1`, liveAttemptAtLand],
+        violation: sql`update attempt set finished_at = ${t0} + interval '12 seconds', verdict = 'changes_requested', output = ${plantedReview} where finished_at is null`,
+      },
+    ],
+  },
+  EndStagePassIsDone: {
+    moment: 'each-step',
+    breaks: sql`select s.id, s.was_step, s.state from diff s
+      join versions v on v.id = s.id
+      join ended e on e.task_id = s.id and e.verdict = 'pass'
+      where s.was_step = v.end_step and v.gates <@ s.was_approved and s.state <> 'done'`,
+    plants: [
+      {
+        setup: [...atLand, liveAttemptAtLand],
+        violation: sql`update attempt set finished_at = ${t0} + interval '12 seconds', verdict = 'pass', output = ${plantedReview} where finished_at is null`,
+      },
+    ],
   },
   EveryTaskSettles: {
     moment: 'after-quiet-phase',
