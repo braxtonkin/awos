@@ -24,7 +24,7 @@ export const mergeResult = z.discriminatedUnion('outcome', [
 
 export const actionKinds = {
   ticketComment: spec('ticket.comment', z.object({ ticket, text: z.string().min(1), linkPullRequest: z.boolean() }), z.object({ comment: z.string().min(1) })),
-  ticketTransition: spec('ticket.transition', z.object({ ticket, status: z.string().min(1) }), z.object({ status: z.string().min(1) })),
+  ticketTransition: spec('ticket.transition', z.object({ ticket, status: z.string().min(1), from: z.string().min(1).nullable() }), z.object({ status: z.string().min(1) })),
   prOpenDraft: spec(
     'pr.open-draft',
     z.object({ repository, head: branch, base: branch, title: z.string().min(1), body: z.string() }),

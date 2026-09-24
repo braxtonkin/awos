@@ -1,4 +1,4 @@
-import type { Source } from './source.ts';
+import type { Source } from '../../shared/routine-source.ts';
 
 export const scheduleSource: Source = {
   kind: 'schedule',
