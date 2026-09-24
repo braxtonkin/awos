@@ -62,11 +62,15 @@ export async function actAs(store: Store, args: readonly string[]): Promise<Ran>
 
 export type Engine = { readonly said: () => string; readonly stop: () => Promise<void> };
 
-export function startEngine(store: Store, settings: Readonly<Record<string, string>>): Engine {
+export function startEngine(store: Store, settings: Readonly<Record<string, string>>, echo: (line: string) => void = () => undefined): Engine {
   let said = '';
+  const heard = (chunk: string): void => {
+    said += chunk;
+    for (const line of chunk.split('\n').filter(line => line.trim() !== '')) echo(`  engine: ${line}`);
+  };
   const child: ChildProcess = spawn(process.execPath, [engineCommand], { env: { ...baseEnvironment(store), ...settings }, cwd: repositoryRoot, stdio: ['ignore', 'pipe', 'pipe'] });
-  child.stdout?.setEncoding('utf8').on('data', (chunk: string) => (said += chunk));
-  child.stderr?.setEncoding('utf8').on('data', (chunk: string) => (said += chunk));
+  child.stdout?.setEncoding('utf8').on('data', heard);
+  child.stderr?.setEncoding('utf8').on('data', heard);
   const exited = new Promise<void>(resolve => child.once('exit', () => { resolve(); }));
   return {
     said: () => said,

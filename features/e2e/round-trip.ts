@@ -150,7 +150,7 @@ async function storedTicks(world: World, attempt: string): Promise<readonly stri
 async function roundTrip(world: World, image: string, label: string, plan: (stored: string) => boolean): Promise<readonly Check[]> {
   const key = `${label}-a`;
   await addTask(world, key, 'Make titleCase capitalize each word.');
-  const engine = startEngine(world.store, engineSettings(world, image));
+  const engine = startEngine(world.store, engineSettings(world, image), world.out);
   try {
     const specify = await waitForAttempt(world, key, 'specify');
     const reason = await waitForWait(world, key, label === 'real' ? realWaitMs : stepWaitMs);
@@ -188,7 +188,7 @@ async function sendBack(world: World, image: string): Promise<readonly Check[]> 
   const key = 'stand-in-b';
   const note = 'Plan for the smaller change only.';
   await addTask(world, key, 'Make titleCase capitalize each word.');
-  const engine = startEngine(world.store, engineSettings(world, image));
+  const engine = startEngine(world.store, engineSettings(world, image), world.out);
   try {
     const reason = await waitForWait(world, key);
     const sent = await actAs(world.store, ['send-back', key, '--step', 'specify', '--note', note, '--as', owner]);
@@ -212,14 +212,14 @@ async function outage(world: World, image: string): Promise<readonly Check[]> {
   const key = 'stand-in-c';
   const ticks = 16;
   await addTask(world, key, `Tick through the turn: ${ticking(ticks, 1000)}.`);
-  let engine: Engine = startEngine(world.store, engineSettings(world, image));
+  let engine: Engine = startEngine(world.store, engineSettings(world, image), world.out);
   try {
     const specify = await waitForAttempt(world, key, 'specify');
     const started = specify === undefined ? undefined : await until(stepWaitMs, async () => ((await storedTicks(world, specify.id)).length >= 3 ? true : undefined));
     await engine.stop();
     const downAt = Date.now();
     await wait(8_000);
-    engine = startEngine(world.store, engineSettings(world, image));
+    engine = startEngine(world.store, engineSettings(world, image), world.out);
     const reason = await waitForWait(world, key);
     const stored = specify === undefined ? [] : await storedTicks(world, specify.id);
     const expected = Array.from({ length: ticks }, (_, index) => `tick ${String(index + 1)}`);
@@ -246,7 +246,7 @@ const logTime = (log: string, needle: string): number | undefined => {
 async function stopMidTurn(world: World, image: string): Promise<readonly Check[]> {
   const key = 'stand-in-d';
   await addTask(world, key, `Tick until stopped: ${ticking(120, 1000)}.`);
-  const engine = startEngine(world.store, engineSettings(world, image));
+  const engine = startEngine(world.store, engineSettings(world, image), world.out);
   try {
     const specify = await waitForAttempt(world, key, 'specify');
     const ticked = specify === undefined ? undefined : await until(stepWaitMs, async () => ((await storedTicks(world, specify.id)).length >= 2 ? true : undefined));
