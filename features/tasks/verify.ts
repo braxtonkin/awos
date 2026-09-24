@@ -886,7 +886,7 @@ async function sigtermChecks(postgres: TestPostgres): Promise<readonly Check[]> 
 async function restartCheck(postgres: TestPostgres): Promise<Check> {
   const name = 'after Postgres restarts between two reaper passes, the engine resumes with fresh leases before it releases anything';
   const scratch = await postgres.scratch();
-  const engine = runEngine(scratch.url, { REAPER_EVERY_MS: '6000', LEASE_MS: '1000' });
+  const engine = runEngine(scratch.stableUrl, { REAPER_EVERY_MS: '6000', LEASE_MS: '1000' });
   const started = await engine.waitFor('reaper: gave ');
   const restartedAt = engine.said().length;
   if (started) await postgres.restart();

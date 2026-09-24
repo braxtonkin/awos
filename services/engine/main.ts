@@ -10,6 +10,7 @@ const milliseconds = z.coerce.number().int().positive();
 const settings = z.object({
   DATABASE_URL: z.url({ protocol: /^postgres(ql)?$/ }),
   DATABASE_POOL_SIZE: z.coerce.number().int().min(2).default(10),
+  DATABASE_CONNECT_TIMEOUT_MS: milliseconds.default(10_000),
   LEASE_MS: milliseconds.default(60_000),
   REAPER_EVERY_MS: milliseconds.default(30_000),
 });
@@ -29,7 +30,7 @@ async function run(given: Settings): Promise<void> {
     stop.abort();
   };
   process.on('SIGTERM', stopping).on('SIGINT', stopping);
-  const db = connect(given.DATABASE_URL, given.DATABASE_POOL_SIZE);
+  const db = connect(given.DATABASE_URL, given.DATABASE_POOL_SIZE, given.DATABASE_CONNECT_TIMEOUT_MS);
   try {
     const problems = await startProblems(db, workflows);
     if (problems.length > 0) {

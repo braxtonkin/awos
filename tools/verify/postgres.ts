@@ -13,12 +13,13 @@ export type Pause = () => Promise<() => Promise<void>>;
 
 export type Postgres = {
   readonly url: (database: string) => string;
+  readonly stableUrl: (database: string) => string;
   readonly pause: Pause;
   readonly restart: () => Promise<void>;
   readonly stop: () => Promise<void>;
 };
 
-export type Scratch = { readonly url: string; readonly drop: () => Promise<void> };
+export type Scratch = { readonly url: string; readonly stableUrl: string; readonly drop: () => Promise<void> };
 
 export type TestPostgres = { readonly readyInMs: number; readonly scratch: () => Promise<Scratch>; readonly pause: Pause; readonly restart: () => Promise<void> };
 
@@ -88,8 +89,11 @@ export async function startPostgres(): Promise<Postgres> {
     .withLabels({ [ownerLabel]: self.id })
     .withCommand(['postgres', ...settings.flatMap(setting => ['-c', setting])])
     .start();
+  const at = (host: string, database: string): string => `postgres://${container.getUsername()}:${container.getPassword()}@${host}:5432/${database}?sslmode=disable`;
+  const address = container.getIpAddress(self.network);
   return {
-    url: database => `postgres://${container.getUsername()}:${container.getPassword()}@${alias}:5432/${database}?sslmode=disable`,
+    url: database => at(address, database),
+    stableUrl: database => at(alias, database),
     pause: pausing(container.getId()),
     restart: () => container.restart(),
     stop: async () => {
@@ -134,6 +138,7 @@ export async function withPostgres<T>(work: (postgres: TestPostgres) => Promise<
           await sql`create database ${sql.id(name)} template ${sql.id(template)}`.execute(admin);
           return {
             url: postgres.url(name),
+            stableUrl: postgres.stableUrl(name),
             drop: async () => {
               await sql`drop database ${sql.id(name)}`.execute(admin);
             },

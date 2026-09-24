@@ -18,8 +18,8 @@ const refusals = z.union([
   z.object({ code: z.literal('23502'), table: z.string(), column: z.string() }).transform(({ table, column }): Refusal => ({ kind: 'not_null', table, column })),
 ]);
 
-export function connect(url: string, connections: number): Database {
-  const pool = new pg.Pool({ connectionString: url, max: connections, connectionTimeoutMillis: 10_000 });
+export function connect(url: string, connections: number, connectTimeoutMs?: number): Database {
+  const pool = new pg.Pool({ connectionString: url, max: connections, ...(connectTimeoutMs === undefined ? {} : { connectionTimeoutMillis: connectTimeoutMs }) });
   pool.on('error', error => {
     process.stderr.write(`An idle Postgres connection failed, and the pool dropped it: ${error.message}\n`);
   });
