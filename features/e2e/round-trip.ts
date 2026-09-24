@@ -147,6 +147,31 @@ async function storedTicks(world: World, attempt: string): Promise<readonly stri
   return rows.map(row => row.text).filter(text => /^tick \d+$/.test(text));
 }
 
+async function overheadCheck(world: World, label: string, attempt: string | undefined): Promise<Check> {
+  const name = `${label} perf: the engine's overhead for the Specify attempt is under 60 s`;
+  const found = attempt === undefined ? undefined : await overheadOf(world, attempt);
+  if (found === undefined) return fail(name, 'the attempt has no turn start, turn end, or finish');
+  const total = found.toTurnMs + found.toVerdictMs;
+  return total <= 60_000 ? pass(name, `${String(found.toTurnMs)} ms from claim to turn start, ${String(found.toVerdictMs)} ms from turn end to verdict`) : fail(name, `${String(total)} ms`);
+}
+
+type Overhead = { readonly toTurnMs: number; readonly toVerdictMs: number };
+
+async function overheadOf(world: World, attempt: string): Promise<Overhead | undefined> {
+  const row = await world.store.db
+    .selectFrom('attempt')
+    .select(eb => [
+      'attempt.started_at',
+      'attempt.finished_at',
+      eb.selectFrom('attempt_command').select('attempt_command.acted_at').whereRef('attempt_command.attempt_id', '=', 'attempt.id').where('attempt_command.kind', '=', 'turn.start').as('turn_started'),
+      eb.selectFrom('attempt_event').select('attempt_event.stored_at').whereRef('attempt_event.attempt_id', '=', 'attempt.id').where('attempt_event.method', '=', 'turn/completed').as('turn_ended'),
+    ])
+    .where('attempt.id', '=', attempt)
+    .executeTakeFirst();
+  if (row?.finished_at == null || row.turn_started == null || row.turn_ended == null) return undefined;
+  return { toTurnMs: row.turn_started.getTime() - row.started_at.getTime(), toVerdictMs: row.finished_at.getTime() - row.turn_ended.getTime() };
+}
+
 async function roundTrip(world: World, image: string, label: string, plan: (stored: string) => boolean): Promise<readonly Check[]> {
   const key = `${label}-a`;
   await addTask(world, key, 'Make titleCase capitalize each word.');
@@ -164,6 +189,7 @@ async function roundTrip(world: World, image: string, label: string, plan: (stor
       reason?.includes(`Approve specify for task ${key}`) === true ? pass(`${label} 3: the task waits for Approve`, reason) : fail(`${label} 3: the task waits for Approve`, reason ?? 'the task never waited'),
       specifyGone === true ? pass(`${label} 3: the Specify pod is gone`, `attempt ${specify?.id ?? ''}`) : fail(`${label} 3: the Specify pod is gone`, 'a pod still runs'),
       implementBefore.length === 0 ? pass(`${label} 3: no Implement attempt before Approve`, 'none') : fail(`${label} 3: no Implement attempt before Approve`, JSON.stringify(implementBefore)),
+      await overheadCheck(world, label, specify?.id),
       model?.model === 'gpt-6-luna' ? pass(`${label}: the thread ran on gpt-6-luna`, 'thread/start answered gpt-6-luna') : fail(`${label}: the thread ran on gpt-6-luna`, JSON.stringify(model ?? null)),
     ];
     const approved = await actAs(world.store, ['approve', key, '--step', 'specify', '--as', owner]);
