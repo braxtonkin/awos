@@ -19,7 +19,7 @@ const refusals = z.union([
 ]);
 
 export function connect(url: string, connections: number): Database {
-  const pool = new pg.Pool({ connectionString: url, max: connections });
+  const pool = new pg.Pool({ connectionString: url, max: connections, connectionTimeoutMillis: 10_000 });
   pool.on('error', error => {
     process.stderr.write(`An idle Postgres connection failed, and the pool dropped it: ${error.message}\n`);
   });

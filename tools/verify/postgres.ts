@@ -80,22 +80,22 @@ function pausing(id: string): Pause {
 export async function startPostgres(): Promise<Postgres> {
   const self = await verifyContainer();
   await removeOrphans();
+  const alias = `postgres-${randomUUID()}`;
   const container = await new PostgreSqlContainer(image)
     .withPassword(randomUUID())
     .withNetworkMode(self.network)
+    .withNetworkAliases(alias)
     .withLabels({ [ownerLabel]: self.id })
     .withCommand(['postgres', ...settings.flatMap(setting => ['-c', setting])])
     .start();
-  const stop = async (): Promise<void> => {
-    await container.stop();
+  return {
+    url: database => `postgres://${container.getUsername()}:${container.getPassword()}@${alias}:5432/${database}?sslmode=disable`,
+    pause: pausing(container.getId()),
+    restart: () => container.restart(),
+    stop: async () => {
+      await container.stop();
+    },
   };
-  try {
-    const address = container.getIpAddress(self.network);
-    return { url: database => `postgres://${container.getUsername()}:${container.getPassword()}@${address}:5432/${database}?sslmode=disable`, pause: pausing(container.getId()), restart: () => container.restart(), stop };
-  } catch (error) {
-    await stop();
-    throw error;
-  }
 }
 
 export function dbmate(url: string, command: 'up' | 'rollback', folder = migrationsFolder): void {
