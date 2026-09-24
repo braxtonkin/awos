@@ -74,10 +74,17 @@ function settleChecks(): readonly Check[] {
   });
 }
 
+function promptCheck(): Check {
+  const name = "Verify's core prompt names each command the engine matches exactly";
+  const prompt = workflow.steps.find(kind => kind.name === 'verify')?.prompt ?? '';
+  const missing = [reproduction.show, reproduction.before, reproduction.after].filter(command => !prompt.includes(`\`${command}\``));
+  return missing.length === 0 ? pass(name, 'all 3') : fail(name, `missing ${missing.join(', ')}`);
+}
+
 export const scenarios: readonly Scenario[] = [
   {
     name: 'code-change',
     summary: "checks the Code change declaration against the task model's shape and runs each step's judge on reviews of every outcome",
-    run: () => Promise.resolve([shapeCheck(), builtCheck(), ...judgeChecks(), ...settleChecks()]),
+    run: () => Promise.resolve([shapeCheck(), builtCheck(), ...judgeChecks(), ...settleChecks(), promptCheck()]),
   },
 ];
