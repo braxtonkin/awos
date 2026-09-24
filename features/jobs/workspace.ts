@@ -15,7 +15,7 @@ export const jobEnvironment = z.object({
   ENGINE_URL: z.url({ protocol: /^https?$/ }),
   REPO_URL: z.url({ protocol: /^(https|git)$/ }),
   START_COMMIT: commit,
-  ATTEMPT_BRANCH: z.string().regex(/^autoworker\/[A-Za-z0-9._-]+-attempt-[1-9][0-9]*$/, { error: 'must be autoworker/<task key>-attempt-<n>' }),
+  ATTEMPT_BRANCH: z.string().regex(/^autoworker\/[A-Za-z0-9._/-]+-attempt-[1-9][0-9]*$/, { error: 'must be autoworker/<task key>-attempt-<n>' }),
   GITHUB_TOKEN: z.string().regex(/^\S+$/, { error: 'must be one word' }),
   CODEX_AUTH_JSON: z.string().refine(login => codexLogin.safeParse(login).data?.tokens.refresh_token === '', {
     error: 'must be an access-only Codex auth.json, whose tokens.refresh_token is blank',

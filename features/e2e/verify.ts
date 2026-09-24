@@ -9,6 +9,8 @@ import { githubPayloads } from './github.ts';
 import { accessFromEnvironment, createRunBranch, runEndToEnd } from './harness.ts';
 import { jiraPayloads } from './jira.ts';
 import { parsePayload, PayloadRejected } from './payload.ts';
+import { parkedScenario } from './parked.ts';
+import { roundTripScenario } from './round-trip.ts';
 
 const defaultRepository = 'braxtonkdev/autoworker-oss';
 const defaultProject = 'SBX';
@@ -140,4 +142,4 @@ const e2ePayload: Scenario = {
   },
 };
 
-export const scenarios: readonly Scenario[] = [e2e, e2eBranch, e2ePayload, ...cleanScenarios];
+export const scenarios: readonly Scenario[] = [e2e, e2eBranch, e2ePayload, ...cleanScenarios, roundTripScenario, parkedScenario];

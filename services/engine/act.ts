@@ -2,6 +2,8 @@ import { randomUUID } from 'node:crypto';
 import { parseArgs } from 'node:util';
 import { z } from 'zod';
 import { act, address, note, type PersonAction } from '../../features/tasks/advance.ts';
+import { numberCommand } from '../../features/bridge/engine.ts';
+import { attemptId } from '../../features/bridge/protocol.ts';
 import { connect } from '../../shared/db/client.ts';
 import { answer } from '../../shared/review.ts';
 import { workflows } from './workflows.ts';
@@ -62,7 +64,9 @@ async function run(given: Command): Promise<string> {
     const action = actionOf(given, found.review);
     if (typeof action === 'string') throw new Error(action);
     const id = given.values.id ?? randomUUID();
-    const acted = await act(db, workflows, found.task, { id, person: found.person, at: new Date() }, action);
+    const acted = await act(db, workflows, found.task, { id, person: found.person, at: new Date() }, action, async (writer, attempt, now) => {
+      await numberCommand(writer, attemptId.parse(attempt), { kind: 'turn.stop' }, now);
+    });
     if ('refused' in acted) throw new Error(`AutoWorker refused ${kind} on task ${key}: ${acted.refused}.`);
     return `Recorded ${kind} on task ${key} as action ${acted.recorded}.`;
   } finally {

@@ -54,6 +54,7 @@ export type Verdict = "behavior_fail" | "changes_requested" | "environment_fail"
 export type WaitingOn = "answer" | "approval" | "outside_approval" | "retry";
 
 export interface Attempt {
+  branch: string | null;
   bridge_pid: number | null;
   bridge_token_hash: Buffer | null;
   commands_received: Generated<Int8>;
@@ -61,12 +62,14 @@ export interface Attempt {
   finished_at: Timestamp | null;
   high_water: Generated<Int8>;
   id: Generated<Int8>;
+  last_pushed: string | null;
   lease_until: Timestamp;
   live: Generated<boolean | null>;
   output: Json | null;
   routine_id: Int8;
   routine_version: number;
   run_as_id: Int8;
+  start_commit: string | null;
   started_at: Timestamp;
   step: string;
   task_id: Int8;
@@ -126,6 +129,13 @@ export interface CredentialCheck {
   outcome: CheckOutcome | null;
   refreshes: boolean;
   replacement: string;
+}
+
+export interface Evidence {
+  attempt_id: Int8;
+  body: Json;
+  recorded_at: Timestamp;
+  task_id: Int8;
 }
 
 export interface HumanAction {
@@ -284,6 +294,7 @@ export interface DB {
   connector: Connector;
   credential: Credential;
   credential_check: CredentialCheck;
+  evidence: Evidence;
   human_action: HumanAction;
   outbox: Outbox;
   person: Person;

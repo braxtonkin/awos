@@ -181,7 +181,7 @@ async function start(world: World, options: Options = {}): Promise<Started> {
   const input = {
     attempt,
     taskKey: key,
-    number,
+    branch: attemptBranch(key, number),
     step: options.step ?? 'specify',
     image: options.image ?? world.image,
     repositoryUrl: options.repositoryUrl ?? thisRepository,

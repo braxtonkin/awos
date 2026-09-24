@@ -144,7 +144,9 @@ export const post: Workflow = {
     step({
       name: 'post',
       reads: [],
+      runBy: 'agent',
       prompt: 'Post the update.',
+      startsEnvironment: false,
       needsRepository: false,
       canEnd: true,
       owes: [],

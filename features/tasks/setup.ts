@@ -2,10 +2,10 @@ import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
-import { sql } from 'kysely';
+import { sql, type Selectable } from 'kysely';
 import { z } from 'zod';
 import { refusal, type Database } from '../../shared/db/client.ts';
-import type { PersonKind } from '../../shared/db/types.ts';
+import type { PersonKind, Repository as RepositoryRow } from '../../shared/db/types.ts';
 import type { Workflows } from './start.ts';
 
 export type Count = { readonly added: number; readonly changed: number };
@@ -22,16 +22,50 @@ const slug = z.string().regex(/^[a-z][a-z0-9-]{0,63}$/, { error: 'must be lowerc
 
 const skill = z.string().regex(/^[a-z0-9][a-z0-9-]{0,63}$/, { error: 'must be lowercase letters, digits, and dashes' });
 
-const repository = z.strictObject({
+const repositoryFields = {
   github: z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/, { error: 'must name an owner and a repository, such as example/sandbox' }),
   branch: words,
+};
+
+const repository = z.strictObject(repositoryFields);
+
+const imageByDigest = z.string().regex(/^[a-z0-9][a-z0-9._/:-]*@sha256:[0-9a-f]{64}$/, {
+  error: 'must name the image by its sha256 digest, as name@sha256:<64 hex digits>, because a tag can move',
 });
+
+const repositorySettings = z.strictObject({
+  ...repositoryFields,
+  image: imageByDigest.optional(),
+  fastTestCommand: words.optional(),
+  verifyProvider: slug.default('tests-only'),
+  ignorableChecks: z.array(words).default([]),
+  draftLeaves: z.enum(['when-green', 'at-once']).default('when-green'),
+  ignoredReviewers: z.array(words).default([]),
+});
+
+const jiraSearch = 'jira-search';
+
+const onlyJiraSearch = `belongs only to a ${jiraSearch} source`;
+
+const source = z
+  .strictObject({ kind: slug, jql: words.optional(), pageSize: z.int().min(1).max(100).optional() })
+  .superRefine(({ kind, jql, pageSize }, context) => {
+    const problems = [
+      ...(kind === jiraSearch && jql === undefined ? [{ field: 'jql', message: `must hold the JQL query a ${jiraSearch} source searches with` }] : []),
+      ...(kind !== jiraSearch && jql !== undefined ? [{ field: 'jql', message: onlyJiraSearch }] : []),
+      ...(kind !== jiraSearch && pageSize !== undefined ? [{ field: 'pageSize', message: onlyJiraSearch }] : []),
+    ];
+    for (const { field, message } of problems) context.issues.push({ code: 'custom', path: [field], message, input: undefined });
+  });
 
 const routine = z.strictObject({
   name: words,
   goal: words,
   workflow: slug,
-  source: z.strictObject({ kind: slug }),
+  source,
+  jiraStartStatus: words.optional(),
+  jiraEndStatus: words.optional(),
+  ignoreLaterReviews: z.boolean().default(false),
   everyMinutes: z.number().int().min(1).max(24 * 60).default(15),
   repository: repository.optional(),
   creator: email,
@@ -43,6 +77,8 @@ const routine = z.strictObject({
 
 type Repository = z.output<typeof repository>;
 
+type RepositorySettings = z.output<typeof repositorySettings>;
+
 type Routine = z.output<typeof routine>;
 
 function fileSchema<L>(logins: z.ZodType<L>) {
@@ -50,7 +86,7 @@ function fileSchema<L>(logins: z.ZodType<L>) {
     admin: email,
     people: z.array(z.strictObject({ name: words, email, jiraAccountId: words.optional(), logins })),
     teamAccounts: z.array(z.strictObject({ name: words, email, logins })).default([]),
-    repositories: z.array(repository).default([]),
+    repositories: z.array(repositorySettings).default([]),
     routines: z.array(routine).default([]),
   });
 }
@@ -77,6 +113,9 @@ function routineProblems(planned: Routine, workflows: Workflows, people: readonl
     ...(needsRepository && where === undefined ? [{ path: ['repository'], message: `must name a repository from repositories, because ${workflow.name} works in one` }] : []),
     ...(!needsRepository && where !== undefined ? [{ path: ['repository'], message: `must be left out, because ${workflow.name} works in no repository` }] : []),
     ...(where === undefined || repositories.includes(where) ? [] : [{ path: ['repository'], message: `names ${where}, which repositories does not list` }]),
+    ...(planned.source.kind === jiraSearch || (planned.jiraStartStatus === undefined && planned.jiraEndStatus === undefined)
+      ? []
+      : [{ path: ['source', 'kind'], message: `names ${planned.source.kind}, but jiraStartStatus and jiraEndStatus move Jira tickets, which only a ${jiraSearch} source finds` }]),
     ...(ending.includes(end) ? [] : [{ path: ['lastStep'], message: `names ${end}, where ${workflow.name} cannot end. Use one of: ${ending.join(', ')}` }]),
     ...planned.gates.flatMap((gate, index) =>
       names.includes(gate) && names.indexOf(gate) < names.indexOf(end) ? [] : [{ path: ['gates', index], message: `names ${gate}, which is not a step of ${workflow.name} before its last step, ${end}` }],
@@ -168,19 +207,47 @@ export async function applyPeople<L>(db: Database, file: SetupFile<L>): Promise<
   return { people, teamAccounts };
 }
 
-export function applyRepositories<L>(db: Database, file: SetupFile<L>): Promise<Pick<Count, 'added'>> {
+const settingColumns = ['job_image', 'fast_test_command', 'verify_provider', 'ignorable_checks', 'draft_leaves', 'ignored_reviewers'] as const;
+
+type SettingColumns = { readonly [Column in (typeof settingColumns)[number]]: Selectable<RepositoryRow>[Column] };
+
+const settingsOf = (planned: RepositorySettings): SettingColumns => ({
+  job_image: planned.image ?? null,
+  fast_test_command: planned.fastTestCommand ?? null,
+  verify_provider: planned.verifyProvider,
+  ignorable_checks: [...planned.ignorableChecks],
+  draft_leaves: planned.draftLeaves,
+  ignored_reviewers: [...planned.ignoredReviewers],
+});
+
+async function applyRepository(trx: Database, admin: string, planned: RepositorySettings): Promise<Outcome> {
+  const { github, branch } = planned;
+  const wanted = settingsOf(planned);
+  const found = await trx
+    .selectFrom('repository')
+    .select(['id', ...settingColumns])
+    .where('github', '=', github)
+    .where('branch', '=', branch)
+    .executeTakeFirst();
+  const saved = randomUUID();
+  if (found === undefined) {
+    const { id } = await trx.insertInto('repository').values({ github, branch, ...wanted, saved_by: saved }).returning('id').executeTakeFirstOrThrow();
+    await trx.insertInto('human_action').values({ id: saved, at: new Date(), person_id: admin, kind: 'add_repository', repository_id: id }).execute();
+    return 'added';
+  }
+  const { id, ...stored } = found;
+  if (isDeepStrictEqual(stored, wanted)) return 'same';
+  await trx.insertInto('human_action').values({ id: saved, at: new Date(), person_id: admin, kind: 'edit_repository', repository_id: id }).execute();
+  await trx.updateTable('repository').set({ ...wanted, saved_by: saved }).where('id', '=', id).execute();
+  return 'changed';
+}
+
+export function applyRepositories<L>(db: Database, file: SetupFile<L>): Promise<Count> {
   return db.transaction().execute(async trx => {
     const admin = await personId(trx, file.admin);
-    let added = 0;
-    for (const { github, branch } of file.repositories) {
-      const found = await trx.selectFrom('repository').select('id').where('github', '=', github).where('branch', '=', branch).executeTakeFirst();
-      if (found !== undefined) continue;
-      const saved = randomUUID();
-      const { id } = await trx.insertInto('repository').values({ github, branch, saved_by: saved }).returning('id').executeTakeFirstOrThrow();
-      await trx.insertInto('human_action').values({ id: saved, at: new Date(), person_id: admin, kind: 'add_repository', repository_id: id }).execute();
-      added += 1;
-    }
-    return { added };
+    const outcomes: Outcome[] = [];
+    for (const planned of file.repositories) outcomes.push(await applyRepository(trx, admin, planned));
+    return tally(outcomes);
   });
 }
 
@@ -188,6 +255,9 @@ type Version = {
   readonly name: string;
   readonly everyMinutes: number;
   readonly source: unknown;
+  readonly jiraStartStatus: string | null;
+  readonly jiraEndStatus: string | null;
+  readonly ignoreLaterReviews: boolean;
   readonly gates: readonly string[];
   readonly lastStep: string | null;
   readonly steps: Readonly<Record<string, { readonly instructions: string; readonly skills: readonly string[] }>>;
@@ -208,6 +278,9 @@ async function saveVersion(trx: Database, routineId: string, version: number, ad
       action_id: action,
       workflow: planned.workflow,
       source: JSON.stringify(planned.source),
+      jira_start_status: planned.jiraStartStatus ?? null,
+      jira_end_status: planned.jiraEndStatus ?? null,
+      ignore_later_reviews: planned.ignoreLaterReviews,
       needs_repository: repositoryId !== null,
       gates: planned.gates,
       last_step: planned.lastStep ?? null,
@@ -227,7 +300,20 @@ async function applyRoutine(trx: Database, admin: string, planned: Routine): Pro
   const found = await trx
     .selectFrom('routine_version as version')
     .innerJoin('routine', 'routine.id', 'version.routine_id')
-    .select(['routine.id', 'routine.creator_id', 'routine.run_as_id', 'version.version', 'version.name', sql<number>`(extract(epoch from version.every) / 60)::float8`.as('everyMinutes'), 'version.source', sql<string[]>`version.gates::text[]`.as('gates'), 'version.last_step'])
+    .select([
+      'routine.id',
+      'routine.creator_id',
+      'routine.run_as_id',
+      'version.version',
+      'version.name',
+      sql<number>`(extract(epoch from version.every) / 60)::float8`.as('everyMinutes'),
+      'version.source',
+      'version.jira_start_status',
+      'version.jira_end_status',
+      'version.ignore_later_reviews',
+      sql<string[]>`version.gates::text[]`.as('gates'),
+      'version.last_step',
+    ])
     .where('version.workflow', '=', planned.workflow)
     .where('version.goal', '=', planned.goal)
     .where('version.repository_id', 'is not distinct from', repositoryId)
@@ -250,11 +336,24 @@ async function applyRoutine(trx: Database, admin: string, planned: Routine): Pro
     name: found.name,
     everyMinutes: found.everyMinutes,
     source: found.source,
+    jiraStartStatus: found.jira_start_status,
+    jiraEndStatus: found.jira_end_status,
+    ignoreLaterReviews: found.ignore_later_reviews,
     gates: found.gates,
     lastStep: found.last_step,
     steps: Object.fromEntries(stepRows.map(row => [row.step, { instructions: row.instructions, skills: row.skills }])),
   };
-  const wanted: Version = { name: planned.name, everyMinutes: planned.everyMinutes, source: planned.source, gates: planned.gates, lastStep: planned.lastStep ?? null, steps: planned.steps };
+  const wanted: Version = {
+    name: planned.name,
+    everyMinutes: planned.everyMinutes,
+    source: planned.source,
+    jiraStartStatus: planned.jiraStartStatus ?? null,
+    jiraEndStatus: planned.jiraEndStatus ?? null,
+    ignoreLaterReviews: planned.ignoreLaterReviews,
+    gates: planned.gates,
+    lastStep: planned.lastStep ?? null,
+    steps: planned.steps,
+  };
   const routineChanged = found.creator_id !== creator || found.run_as_id !== runAs;
   const versionChanged = !isDeepStrictEqual(stored, wanted);
   if (routineChanged) await trx.updateTable('routine').set({ creator_id: creator, run_as_id: runAs }).where('id', '=', found.id).execute();

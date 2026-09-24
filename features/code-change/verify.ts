@@ -3,6 +3,8 @@ import { z } from 'zod';
 import { builtByStep, shapeOf, type StepVerdict } from '../../shared/workflow.ts';
 import { fail, pass, type Check, type Scenario } from '../../tools/verify/check.ts';
 import { modelShape, shapeDrift } from '../../tools/verify/model-shape.ts';
+import type { Ran } from '../../shared/agent-step.ts';
+import { agentSteps, reproduction } from './stage-output.ts';
 import { defineModel, type Shape } from '../../tools/verify/models.ts';
 import type { TlcRun } from '../../tools/verify/tlc.ts';
 import { mutantName, mutants, runSeed, simulate, type MutantName, type Run } from './simulate.ts';
@@ -52,6 +54,37 @@ function builtCheck(): Check {
   const name = 'every step of Code change was built by step()';
   const loose = workflow.steps.filter(kind => !builtByStep(kind)).map(kind => kind.name);
   return loose.length === 0 ? pass(name, `${String(workflow.steps.length)} steps`) : fail(name, `not built by step(): ${loose.join(', ')}`);
+}
+
+const run = (command: string, exitCode: number, wrap = true): Ran => ({ command: wrap ? `/bin/bash -lc '${command}'` : command, cwd: '/workspace', exitCode, output: `ran ${command}` });
+
+const script = run(reproduction.show, 0);
+
+const settleCases: readonly (readonly [string, readonly Ran[], 'fixed' | 'still_wrong' | null])[] = [
+  ['a failing base run then a passing change run, each wrapped by the shell', [script, run(reproduction.before, 1), run(reproduction.after, 0)], 'fixed'],
+  ['the same runs written without the shell wrapper', [script, run(reproduction.before, 1, false), run(reproduction.after, 0, false)], 'fixed'],
+  ['a change run that still fails', [script, run(reproduction.before, 1), run(reproduction.after, 1)], 'still_wrong'],
+  ['a base run that passes, so nothing was reproduced', [script, run(reproduction.before, 0), run(reproduction.after, 0)], null],
+  ['a change run that hides its exit with || true', [script, run(reproduction.before, 1), run(`${reproduction.after} || true`, 0)], null],
+  ['the change run before the base run', [script, run(reproduction.after, 0), run(reproduction.before, 1)], null],
+  ['no script shown before the runs', [run(reproduction.before, 1), run(reproduction.after, 0), script], null],
+];
+
+function settleChecks(): readonly Check[] {
+  return settleCases.map(([what, commands, expected]) => {
+    const name = `Verify's behavior comes from its stored runs: ${what}`;
+    const settled = agentSteps.settle({ step: 'verify', output: { outcome: 'done', summary: 'Ran both.', blocks: [], behavior: 'fixed' }, commands });
+    const behavior = typeof settled.output === 'object' && settled.output !== null && 'behavior' in settled.output ? settled.output.behavior : 'missing';
+    return behavior === expected ? pass(name, `behavior ${String(expected)}, evidence ${settled.evidence === null ? 'none' : 'stored'}`) : fail(name, `behavior ${String(behavior)}, not ${String(expected)}`);
+  });
+}
+
+function promptCheck(): Check {
+  const name = "Verify's core prompt names each command the engine matches exactly";
+  const found = workflow.steps.find(kind => kind.name === 'verify');
+  const prompt = found?.runBy === 'agent' ? found.prompt : '';
+  const missing = [reproduction.show, reproduction.before, reproduction.after].filter(command => !prompt.includes(`\`${command}\``));
+  return missing.length === 0 ? pass(name, 'all 3') : fail(name, `missing ${missing.join(', ')}`);
 }
 
 const settings = { Checks: 2, Ignorable: 1, QueueSettings: 2, ReviewSettings: 2, DraftSettings: 2 } as const;
@@ -373,7 +406,7 @@ export const scenarios: readonly Scenario[] = [
   {
     name: 'code-change',
     summary: "checks the Code change declaration against the task model's shape and runs each step's judge on reviews of every outcome",
-    run: () => Promise.resolve([shapeCheck(), builtCheck(), ...judgeChecks()]),
+    run: () => Promise.resolve([shapeCheck(), builtCheck(), ...judgeChecks(), ...settleChecks(), promptCheck()]),
   },
   landModel,
   {

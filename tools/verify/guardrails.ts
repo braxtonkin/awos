@@ -1,15 +1,18 @@
 import { spawnSync } from 'node:child_process';
-import { cp, lstat, mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
+import { cp, lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { fail, pass, type Check, type Scenario } from './check.ts';
 
-type Tool = 'tsc' | 'node' | 'eslint' | 'depcruise' | 'check' | 'shape' | 'sql-comments' | 'model-names' | 'step-names' | 'db-types' | 'models';
+type Tool = 'tsc' | 'node' | 'eslint' | 'depcruise' | 'check' | 'shape' | 'sql-comments' | 'model-names' | 'step-names' | 'strict-schemas' | 'db-types' | 'models';
+
+type Edit = { readonly from: string; readonly to: string };
 
 type Plant =
-  | { readonly file: string; readonly source: string; readonly linkTo?: never }
-  | { readonly file: string; readonly linkTo: string; readonly source?: never };
+  | { readonly file: string; readonly source: string; readonly linkTo?: never; readonly edit?: never }
+  | { readonly file: string; readonly linkTo: string; readonly source?: never; readonly edit?: never }
+  | { readonly file: string; readonly edit: Edit; readonly source?: never; readonly linkTo?: never };
 
 type Violation = Plant & {
   readonly name: string;
@@ -79,7 +82,14 @@ const staleTypes = `${generatedTypes} differs from a fresh generation`;
 
 const codeChange = 'code-change';
 
-const plantedStep = "name: 'planted', reads: [], prompt: 'Planted.', needsRepository: true, canEnd: true, owes: [], output: review, requires: ['text'], failures: { fail: { kind: 'fail' } }";
+const optionalVerifyField: Edit = {
+  from: "behavior: z.enum(['fixed', 'still_wrong']).nullable() })",
+  to: "behavior: z.enum(['fixed', 'still_wrong']).nullable(), extra: z.string().optional() })",
+};
+
+const optionalExtra = `${codeChange} verify $.properties.extra is not in required`;
+
+const plantedStep = "name: 'planted', reads: [], runBy: 'agent', prompt: 'Planted.', startsEnvironment: false, needsRepository: true, canEnd: true, owes: [], output: review, requires: ['text'], failures: { fail: { kind: 'fail' } }";
 
 const violations: readonly Violation[] = [
   {
@@ -415,6 +425,14 @@ const violations: readonly Violation[] = [
       { file: 'shared/helper.ts', source: "import { pool } from './db/pool.ts';\nexport const helper = pool;\n" },
       { file: 'shared/db/pool.ts', source: 'export const pool = 1;\n' },
     ],
+  },
+  {
+    name: "dependency-cruiser rejects a database driver in the bridge's Job side, which the Job entry point imports",
+    file: 'features/bridge/job.ts',
+    edit: { from: "import { spawn } from 'node:child_process';\n", to: "import { spawn } from 'node:child_process';\nimport 'pg';\n" },
+    tool: 'depcruise',
+    expect: ['job-has-no-database'],
+    rejects: 'services/job/main.ts',
   },
   {
     name: 'dependency-cruiser rejects a Kubernetes client in a Job',
@@ -940,6 +958,21 @@ const violations: readonly Violation[] = [
     expect: [`names the step of ${codeChange} "land"`],
   },
   {
+    name: "strict-schemas rejects an optional field in an agent step's output",
+    file: `features/${codeChange}/workflow.ts`,
+    edit: optionalVerifyField,
+    tool: 'strict-schemas',
+    expect: [optionalExtra],
+  },
+  {
+    name: 'npm run check runs the strict-schemas check',
+    file: `features/${codeChange}/workflow.ts`,
+    edit: optionalVerifyField,
+    tool: 'check',
+    expect: [optionalExtra],
+    rejects: optionalExtra,
+  },
+  {
     name: 'db-types rejects the committed types when a planted migration adds a table',
     file: plantedMigration,
     source: tableMigration,
@@ -1220,6 +1253,10 @@ const tools: Record<
     command: () => ['npm', 'run', '--silent', 'step-names'],
     caught: startsALine,
   },
+  'strict-schemas': {
+    command: () => ['npm', 'run', '--silent', 'strict-schemas'],
+    caught: startsALine,
+  },
   'db-types': {
     command: () => ['npm', 'run', '--silent', 'db-types'],
     caught: startsALine,
@@ -1240,23 +1277,30 @@ function run(tool: Tool, copy: string, file: string, env: Readonly<Record<string
 }
 
 async function withPlanted(copy: string, plants: readonly Plant[], judge: () => Check): Promise<Check> {
-  const created: string[] = [];
+  const undo: (() => Promise<void>)[] = [];
   for (const plant of plants) {
     const path = join(copy, plant.file);
+    if (plant.edit !== undefined) {
+      const original = await readFile(path, 'utf8');
+      if (original.split(plant.edit.from).length !== 2) throw new Error(`${plant.file} must hold "${plant.edit.from}" exactly once for the case to edit it. Update the case to match the file.`);
+      await writeFile(path, original.replace(plant.edit.from, plant.edit.to));
+      undo.push(() => writeFile(path, original));
+      continue;
+    }
     const occupied = await lstat(path).then(
       () => true,
       () => false,
     );
     if (occupied) throw new Error(`${plant.file} already exists in the repository, and planting there would delete it. Plant the case at a path the repository does not use.`);
     const firstNewFolder = await mkdir(dirname(path), { recursive: true });
-    created.push(firstNewFolder ?? path);
+    undo.push(() => rm(firstNewFolder ?? path, { recursive: true, force: true }));
     if (plant.linkTo === undefined) await writeFile(path, plant.source);
     else await symlink(plant.linkTo, path);
   }
   try {
     return judge();
   } finally {
-    for (const path of created.toReversed()) await rm(path, { recursive: true, force: true });
+    for (const restore of undo.toReversed()) await restore();
   }
 }
 
@@ -1291,7 +1335,7 @@ export const guardrails: Scenario = {
   summary: 'plants each violation a check must reject and each line it must accept, and proves both',
   run: async () => [
     ...(await withCopy(async copy => {
-      const checks: Check[] = (['tsc', 'eslint', 'depcruise', 'shape', 'sql-comments', 'model-names', 'step-names', 'db-types'] as const).map(tool => {
+      const checks: Check[] = (['tsc', 'eslint', 'depcruise', 'shape', 'sql-comments', 'model-names', 'step-names', 'strict-schemas', 'db-types'] as const).map(tool => {
         const clean = run(tool, copy, '.');
         const name = `the unplanted copy passes ${tool}`;
         const problem = clean.status === 0 ? tools[tool].unclean?.(clean) : (tools[tool].summary ?? firstLines)(clean);

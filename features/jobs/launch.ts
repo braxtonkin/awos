@@ -2,7 +2,7 @@ import { ApiException, type V1Job, type V1Pod, type V1Secret } from '@kubernetes
 import { labels, type Cluster } from '../../shared/cluster.ts';
 import type { AccessOnlyLogin } from '../../shared/codex-login.ts';
 import type { ImageReference, JobSettings } from './settings.ts';
-import { attemptBranch, type SecretKey } from './workspace.ts';
+import type { SecretKey } from './workspace.ts';
 
 export type RunAs = {
   readonly name: string;
@@ -14,7 +14,7 @@ export type RunAs = {
 export type LaunchInput = {
   readonly attempt: string;
   readonly taskKey: string;
-  readonly number: number;
+  readonly branch: string;
   readonly step: string;
   readonly image: ImageReference;
   readonly repositoryUrl: string;
@@ -52,7 +52,7 @@ export function manifests(input: LaunchInput, settings: JobSettings): Manifests 
     ENGINE_URL: input.engineUrl,
     REPO_URL: input.repositoryUrl,
     START_COMMIT: input.startCommit,
-    ATTEMPT_BRANCH: attemptBranch(input.taskKey, input.number),
+    ATTEMPT_BRANCH: input.branch,
     GITHUB_TOKEN: input.runAs.githubToken,
     CODEX_AUTH_JSON: input.runAs.codexLogin,
     GIT_AUTHOR_NAME: input.runAs.name,
@@ -82,6 +82,7 @@ export function manifests(input: LaunchInput, settings: JobSettings): Manifests 
                 image: input.image,
                 imagePullPolicy: 'IfNotPresent',
                 envFrom: [{ secretRef: { name } }],
+                env: [{ name: 'ATTEMPT_IMAGE', value: input.image }],
                 securityContext: { capabilities: { drop: ['ALL'], add: ['SETUID', 'SETGID', 'KILL'] }, seccompProfile: { type: 'RuntimeDefault' } },
               },
             ],

@@ -4,7 +4,7 @@ import type { Database } from '../../shared/db/client.ts';
 import type { DB, HumanActionKind, Verdict } from '../../shared/db/types.ts';
 import type { Answer } from '../../shared/review.ts';
 import { inTransaction, type Transacting } from '../../shared/transaction.ts';
-import type { Unasked, Workflow } from '../../shared/workflow.ts';
+import type { Instruction, Unasked, Workflow } from '../../shared/workflow.ts';
 import { allows, approved, decide, lastStepOf, retried, stopped, waitingOn, type Held, type Next } from './decide.ts';
 import type { Workflows } from './start.ts';
 
@@ -26,12 +26,6 @@ export type Report = { readonly output: unknown; readonly observed: Unasked | nu
 export type Advanced = { readonly state: Next['standing']['state']; readonly step: string } | { readonly finished: Verdict | null };
 
 export type Acted = { readonly recorded: string } | { readonly refused: 'not-now' | 'stale' | 'answer-does-not-fit' | 'id-taken' };
-
-export type Standing = { readonly task: string; readonly actsAs: string; readonly state: Next['standing']['state']; readonly waitingOn: string | null };
-
-export type Then = (tx: Transacting, standing: Standing) => Promise<void>;
-
-const nothingMore: Then = () => Promise.resolve();
 
 type Writer = Transaction<DB>;
 
@@ -102,35 +96,63 @@ const columnsOf = (next: Next, stoppedBy: string | null = null) => ({
   stopped_by: stoppedBy,
 });
 
-export async function advance(db: Database, workflows: Workflows, attempt: string, report: Report, now: Date, then: Then = nothingMore): Promise<Advanced> {
-  return inTransaction(db, async writer => {
-    const found = await writer
-      .selectFrom('attempt')
-      .select(['attempt.task_id', 'attempt.run_as_id', 'attempt.finished_at', 'attempt.verdict'])
+export type Standing = {
+  readonly task: string;
+  readonly actsAs: string;
+  readonly verdict: Verdict;
+  readonly state: Next['standing']['state'];
+  readonly waitingOn: string | null;
+};
+
+export type Then = (tx: Transacting, standing: Standing) => Promise<void>;
+
+const nothingMore: Then = () => Promise.resolve();
+
+export async function advanceWithin(tx: Transacting, workflows: Workflows, attempt: string, report: Report, now: Date, then: Then = nothingMore): Promise<Advanced> {
+  const found = await tx
+    .selectFrom('attempt')
+    .select(['attempt.task_id', 'attempt.run_as_id', 'attempt.finished_at', 'attempt.verdict'])
+    .where('attempt.id', '=', attempt)
+    .forUpdate()
+    .executeTakeFirstOrThrow();
+  if (found.finished_at !== null) return { finished: found.verdict };
+  const { held, workflow } = await hold(tx, workflows, found.task_id);
+  const kind = workflow.steps.find(candidate => candidate.name === held.step);
+  const verdict = report.observed ?? (kind === undefined ? 'fail' : kind.judge(report.output));
+  const next = decide(workflow, held, verdict, attempt);
+  await tx
+    .with('finished', query =>
+      query
+        .updateTable('attempt')
+        .set({ finished_at: now, verdict, output: JSON.stringify(report.output ?? null) })
+        .where('attempt.id', '=', attempt)
+        .where('attempt.finished_at', 'is', null)
+        .returning('attempt.task_id'),
+    )
+    .updateTable('task')
+    .from('finished')
+    .set({ ...columnsOf(next), lost: 0 })
+    .whereRef('task.id', '=', 'finished.task_id')
+    .execute();
+  await then(tx, { task: found.task_id, actsAs: found.run_as_id, verdict, state: next.standing.state, waitingOn: waitingOn(next.standing) });
+  return { state: next.standing.state, step: next.step };
+}
+
+export const advance = (db: Database, workflows: Workflows, attempt: string, report: Report, now: Date, then: Then = nothingMore): Promise<Advanced> =>
+  inTransaction(db, tx => advanceWithin(tx, workflows, attempt, report, now, then));
+
+export async function abandon(db: Database, attempt: string, reason: Instruction, now: Date): Promise<boolean> {
+  return inTransaction(db, async tx => {
+    const finished = await tx
+      .updateTable('attempt')
+      .set({ finished_at: now, verdict: 'lost' })
       .where('attempt.id', '=', attempt)
-      .forUpdate()
-      .executeTakeFirstOrThrow();
-    if (found.finished_at !== null) return { finished: found.verdict };
-    const { held, workflow } = await hold(writer, workflows, found.task_id);
-    const kind = workflow.steps.find(candidate => candidate.name === held.step);
-    const verdict = report.observed ?? (kind === undefined ? 'fail' : kind.judge(report.output));
-    const next = decide(workflow, held, verdict, attempt);
-    await writer
-      .with('finished', query =>
-        query
-          .updateTable('attempt')
-          .set({ finished_at: now, verdict, output: JSON.stringify(report.output ?? null) })
-          .where('attempt.id', '=', attempt)
-          .where('attempt.finished_at', 'is', null)
-          .returning('attempt.task_id'),
-      )
-      .updateTable('task')
-      .from('finished')
-      .set({ ...columnsOf(next), lost: 0 })
-      .whereRef('task.id', '=', 'finished.task_id')
-      .execute();
-    await then(writer, { task: found.task_id, actsAs: found.run_as_id, state: next.standing.state, waitingOn: waitingOn(next.standing) });
-    return { state: next.standing.state, step: next.step };
+      .where('attempt.finished_at', 'is', null)
+      .returning('attempt.task_id')
+      .executeTakeFirst();
+    if (finished === undefined) return false;
+    await tx.updateTable('task').set({ state: 'waiting', waiting_on: 'retry', waiting_reason: reason }).where('task.id', '=', finished.task_id).where('task.state', '=', 'ready').execute();
+    return true;
   });
 }
 
@@ -147,7 +169,7 @@ export async function handOff(db: Database, attempt: string, output: unknown, no
     if (found === undefined) return false;
     await writer.updateTable('attempt').set({ finished_at: now, verdict: 'handed_off', output: JSON.stringify(output) }).where('attempt.id', '=', attempt).execute();
     await writer.updateTable('task').set({ lost: 0 }).where('task.id', '=', found.task_id).execute();
-    await then(writer, { task: found.task_id, actsAs: found.run_as_id, state: found.state, waitingOn: found.waiting_on });
+    await then(writer, { task: found.task_id, actsAs: found.run_as_id, verdict: 'handed_off', state: found.state, waitingOn: found.waiting_on });
     return true;
   });
 }
@@ -182,9 +204,13 @@ const recordOf = (action: PersonAction): { readonly kind: HumanActionKind; reado
   }
 };
 
-export async function act(db: Database, workflows: Workflows, task: string, by: Person, action: PersonAction): Promise<Acted> {
+export type StopTurn = (writer: Writer, attempt: string, now: Date) => Promise<void>;
+
+export const noTurnToStop: StopTurn = () => Promise.resolve();
+
+export async function act(db: Database, workflows: Workflows, task: string, by: Person, action: PersonAction, stopTurn: StopTurn): Promise<Acted> {
   return db.transaction().execute(async writer => {
-    await writer.selectFrom('attempt').select('attempt.id').where('attempt.task_id', '=', task).where('attempt.finished_at', 'is', null).forUpdate().execute();
+    const live = await writer.selectFrom('attempt').select('attempt.id').where('attempt.task_id', '=', task).where('attempt.finished_at', 'is', null).forUpdate().execute();
     const { held, workflow } = await hold(writer, workflows, task);
     const earlier = await writer.selectFrom('human_action').select(['human_action.task_id', 'human_action.kind']).where('human_action.id', '=', by.id).executeTakeFirst();
     if (earlier !== undefined) return earlier.task_id === task && earlier.kind === recordOf(action).kind ? { recorded: by.id } : { refused: 'id-taken' };
@@ -198,6 +224,7 @@ export async function act(db: Database, workflows: Workflows, task: string, by: 
       .values({ id, at: by.at, person_id: by.person, kind: record.kind, task_id: task, attempt_id: record.attempt, detail: JSON.stringify(record.detail) })
       .execute();
     if (decision === 'record') return { recorded: id };
+    for (const { id: stopping } of live) await stopTurn(writer, stopping, by.at);
     await writer.updateTable('attempt').set({ finished_at: by.at, verdict: 'stopped' }).where('attempt.task_id', '=', task).where('attempt.finished_at', 'is', null).execute();
     const columns = decision === 'stop' ? columnsOf(stopped(held), id) : { ...columnsOf(decision === 'approve' ? approved(held, workflow) : retried(held, workflow)), lost: 0 };
     await writer
