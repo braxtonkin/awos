@@ -47,14 +47,38 @@ async function recordTask(assignment: Assignment, issue: Issue): Promise<void> {
       const routine = await tx.insertInto('routine').values({ creator_id: person.id }).returning('id').executeTakeFirstOrThrow();
       const action = randomUUID();
       await tx.insertInto('human_action').values({ id: action, at: new Date(), person_id: person.id, kind: 'edit_routine', routine_id: routine.id }).execute();
-      const repository = await tx.insertInto('repository').values({ github: assignment.github.repository, branch: assignment.branch }).returning('id').executeTakeFirstOrThrow();
+      const saved = randomUUID();
+      const repository = await tx.insertInto('repository').values({ github: assignment.github.repository, branch: assignment.branch, saved_by: saved }).returning('id').executeTakeFirstOrThrow();
+      await tx.insertInto('human_action').values({ id: saved, at: new Date(), person_id: person.id, kind: 'add_repository', repository_id: repository.id }).execute();
       await tx
         .insertInto('routine_version')
-        .values({ routine_id: routine.id, version: 1, name: 'end-to-end throwaway', goal: 'Take each sandbox ticket to a merged pull request', schedule: '* * * * *', repository_id: repository.id, action_id: action })
+        .values({
+          routine_id: routine.id,
+          version: 1,
+          name: 'end-to-end throwaway',
+          goal: 'Take each sandbox ticket to a merged pull request',
+          schedule: '* * * * *',
+          repository_id: repository.id,
+          action_id: action,
+          workflow: 'code-change',
+          source: JSON.stringify({ kind: 'jira-search', query: `key = ${issue.key}` }),
+          needs_repository: true,
+        })
         .execute();
       await tx
         .insertInto('task')
-        .values({ routine_id: routine.id, found_version: 1, repository_id: repository.id, key: issue.key, title: issue.fields.summary, found_at: new Date(), assignee_account_id: issue.fields.assignee?.accountId ?? null })
+        .values({
+          routine_id: routine.id,
+          found_version: 1,
+          repository_id: repository.id,
+          key: issue.key,
+          title: issue.fields.summary,
+          found_at: new Date(),
+          assignee_account_id: issue.fields.assignee?.accountId ?? null,
+          workflow: 'code-change',
+          needs_repository: true,
+          step: 'specify',
+        })
         .execute();
     });
   } finally {

@@ -3,7 +3,7 @@ import { withPostgres } from '../../tools/verify/postgres.ts';
 import { failedSeeds } from './failed-seeds.ts';
 import { fingerprint, mutants, simulate, type Plan, type Run } from './simulate.ts';
 
-const gate: Plan = { profile: 'default', seeds: Array.from({ length: 20 }, (_, index) => index + 1), steps: 300 };
+const gate: Plan = { profile: 'mixed', seeds: Array.from({ length: 20 }, (_, index) => index + 1), steps: 300 };
 
 const label = (profile: string, seed: number, mutant: string | undefined): string => `${profile} seed ${String(seed)}${mutant === undefined ? '' : ` without ${mutant}`}`;
 
@@ -21,7 +21,10 @@ const replayed: readonly Plan[] = failedSeeds
 function problems(run: Run): readonly string[] {
   const where = label(run.plan.profile, run.seed, run.plan.mutant);
   const broken = [...new Set(run.failure?.broken.map(found => found.property))];
-  if (run.plan.mutant !== undefined) return broken.includes(mutants[run.plan.mutant]) ? [] : [`${where} did not break ${mutants[run.plan.mutant]}`];
+  if (run.plan.mutant !== undefined) {
+    const expected: readonly string[] = mutants[run.plan.mutant];
+    return broken.some(property => expected.includes(property)) ? [] : [`${where} did not break ${expected.join(' or ')}`];
+  }
   return [
     ...(run.failure === undefined ? [] : [`${where} broke ${broken.join(', ')} at step ${String(run.failure.step)}`]),
     ...(run.done > 0 ? [] : [`${where} took no task to done`]),

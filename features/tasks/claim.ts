@@ -1,11 +1,13 @@
 import type { ExpressionBuilder } from 'kysely';
 import { refusal, type Database, type Refusal } from '../../shared/db/client.ts';
-import type { DB, JsonObject, Stage, TaskState } from '../../shared/db/types.ts';
+import type { DB, TaskState } from '../../shared/db/types.ts';
+import type { Instruction } from '../../shared/workflow.ts';
 import { nobodyToRunAs, runAs } from './run-as.ts';
+import type { Workflows } from './start.ts';
 
-export const caps = { rounds: 3, reruns: 3, lost: 3, stageRetries: 2 } as const;
+export const caps = { lost: 3, stageRetries: 2, inputWaits: 3 } as const;
 
-const lostTooOften = `Its last ${String(caps.lost)} attempts were lost before they finished. Read their logs on this page, fix what stopped them, then press Retry to run this stage again.`;
+export const lostTooOften: Instruction = `Its last ${String(caps.lost)} attempts were lost before they finished. Read their logs on this page, fix what stopped them, then press Retry to run this step again.`;
 
 export type Claim =
   | { readonly attempt: string }
@@ -31,7 +33,7 @@ export async function claim(db: Database, task: string, now: Date, leaseMs: numb
   try {
     const inserted = await db
       .insertInto('attempt')
-      .columns(['task_id', 'routine_id', 'routine_version', 'stage', 'run_as_id', 'started_at', 'lease_until'])
+      .columns(['task_id', 'routine_id', 'routine_version', 'step', 'epoch', 'run_as_id', 'started_at', 'lease_until'])
       .expression(
         db
           .selectFrom('task')
@@ -42,8 +44,10 @@ export async function claim(db: Database, task: string, now: Date, leaseMs: numb
               .selectFrom('routine_version')
               .select(version => version.fn.max('routine_version.version').as('newest'))
               .whereRef('routine_version.routine_id', '=', 'task.routine_id')
+              .whereRef('routine_version.workflow', '=', 'task.workflow')
               .as('routine_version'),
-            'task.stage',
+            'task.step',
+            'task.epoch',
             runAs(eb).as('run_as_id'),
             eb.cast<Date>(eb.val(now), 'timestamptz').as('started_at'),
             eb.cast<Date>(eb.val(later(now, leaseMs)), 'timestamptz').as('lease_until'),
@@ -66,7 +70,7 @@ async function parkForPerson(db: Database, task: string): Promise<boolean> {
   try {
     const { numUpdatedRows } = await db
       .updateTable('task')
-      .set({ state: 'waiting', waiting_reason: nobodyToRunAs })
+      .set({ state: 'waiting', waiting_on: 'retry', waiting_reason: nobodyToRunAs })
       .where('task.id', '=', task)
       .where('task.state', '=', 'ready')
       .where(eb => eb(runAs(eb), 'is', null))
@@ -90,41 +94,6 @@ export async function renew(db: Database, attempt: string, now: Date, leaseMs: n
   return numUpdatedRows === 1n ? 'renewed' : 'lost';
 }
 
-export async function pass(db: Database, attempt: string, output: JsonObject, now: Date): Promise<'passed' | 'lost'> {
-  const moved = await db
-    .with('finished', query =>
-      query
-        .updateTable('attempt')
-        .set({ finished_at: now, verdict: 'pass', output })
-        .where('id', '=', attempt)
-        .where('finished_at', 'is', null)
-        .returning(['task_id', 'stage']),
-    )
-    .updateTable('task')
-    .from('finished')
-    .set(eb => ({
-      stage: eb
-        .case('finished.stage')
-        .when('specify')
-        .then<Stage>('implement')
-        .when('implement')
-        .then<Stage>('verify')
-        .when('verify')
-        .then<Stage>('land')
-        .elseRef('finished.stage')
-        .end(),
-      state: eb.case().when('finished.stage', '=', 'land').then<TaskState>('done').elseRef('task.state').end(),
-      rounds: eb.case().when('finished.stage', '=', 'verify').then(0).elseRef('task.rounds').end(),
-      reruns: 0,
-      lost: 0,
-      retries: 0,
-    }))
-    .whereRef('task.id', '=', 'finished.task_id')
-    .returning('task.id')
-    .executeTakeFirst();
-  return moved === undefined ? 'lost' : 'passed';
-}
-
 export async function reap(db: Database, now: Date): Promise<readonly Reaped[]> {
   const rows = await db
     .with('reaped', query =>
@@ -144,6 +113,7 @@ export async function reap(db: Database, now: Date): Promise<readonly Reaped[]> 
           return {
             lost: eb('task.lost', '+', 1),
             state: eb.case().when(parks).then<TaskState>('waiting').elseRef('task.state').end(),
+            waiting_on: eb.case().when(parks).then(eb.val('retry' as const)).elseRef('task.waiting_on').end(),
             waiting_reason: eb.case().when(parks).then(lostTooOften).elseRef('task.waiting_reason').end(),
           };
         })
@@ -158,11 +128,14 @@ export async function reap(db: Database, now: Date): Promise<readonly Reaped[]> 
   return rows.map(row => ({ attempt: row.id, task: row.task, key: row.key, expiredForMs: now.getTime() - row.lease_until.getTime(), parked: row.state === 'waiting' }));
 }
 
-export async function claimable(db: Database): Promise<readonly string[]> {
+export async function claimable(db: Database, workflows: Workflows): Promise<readonly string[]> {
+  const known = [...workflows.keys()];
+  if (known.length === 0) return [];
   const rows = await db
     .selectFrom('task')
     .select('task.id')
     .where('task.state', '=', 'ready')
+    .where('task.workflow', 'in', known)
     .where(eb => eb.not(hasLiveAttempt(eb)))
     .orderBy('task.id')
     .execute();

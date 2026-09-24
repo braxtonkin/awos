@@ -1,13 +1,20 @@
+import { spawnSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { z } from 'zod';
+import { connect, type Database } from '../../shared/db/client.ts';
+import { shapeOf } from '../../shared/workflow.ts';
 import { fail, pass, type Check, type Scenario } from '../../tools/verify/check.ts';
 import { withPostgres, type TestPostgres } from '../../tools/verify/postgres.ts';
+import { modelShape, shapeDrift } from '../../tools/verify/model-shape.ts';
 import { checkModel, type TlcRun, type TraceState } from '../../tools/verify/tlc.ts';
+import { checkCatalog, type Catalog } from './catalog.ts';
+import { lostTooOften } from './claim.ts';
 import { provePlants, type PlantProof } from './invariants.ts';
-import { checkCatalog, mutantName, profileName, profiles, simulate, mutants as storeMutants, type Catalog, type MutantName, type ProfileName, type Run } from './simulate.ts';
+import { badEnd, mutantName, parks, profileName, profiles, simulate, mutants as storeMutants, workflows, type MutantName, type ProfileName, type Run } from './simulate.ts';
 
 type Shape = { readonly label: string; readonly holds: (run: TlcRun) => boolean };
 
@@ -21,14 +28,22 @@ type Mutant = {
   readonly shape?: Shape;
 };
 
-type TaskView = { readonly id: string; readonly stage: string; readonly state: string };
+type TaskView = { readonly id: string; readonly step: string; readonly state: string; readonly runnable: boolean };
 
 type AttemptView = { readonly worker: string; readonly task: string };
 
 const folder = fileURLToPath(new URL('.', import.meta.url));
 
+const unrunnableIn = (state: TraceState): readonly string[] =>
+  [...(/runnable = \(([^)]*)\)/.exec(state.text)?.[1] ?? '').matchAll(/(t\d+) :> FALSE/g)].map(([, id = '']) => id);
+
 const tasksIn = (state: TraceState): readonly TaskView[] =>
-  [...state.text.matchAll(/(t\d+) :>\s*\[\s*stage \|-> "(\w+)",\s*state \|-> "(\w+)"/g)].map(([, id = '', stage = '', status = '']) => ({ id, stage, state: status }));
+  [...state.text.matchAll(/(t\d+) :>\s*\[\s*step \|-> "(\w+)",\s*state \|-> "(\w+)"/g)].map(([, id = '', step = '', status = '']) => ({
+    id,
+    step,
+    state: status,
+    runnable: !unrunnableIn(state).includes(id),
+  }));
 
 const attemptsIn = (state: TraceState): readonly AttemptView[] =>
   [...state.text.matchAll(/(w\d+) :> (t\d+)\b/g)].map(([, worker = '', task = '']) => ({ worker, task }));
@@ -56,12 +71,27 @@ const lateResultAfterReap: Shape = {
 
 const loopsBetweenImplementAndVerify: Shape = {
   label: 'by a loop between implement and verify',
-  holds: run => loopedTask(run, views => views.every(view => view.state === 'ready') && ['implement', 'verify'].every(stage => views.some(view => view.stage === stage))),
+  holds: run => loopedTask(run, views => views.every(view => view.state === 'ready') && ['implement', 'verify'].every(step => views.some(view => view.step === step))),
 };
 
 const loopsFromLandToImplement: Shape = {
   label: 'by a loop from land back to implement',
-  holds: run => loopedTask(run, views => views.every(view => view.state === 'ready') && ['implement', 'verify', 'land'].every(stage => views.some(view => view.stage === stage))),
+  holds: run => loopedTask(run, views => views.every(view => view.state === 'ready') && ['implement', 'verify', 'land'].every(step => views.some(view => view.step === step))),
+};
+
+const readyTaskNoClaimTakes: Shape = {
+  label: 'by a ready task that no claim can take',
+  holds: run => {
+    const last = lastRealState(run);
+    const ending = run.stutters ? (last === undefined ? [] : [last]) : run.loop;
+    const stuck = (id: string): boolean => ending.every(state => tasksIn(state).some(view => view.id === id && view.state === 'ready' && !view.runnable));
+    return ending.length > 0 && tasksIn(ending[0] ?? { action: '', text: '' }).some(view => stuck(view.id));
+  },
+};
+
+const claimRunsTaskNobodyCanRunAs: Shape = {
+  label: 'by a claim that runs a task nobody can run as',
+  holds: run => run.trace.at(-1)?.action === 'Claim' && run.trace.some(state => state.action === 'Reassign'),
 };
 
 const approvesForever: Shape = {
@@ -71,7 +101,7 @@ const approvesForever: Shape = {
 
 const rerunsVerifyForever: Shape = {
   label: 'by verify rerunning forever',
-  holds: run => loopedTask(run, views => views.every(view => view.state === 'ready' && view.stage === 'verify')),
+  holds: run => loopedTask(run, views => views.every(view => view.state === 'ready' && view.step === 'verify')),
 };
 
 const losesAttemptsForever: Shape = {
@@ -81,7 +111,7 @@ const losesAttemptsForever: Shape = {
 
 const rerunsFailedStageForever: Shape = {
   label: 'by a failed stage rerunning forever',
-  holds: run => run.loopActions.includes('Finish') && loopedTask(run, views => new Set(views.map(view => view.stage)).size === 1 && views.every(view => view.state === 'ready' && view.stage !== 'verify')),
+  holds: run => run.loopActions.includes('Finish') && loopedTask(run, views => new Set(views.map(view => view.step)).size === 1 && views.every(view => view.state === 'ready' && view.step !== 'verify')),
 };
 
 const stoppedTaskKeepsAttempt: Shape = {
@@ -149,6 +179,8 @@ const onlyReaps = { MaxHumanActions: '0' };
 const mutants: readonly Mutant[] = [
   invariant('ClaimIsExclusive', 'a second worker can insert an attempt', 'OneLiveAttempt', twoWorkersClaimOneTask),
   invariant('ClaimNeedsReadyTask', 'a worker can claim a task that is not ready', 'LiveAttemptMeansReady'),
+  invariant('ClaimNeedsAPerson', 'a claim runs a task nobody can run as', 'AttemptRunsAsAPerson', claimRunsTaskNobodyCanRunAs),
+  unsettled('NoOneParksTask', 'a task nobody can run as stays ready', readyTaskNoClaimTakes),
   invariant('StopEndsAttempt', 'stopping a task leaves its attempt live', 'LiveAttemptMeansReady', stoppedTaskKeepsAttempt),
   invariant('RetryEndsAttempt', 'a retry leaves the old attempt live', 'LiveAttemptIsCurrent'),
   action('LateResultIsRefused', 'a late result still applies', 'LateWriteChangesNothing', { overrides: onlyReaps, shape: lateResultAfterReap }),
@@ -169,6 +201,7 @@ const mutants: readonly Mutant[] = [
   invariant('LostAttemptsAreCapped', 'lost attempts have no cap', 'LostAttemptsCapped'),
   unsettled('StageRetriesAreCapped', 'stage retries have no cap', rerunsFailedStageForever),
   invariant('StageRetriesAreCapped', 'stage retries have no cap', 'StageRetriesCapped'),
+  invariant('InputWaitsAreCapped', 'needs input has no cap', 'InputWaitsCapped'),
   invariant('PassResetsStageRetries', 'a pass keeps the stage retries', 'PassLeavesNoStageRetries'),
   action('RetryResetsStageRetries', "a person's retry keeps the stage retries", 'RetryLeavesNoStageRetries'),
   unsettled('ReaperIsFair', 'the reaper has no fairness', hungWorkerHoldsItsTask),
@@ -190,13 +223,13 @@ const readConfig = (file: string): string => readFileSync(new URL(file, import.m
 
 const typeInvariant = 'TypeOK';
 
-const bounds = ['Tasks', 'Workers', 'MaxRounds', 'MaxEnvReruns', 'MaxLost', 'MaxStageRetries', 'MaxHumanActions'] as const;
+const bounds = ['Tasks', 'Workers', 'MaxRounds', 'MaxEnvReruns', 'MaxLost', 'MaxStageRetries', 'MaxInputWaits', 'MaxHumanActions', 'MaxReassignments'] as const;
 
 type Bound = (typeof bounds)[number];
 
 const floors: Readonly<Record<string, Readonly<Record<Bound, number>>>> = {
-  'Tasks.cfg': { Tasks: 2, Workers: 2, MaxRounds: 2, MaxEnvReruns: 2, MaxLost: 2, MaxStageRetries: 1, MaxHumanActions: 2 },
-  'Tasks.nightly.cfg': { Tasks: 2, Workers: 2, MaxRounds: 3, MaxEnvReruns: 3, MaxLost: 3, MaxStageRetries: 2, MaxHumanActions: 3 },
+  'Tasks.cfg': { Tasks: 2, Workers: 2, MaxRounds: 2, MaxEnvReruns: 2, MaxLost: 2, MaxStageRetries: 1, MaxInputWaits: 1, MaxHumanActions: 2, MaxReassignments: 1 },
+  'Tasks.nightly.cfg': { Tasks: 2, Workers: 2, MaxRounds: 3, MaxEnvReruns: 3, MaxLost: 3, MaxStageRetries: 2, MaxInputWaits: 2, MaxHumanActions: 3, MaxReassignments: 1 },
 };
 
 type Section = 'CONSTANTS' | 'INVARIANTS' | 'PROPERTIES';
@@ -218,7 +251,7 @@ function parseConfig(config: string): ConfigShape {
   const problems: string[] = [];
   let section: Section | undefined;
   for (const line of config.split('\n').map(raw => raw.trimEnd())) {
-    const assignment = /^ {4}(\w+) = (\S.*)$/.exec(line);
+    const assignment = /^ {4}(\w+) (?:=|<-) (\S.*)$/.exec(line);
     const listed = /^ {4}(\w+)$/.exec(line)?.[1];
     if (line === '' || line === 'SPECIFICATION Spec') continue;
     if (/\\\*|\(\*/.test(line)) problems.push(`comment in "${line}"`);
@@ -423,18 +456,48 @@ async function profileChecks(postgres: TestPostgres, profile: ProfileName, optio
   return [
     first === undefined ? pass(name, detail) : fail(name, violation(first)),
     everySeedFinishesATask(profile, runs),
+    badVersionsPark(profile, runs),
     ...(profile === 'races' ? [everyBurstHasOneWinner(runs)] : []),
     ...(profile === 'hangs' ? [everyHungAttemptLost(runs)] : []),
+    ...(profile === 'behavior' ? [checksParkAtTheirCap(runs, parks.rounds, 'every task that reached Verify waits after 3 rounds with the instruction for that wait, unless its attempts were lost first')] : []),
+    ...(profile === 'environment' ? [checksParkAtTheirCap(runs, parks.reruns, 'every task that reached Verify parked at the rerun cap, unless its attempts were lost first, and no round was charged')] : []),
   ];
 }
 
+function badVersionsPark(profile: ProfileName, runs: readonly Run[]): Check {
+  const name = `${profile}: no task whose routine ends at ${badEnd}, where Code change cannot end, reached done, and such tasks parked with the instruction to stop them`;
+  const bad = runs.flatMap(run => run.tasks.filter(task => task.lastStep === badEnd).map(task => ({ seed: run.seed, ...task })));
+  const done = bad.filter(task => task.state === 'done');
+  const parked = bad.filter(task => task.state === 'waiting' && task.reason?.includes(`ends at ${badEnd}`) === true);
+  return done.length === 0 && parked.length > 0
+    ? pass(name, `${String(parked.length)} of ${String(bad.length)} such tasks parked with that instruction, and none reached done`)
+    : fail(name, done.length > 0 ? done.slice(0, 3).map(task => `seed ${String(task.seed)} task ${task.key} reached done`).join('; ') : `none of ${String(bad.length)} such tasks parked`);
+}
+
+function checksParkAtTheirCap(runs: readonly Run[], reason: string, name: string): Check {
+  const settled = runs.flatMap(run => run.tasks.map(task => ({ seed: run.seed, ...task })));
+  const atVerify = settled.filter(task => task.workflow === 'code-change' && task.step === 'verify');
+  const wrong = atVerify.filter(task => task.state !== 'waiting' || (task.reason !== reason && task.reason !== lostTooOften));
+  const lostThere = atVerify.filter(task => task.reason === lostTooOften).length;
+  const beyond = settled.filter(task => task.workflow === 'code-change' && task.step === 'land');
+  const rounds = reason === parks.reruns ? settled.filter(task => typeof task.counts === 'object' && task.counts !== null && 'rounds' in task.counts) : [];
+  const problems = [
+    ...wrong.slice(0, 3).map(task => `seed ${String(task.seed)} task ${task.key} is ${task.state} at verify: ${task.reason ?? 'no instruction'}`),
+    ...beyond.slice(0, 3).map(task => `seed ${String(task.seed)} task ${task.key} reached land`),
+    ...rounds.slice(0, 3).map(task => `seed ${String(task.seed)} task ${task.key} was charged a round`),
+  ];
+  return atVerify.length > 0 && problems.length === 0
+    ? pass(name, `${String(atVerify.length - lostThere)} tasks waited at verify with: ${reason} ${String(lostThere)} more parked there first because their attempts were lost.`)
+    : fail(name, problems.length === 0 ? 'no task reached verify' : problems.join('; '));
+}
+
 async function mutantCheck(postgres: TestPostgres, mutant: MutantName, options: SimulationOptions): Promise<Check> {
-  const property = storeMutants[mutant];
-  const name = `${property} fails without ${mutant}`;
+  const properties: readonly string[] = storeMutants[mutant];
+  const name = `${properties.join(' or ')} fails without ${mutant}`;
   const runs = await simulate(postgres, [{ profile: 'default', seeds: seedsOf(options), steps: options.steps, mutant }], traceWriter(options.trace));
   const first = runs.find(run => run.failure !== undefined);
   if (first === undefined) return fail(name, `no violation in ${String(runs.length)} seeds of ${String(options.steps)} steps`);
-  return first.failure?.broken.some(found => found.property === property) === true ? pass(name, violation(first)) : fail(name, `expected ${property}, got ${violation(first)}`);
+  return first.failure?.broken.some(found => properties.includes(found.property)) === true ? pass(name, violation(first)) : fail(name, `expected ${properties.join(' or ')}, got ${violation(first)}`);
 }
 
 function catalogCheck(catalog: Catalog): Check {
@@ -450,6 +513,13 @@ function catalogCheck(catalog: Catalog): Check {
     : fail(name, problems.join('; '));
 }
 
+function simulatorShapeCheck(): Check {
+  const name = "the simulator's copy of Code change has the shape that Tasks.tla checks";
+  const [copy] = workflows;
+  const drift = shapeDrift(modelShape(new URL('Tasks.tla', import.meta.url), new URL('Tasks.cfg', import.meta.url)), shapeOf(copy));
+  return drift.length === 0 ? pass(name, copy.steps.map(kind => kind.name).join(', ')) : fail(name, drift.join('; '));
+}
+
 function plantsCheck(proofs: readonly PlantProof[]): Check {
   const name = "each property's plant trips that property's check";
   const misses = proofs.flatMap(({ property, plant, atStart, reported }) => {
@@ -462,7 +532,7 @@ function plantsCheck(proofs: readonly PlantProof[]): Check {
 async function simulationChecks(postgres: TestPostgres, options: SimulationOptions): Promise<readonly Check[]> {
   const checks: Check[] = [];
   if (options.mutant === 'all') {
-    checks.push(catalogCheck(await checkCatalog(postgres)), plantsCheck(await provePlants(postgres)));
+    checks.push(simulatorShapeCheck(), catalogCheck(await checkCatalog(postgres)), plantsCheck(await provePlants(postgres, workflows)));
     for (const mutant of mutantName.options) checks.push(await mutantCheck(postgres, mutant, options));
   } else if (options.mutant !== undefined) {
     checks.push(await mutantCheck(postgres, options.mutant, options));
@@ -470,6 +540,68 @@ async function simulationChecks(postgres: TestPostgres, options: SimulationOptio
     for (const profile of options.profile === 'all' ? profileName.options : [options.profile]) checks.push(...(await profileChecks(postgres, profile, options)));
   }
   return checks;
+}
+
+const engineMain = fileURLToPath(new URL('../../services/engine/main.ts', import.meta.url));
+
+const engineStartedAt = new Date('2026-01-01T00:00:00.000Z');
+
+async function saveRoutine(db: Database, person: string, repository: string, workflow: string): Promise<string> {
+  const routine = await db.insertInto('routine').values({ creator_id: person }).returning('id').executeTakeFirstOrThrow();
+  const action = randomUUID();
+  await db.insertInto('human_action').values({ id: action, at: engineStartedAt, person_id: person, kind: 'edit_routine', routine_id: routine.id }).execute();
+  await db
+    .insertInto('routine_version')
+    .values({
+      routine_id: routine.id,
+      version: 1,
+      name: 'Engine start',
+      goal: 'Start the engine.',
+      schedule: '0 0 * * *',
+      repository_id: repository,
+      action_id: action,
+      workflow,
+      source: JSON.stringify({ kind: 'jira-search' }),
+      needs_repository: true,
+    })
+    .execute();
+  return routine.id;
+}
+
+function startEngine(url: string): { readonly status: number | null; readonly said: string } {
+  const started = spawnSync(process.execPath, [engineMain], { env: { ...process.env, DATABASE_URL: url }, encoding: 'utf8' });
+  return { status: started.status, said: `${started.stdout}${started.stderr}`.trim() };
+}
+
+async function engineStartChecks(postgres: TestPostgres): Promise<readonly Check[]> {
+  const scratch = await postgres.scratch();
+  const db = connect(scratch.url, 1);
+  try {
+    const person = await db.insertInto('person').values({ email: 'ada@example.com', name: 'Ada' }).returning('id').executeTakeFirstOrThrow();
+    const saving = randomUUID();
+    const repository = await db
+      .with('saved', query => query.insertInto('human_action').values({ id: saving, at: engineStartedAt, person_id: person.id, kind: 'add_repository', repository_id: 1 }).returning('id'))
+      .insertInto('repository')
+      .columns(['github', 'branch', 'saved_by'])
+      .expression(eb => eb.selectFrom('saved').select([eb.val('example/sandbox').as('github'), eb.val('main').as('branch'), 'saved.id']))
+      .returning('id')
+      .executeTakeFirstOrThrow();
+    await saveRoutine(db, person.id, repository.id, 'code-change');
+    const known = startEngine(scratch.url);
+    const stranger = await saveRoutine(db, person.id, repository.id, 'no-such-flow');
+    const unknown = startEngine(scratch.url);
+    const knownName = 'the engine starts when every routine uses a workflow it was given';
+    const unknownName = 'the engine refuses to start and names the routine whose workflow it was not given';
+    return [
+      known.status === 0 && known.said === 'The engine runs the workflows code-change.' ? pass(knownName, known.said) : fail(knownName, `exit ${String(known.status)}: ${known.said}`),
+      unknown.status === 1 && unknown.said.includes(`Routine ${stranger} version 1 uses the workflow no-such-flow, which this engine was not given.`)
+        ? pass(unknownName, unknown.said.replaceAll('\n', ' '))
+        : fail(unknownName, `exit ${String(unknown.status)}: ${unknown.said}`),
+    ];
+  } finally {
+    await db.destroy();
+    await scratch.drop();
+  }
 }
 
 function parseSimulationOptions(args: readonly string[]): SimulationOptions {
@@ -481,7 +613,7 @@ function parseSimulationOptions(args: readonly string[]): SimulationOptions {
 export const scenarios: readonly Scenario[] = [
   {
     name: 'tasks-model',
-    summary: 'model-checks task claims, leases, and stages in TLC, and proves each property fails without its guard',
+    summary: 'model-checks task claims, leases, and workflow steps in TLC, and proves each property fails without its guard',
     run: args => {
       if (args.includes('nightly')) return Promise.resolve([checkConfig('Tasks.nightly.cfg'), checkPlants('Tasks.nightly.cfg'), checkHolds('Tasks.nightly.cfg')]);
       const config = readConfig('Tasks.cfg');
@@ -495,5 +627,10 @@ export const scenarios: readonly Scenario[] = [
       const options = parseSimulationOptions(args);
       return withPostgres(postgres => simulationChecks(postgres, options));
     },
+  },
+  {
+    name: 'engine-start',
+    summary: "starts the engine's entry point against Postgres, and proves it refuses to start while a routine uses a workflow it was not given",
+    run: () => withPostgres(engineStartChecks),
   },
 ];
