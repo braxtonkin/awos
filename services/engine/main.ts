@@ -19,7 +19,6 @@ import { githubPerformers, outboxOwedAt } from '../../features/github/performers
 import type { JiraAccess } from '../../features/jira/client.ts';
 import { jiraPerformers } from '../../features/jira/performers.ts';
 import { jiraSearch } from '../../features/jira/source.ts';
-import { connectCluster } from '../../features/jobs/launch.ts';
 import { jobSettings } from '../../features/jobs/settings.ts';
 import { sweep } from '../../features/jobs/sweep.ts';
 import { enqueue } from '../../features/outbox/enqueue.ts';
@@ -32,6 +31,7 @@ import { claim, renew } from '../../features/tasks/claim.ts';
 import { reaper } from '../../features/tasks/reaper.ts';
 import { startProblems } from '../../features/tasks/start.ts';
 import type { OwedKinds, Performers } from '../../shared/actions.ts';
+import { connectCluster } from '../../shared/cluster.ts';
 import { connect, type Database } from '../../shared/db/client.ts';
 import { realClock, runLoop, type Loop } from '../../shared/loop.ts';
 import type { Workflow } from '../../shared/workflow.ts';

@@ -1,7 +1,8 @@
 import type { V1ObjectMeta } from '@kubernetes/client-node';
 import type { Database } from '../../shared/db/client.ts';
 import type { Loop } from '../../shared/loop.ts';
-import { labels, missing, type Cluster } from './launch.ts';
+import { labels, type Cluster } from '../../shared/cluster.ts';
+import { missing } from './launch.ts';
 
 export type SweepSettings = { readonly everyMs: number; readonly cluster: Cluster };
 
