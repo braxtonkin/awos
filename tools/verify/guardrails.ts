@@ -1,11 +1,11 @@
 import { spawnSync } from 'node:child_process';
-import { cp, mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
+import { cp, lstat, mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { fail, pass, type Check, type Scenario } from './check.ts';
 
-type Tool = 'tsc' | 'node' | 'eslint' | 'depcruise' | 'check' | 'shape' | 'models';
+type Tool = 'tsc' | 'node' | 'eslint' | 'depcruise' | 'check' | 'shape' | 'sql-comments' | 'model-names' | 'db-types' | 'models';
 
 type Plant =
   | { readonly file: string; readonly source: string; readonly linkTo?: never }
@@ -16,6 +16,7 @@ type Violation = Plant & {
   readonly tool: Tool;
   readonly expect: readonly string[];
   readonly companions?: readonly Plant[];
+  readonly rejects?: string;
 };
 
 type Allowance = Plant & {
@@ -37,6 +38,44 @@ const jsxTypes: Plant = {
   file: 'features/planted/jsx.d.ts',
   source: 'declare global {\n  namespace JSX {\n    type Element = string;\n    interface IntrinsicElements {\n      div: { readonly children?: unknown };\n    }\n  }\n}\n\nexport {};\n',
 };
+
+const plantedMigration = 'db/migrations/29990101000000_planted.sql';
+
+const plantedQuery = 'features/planted/query.ts';
+
+const commentedQuery = (imports: string, tag: string): string => `${imports}\n\nexport const query = ${tag}\`\n  select 1 -- one\n\`;\n`;
+
+const oneComment = `${plantedQuery}:4 holds the SQL comment "-- one"`;
+
+const migration = (up: string, down: string): string => `-- migrate:up\n${up}\n-- migrate:down\n${down}\n`;
+
+const markedMigration = migration('create table planted (id int);', 'drop table planted;');
+
+const explainedMigration = migration('-- explain\ncreate table planted (id int);', 'drop table planted;');
+
+const explainedComment = `${plantedMigration}:2 holds the SQL comment "-- explain"`;
+
+const hiddenComment = `${plantedMigration}:2 holds the SQL comment "-- hidden"`;
+
+const plantedConfig = 'features/planted/Planted.cfg';
+
+const plantedInvariants = 'features/planted/invariants.ts';
+
+const holdsAndStepConfig = 'SPECIFICATION Spec\n\nINVARIANTS\n    PlantedHolds\n\nPROPERTIES\n    PlantedStep\n';
+
+const holdsInvariants = 'export const properties = { PlantedHolds: 1 };\n';
+
+const emptyInvariants = 'export const properties = {};\n';
+
+const uncheckedStep = `${plantedInvariants} has no simulator check named PlantedStep, which ${plantedConfig} lists`;
+
+const missingInvariants = `${plantedInvariants} does not exist, so it has no simulator check named PlantedHolds, which ${plantedConfig} lists`;
+
+const generatedTypes = 'shared/db/types.ts';
+
+const tableMigration = migration('create table planted (id int primary key);', 'drop table planted;');
+
+const staleTypes = `${generatedTypes} differs from a fresh generation`;
 
 const violations: readonly Violation[] = [
   {
@@ -347,8 +386,8 @@ const violations: readonly Violation[] = [
     tool: 'depcruise',
     expect: ['job-has-no-database'],
     companions: [
-      { file: 'shared/helper.ts', source: "import { client } from './db/client.ts';\nexport const helper = client;\n" },
-      { file: 'shared/db/client.ts', source: 'export const client = 1;\n' },
+      { file: 'shared/helper.ts', source: "import { pool } from './db/pool.ts';\nexport const helper = pool;\n" },
+      { file: 'shared/db/pool.ts', source: 'export const pool = 1;\n' },
     ],
   },
   {
@@ -512,6 +551,20 @@ const violations: readonly Violation[] = [
     ],
   },
   {
+    name: 'dependency-cruiser rejects shared code importing tools/',
+    file: 'shared/planted.ts',
+    source: "import { pass } from '../tools/verify/check.ts';\nexport const planted = pass;\n",
+    tool: 'depcruise',
+    expect: ['product-code-imports-no-tools'],
+  },
+  {
+    name: 'dependency-cruiser rejects a service importing tools/',
+    file: 'services/engine/uses-tools.ts',
+    source: "import { pass } from '../../tools/verify/check.ts';\nexport const engine = pass;\n",
+    tool: 'depcruise',
+    expect: ['product-code-imports-no-tools'],
+  },
+  {
     name: 'the shape check rejects a symbolic link that carries one feature into another',
     file: 'lib',
     linkTo: 'features/beta',
@@ -589,6 +642,264 @@ const violations: readonly Violation[] = [
     tool: 'check',
     expect: ['docs/guide.md is a symbolic link'],
   },
+  {
+    name: 'sql-comments rejects a comment line in a migration',
+    file: plantedMigration,
+    source: explainedMigration,
+    tool: 'sql-comments',
+    expect: [explainedComment],
+  },
+  {
+    name: 'sql-comments rejects a comment after code',
+    file: plantedMigration,
+    source: migration('create table planted (id int); -- why', 'drop table planted;'),
+    tool: 'sql-comments',
+    expect: [`${plantedMigration}:2 holds the SQL comment "-- why"`],
+  },
+  {
+    name: 'sql-comments rejects a nested block comment as one comment',
+    file: plantedMigration,
+    source: migration('/* outer /* inner */ still the comment */ create table planted (id int);', 'drop table planted;'),
+    tool: 'sql-comments',
+    expect: [`${plantedMigration}:2 holds the SQL comment "/* outer /* inner */ still the comment */"`],
+  },
+  {
+    name: 'sql-comments rejects a comment inside a function body between $$ delimiters',
+    file: plantedMigration,
+    source: migration('create function planted() returns int language plpgsql as $$\nbegin\n  perform 1;\n  -- explain\n  return 1;\nend;\n$$;', 'drop function planted();'),
+    tool: 'sql-comments',
+    expect: [`${plantedMigration}:5 holds the SQL comment "-- explain"`],
+  },
+  {
+    name: 'sql-comments rejects prose after the migrate:up marker',
+    file: plantedMigration,
+    source: markedMigration.replace('-- migrate:up', '-- migrate:up because the schema needs it'),
+    tool: 'sql-comments',
+    expect: [`${plantedMigration}:1 holds the SQL comment "-- migrate:up because the schema needs it"`],
+  },
+  {
+    name: 'sql-comments rejects prose after the transaction:false option',
+    file: plantedMigration,
+    source: markedMigration.replace('-- migrate:up', '-- migrate:up transaction:false because the index builds concurrently'),
+    tool: 'sql-comments',
+    expect: [`${plantedMigration}:1 holds the SQL comment "-- migrate:up transaction:false because the index builds concurrently"`],
+  },
+  {
+    name: 'sql-comments rejects an indented migrate:up marker',
+    file: plantedMigration,
+    source: markedMigration.replace('-- migrate:up', '  -- migrate:up'),
+    tool: 'sql-comments',
+    expect: [`${plantedMigration}:1 holds the SQL comment "-- migrate:up"`],
+  },
+  {
+    name: 'sql-comments rejects a COMMENT ON statement',
+    file: plantedMigration,
+    source: migration("create table planted (id int);\ncomment on table planted is 'the planted table';", 'drop table planted;'),
+    tool: 'sql-comments',
+    expect: [`${plantedMigration}:3 holds a COMMENT ON statement`],
+  },
+  {
+    name: 'sql-comments rejects a comment in a sql template',
+    file: plantedQuery,
+    source: commentedQuery("import { sql } from 'kysely';", 'sql'),
+    tool: 'sql-comments',
+    expect: [oneComment],
+  },
+  {
+    name: 'sql-comments rejects a comment in a template tagged with an alias of sql',
+    file: plantedQuery,
+    source: commentedQuery("import { sql as q } from 'kysely';", 'q'),
+    tool: 'sql-comments',
+    expect: [oneComment],
+  },
+  {
+    name: 'sql-comments rejects a comment in a template tagged with sql from a namespace import of kysely',
+    file: plantedQuery,
+    source: commentedQuery("import * as kysely from 'kysely';", 'kysely.sql'),
+    tool: 'sql-comments',
+    expect: [oneComment],
+  },
+  {
+    name: 'sql-comments rejects a comment in a template tagged sql that another module re-exports',
+    file: plantedQuery,
+    source: commentedQuery("import { sql } from './kysely.ts';", 'sql'),
+    tool: 'sql-comments',
+    expect: [oneComment],
+    companions: [{ file: 'features/planted/kysely.ts', source: "export { sql } from 'kysely';\n" }],
+  },
+  {
+    name: 'sql-comments rejects the migrate:up marker in a sql template, which only a .sql file may hold',
+    file: plantedQuery,
+    source: "import { sql } from 'kysely';\n\nexport const query = sql`\n-- migrate:up\nselect 1\n`;\n",
+    tool: 'sql-comments',
+    expect: [`${plantedQuery}:4 holds the SQL comment "-- migrate:up"`],
+  },
+  {
+    name: 'sql-comments rejects a comment after a standard string that ends in a backslash',
+    file: plantedMigration,
+    source: migration("select 'a\\'; -- why", 'select 1;'),
+    tool: 'sql-comments',
+    expect: [`${plantedMigration}:2 holds the SQL comment "-- why"`],
+  },
+  {
+    name: 'sql-comments rejects a comment after an escape string that holds an escaped quote',
+    file: plantedMigration,
+    source: migration("select E'it\\'s'; -- why", 'select 1;'),
+    tool: 'sql-comments',
+    expect: [`${plantedMigration}:2 holds the SQL comment "-- why"`],
+  },
+  {
+    name: 'sql-comments rejects a comment after a name literal, which is not an escape string',
+    file: plantedMigration,
+    source: migration("select name'x\\'; -- why", 'select 1;'),
+    tool: 'sql-comments',
+    expect: [`${plantedMigration}:2 holds the SQL comment "-- why"`],
+  },
+  {
+    name: 'sql-comments rejects a comment after a dollar-quoted string that holds an apostrophe',
+    file: plantedMigration,
+    source: migration("select $$it's$$; -- hidden", 'select 1;'),
+    tool: 'sql-comments',
+    expect: [hiddenComment],
+  },
+  {
+    name: 'sql-comments rejects a comment after a tagged dollar-quoted string that holds an apostrophe',
+    file: plantedMigration,
+    source: migration("select $q$it's$q$; -- hidden", 'select 1;'),
+    tool: 'sql-comments',
+    expect: [hiddenComment],
+  },
+  {
+    name: 'sql-comments rejects a comment inside a tagged dollar-quoted body, which ends only at its own tag',
+    file: plantedMigration,
+    source: migration("create function planted() returns text language plpgsql as $body$\nbegin\n  return $$it's$$; -- explain\nend;\n$body$;", 'drop function planted();'),
+    tool: 'sql-comments',
+    expect: [`${plantedMigration}:4 holds the SQL comment "-- explain"`],
+  },
+  {
+    name: 'sql-comments rejects a dbmate marker inside a dollar-quoted body',
+    file: plantedMigration,
+    source: migration('create function planted() returns int language sql as $$\n-- migrate:down\nselect 1;\n$$;', 'drop function planted();'),
+    tool: 'sql-comments',
+    expect: [`${plantedMigration}:3 holds the SQL comment "-- migrate:down"`],
+  },
+  {
+    name: 'sql-comments rejects a comment after a name that holds € and $$, which Postgres reads as one name',
+    file: plantedMigration,
+    source: migration("create table planted (price€$$ int, note text default 'it''s $$'); -- why", 'drop table planted;'),
+    tool: 'sql-comments',
+    expect: [`${plantedMigration}:2 holds the SQL comment "-- why"`],
+  },
+  {
+    name: 'npm run check runs the SQL comment check',
+    file: plantedMigration,
+    source: explainedMigration,
+    tool: 'check',
+    expect: [explainedComment],
+  },
+  {
+    name: 'model-names rejects a model property with no simulator check of the same name',
+    file: plantedConfig,
+    source: holdsAndStepConfig,
+    tool: 'model-names',
+    expect: [uncheckedStep],
+    companions: [{ file: plantedInvariants, source: holdsInvariants }],
+  },
+  {
+    name: 'model-names rejects a model whose feature has code but no invariants.ts',
+    file: plantedConfig,
+    source: holdsAndStepConfig,
+    tool: 'model-names',
+    expect: [missingInvariants],
+    companions: [{ file: 'features/planted/store.ts', source: 'export const store = 1;\n' }],
+  },
+  {
+    name: 'model-names rejects a model whose feature has code only in a subfolder and no invariants.ts',
+    file: plantedConfig,
+    source: holdsAndStepConfig,
+    tool: 'model-names',
+    expect: [missingInvariants],
+    companions: [{ file: 'features/planted/lib/store.ts', source: 'export const store = 1;\n' }],
+  },
+  {
+    name: 'model-names rejects a model whose feature has only a verify.ts in a subfolder, which is code, and no invariants.ts',
+    file: plantedConfig,
+    source: holdsAndStepConfig,
+    tool: 'model-names',
+    expect: [missingInvariants],
+    companions: [{ file: 'features/planted/lib/verify.ts', source: 'export const scenarios = [];\n' }],
+  },
+  {
+    name: 'model-names rejects a model whose feature has only a .mts file and no invariants.ts',
+    file: plantedConfig,
+    source: holdsAndStepConfig,
+    tool: 'model-names',
+    expect: [missingInvariants],
+    companions: [{ file: 'features/planted/store.mts', source: 'export const store = 1;\n' }],
+  },
+  {
+    name: 'model-names rejects properties that a call builds instead of an object literal',
+    file: plantedConfig,
+    source: holdsAndStepConfig,
+    tool: 'model-names',
+    expect: [`${plantedInvariants} exports no properties object literal, so it has no simulator check named PlantedHolds, which ${plantedConfig} lists`],
+    companions: [{ file: plantedInvariants, source: "export const properties = Object.fromEntries([['PlantedHolds', 1]]);\n" }],
+  },
+  {
+    name: 'model-names rejects a properties object literal that is not exported',
+    file: plantedConfig,
+    source: holdsAndStepConfig,
+    tool: 'model-names',
+    expect: [`${plantedInvariants} exports no properties object literal, so it has no simulator check named PlantedHolds, which ${plantedConfig} lists`],
+    companions: [{ file: plantedInvariants, source: 'const properties = { PlantedHolds: 1 };\n\nexport const checks = properties;\n' }],
+  },
+  {
+    name: 'model-names rejects a name that is only a nested key',
+    file: plantedConfig,
+    source: holdsAndStepConfig,
+    tool: 'model-names',
+    expect: [`${plantedInvariants} has no simulator check named PlantedHolds, which ${plantedConfig} lists`],
+    companions: [{ file: plantedInvariants, source: 'export const properties = { Other: { PlantedHolds: 1 } };\n' }],
+  },
+  {
+    name: 'model-names rejects a name listed on the same line as INVARIANT',
+    file: plantedConfig,
+    source: 'SPECIFICATION Spec\n\nINVARIANT PlantedHolds\n',
+    tool: 'model-names',
+    expect: [`${plantedInvariants} has no simulator check named PlantedHolds, which ${plantedConfig} lists`],
+    companions: [{ file: plantedInvariants, source: emptyInvariants }],
+  },
+  {
+    name: 'model-names rejects a model whose TypeOK has no simulator check',
+    file: plantedConfig,
+    source: 'SPECIFICATION Spec\n\nINVARIANTS\n    TypeOK\n',
+    tool: 'model-names',
+    expect: [`${plantedInvariants} has no simulator check named TypeOK, which ${plantedConfig} lists`],
+    companions: [{ file: plantedInvariants, source: emptyInvariants }],
+  },
+  {
+    name: 'npm run check runs the name check',
+    file: plantedConfig,
+    source: holdsAndStepConfig,
+    tool: 'check',
+    expect: [uncheckedStep],
+    companions: [{ file: plantedInvariants, source: holdsInvariants }],
+  },
+  {
+    name: 'db-types rejects the committed types when a planted migration adds a table',
+    file: plantedMigration,
+    source: tableMigration,
+    tool: 'db-types',
+    expect: [staleTypes],
+  },
+  {
+    name: 'npm run check runs the generated-types check',
+    file: plantedMigration,
+    source: tableMigration,
+    tool: 'check',
+    expect: [staleTypes],
+    rejects: generatedTypes,
+  },
 ];
 
 const plantedModel: Violation = {
@@ -651,6 +962,62 @@ const allowances: readonly Allowance[] = [
     linkTo: '../typescript/bin/tsc',
     tool: 'shape',
   },
+  {
+    name: 'sql-comments accepts the dbmate markers alone on their lines',
+    file: plantedMigration,
+    source: markedMigration,
+    tool: 'sql-comments',
+  },
+  {
+    name: 'sql-comments accepts the dbmate markers with the transaction:false option',
+    file: plantedMigration,
+    source: '-- migrate:up transaction:false\ncreate table planted (id int);\n-- migrate:down transaction:false\ndrop table planted;\n',
+    tool: 'sql-comments',
+  },
+  {
+    name: 'sql-comments accepts comment markers inside a string that holds a doubled quote',
+    file: plantedMigration,
+    source: migration("create table planted (note text default 'it''s -- not /* a comment */');", 'drop table planted;'),
+    tool: 'sql-comments',
+  },
+  {
+    name: 'sql-comments accepts comment markers inside a quoted identifier',
+    file: plantedMigration,
+    source: migration('create table "planted -- /* table */" (id int);', 'drop table "planted -- /* table */";'),
+    tool: 'sql-comments',
+  },
+  {
+    name: 'sql-comments accepts comment markers inside an escape string that holds an escaped quote',
+    file: plantedMigration,
+    source: migration("create table planted (note text default E'it\\'s -- not /* a comment */');", 'drop table planted;'),
+    tool: 'sql-comments',
+  },
+  {
+    name: 'sql-comments accepts the dbmate markers with CRLF line endings',
+    file: plantedMigration,
+    source: markedMigration.replaceAll('\n', '\r\n'),
+    tool: 'sql-comments',
+  },
+  {
+    name: 'sql-comments accepts a join on a table named comment',
+    file: plantedMigration,
+    source: migration('create view planted as select task.id from task join comment on comment.task_id = task.id;', 'drop view planted;'),
+    tool: 'sql-comments',
+  },
+  {
+    name: 'model-names accepts string keys and a wrapped literal, and ignores a simulator check that no model lists',
+    file: plantedConfig,
+    source: holdsAndStepConfig,
+    tool: 'model-names',
+    companions: [{ file: plantedInvariants, source: "export const properties = { PlantedHolds: 1, 'PlantedStep': 2, SimulatorOnly: 3 } as const satisfies Record<string, number>;\n" }],
+  },
+  {
+    name: 'model-names accepts a model that lands before its code, in a feature that holds only verify.ts',
+    file: plantedConfig,
+    source: holdsAndStepConfig,
+    tool: 'model-names',
+    companions: [{ file: 'features/planted/verify.ts', source: 'export const scenarios = [];\n' }],
+  },
 ];
 
 const isRecord = (value: unknown): value is Readonly<Record<string, unknown>> => typeof value === 'object' && value !== null;
@@ -688,6 +1055,8 @@ const suppressedMessages = (outcome: Outcome): number =>
 const firstLines = (outcome: Outcome): string => outcome.output.trim().split('\n').slice(0, 3).join(' | ');
 
 const isRuleId = (code: string): boolean => !code.includes(' ');
+
+const startsALine = (outcome: Outcome, _file: string, code: string): boolean => outcome.output.split('\n').some(line => line.startsWith(code));
 
 const tools: Record<
   Tool,
@@ -730,7 +1099,19 @@ const tools: Record<
   },
   shape: {
     command: () => ['npm', 'run', '--silent', 'shape'],
-    caught: (outcome, _file, code) => outcome.output.split('\n').some(line => line.startsWith(code)),
+    caught: startsALine,
+  },
+  'sql-comments': {
+    command: () => ['npm', 'run', '--silent', 'sql-comments'],
+    caught: startsALine,
+  },
+  'model-names': {
+    command: () => ['npm', 'run', '--silent', 'model-names'],
+    caught: startsALine,
+  },
+  'db-types': {
+    command: () => ['npm', 'run', '--silent', 'db-types'],
+    caught: startsALine,
   },
   models: {
     command: () => ['npm', 'run', '--silent', 'verify', '--', 'models'],
@@ -751,6 +1132,11 @@ async function withPlanted(copy: string, plants: readonly Plant[], judge: () => 
   const created: string[] = [];
   for (const plant of plants) {
     const path = join(copy, plant.file);
+    const occupied = await lstat(path).then(
+      () => true,
+      () => false,
+    );
+    if (occupied) throw new Error(`${plant.file} already exists in the repository, and planting there would delete it. Plant the case at a path the repository does not use.`);
     const firstNewFolder = await mkdir(dirname(path), { recursive: true });
     created.push(firstNewFolder ?? path);
     if (plant.linkTo === undefined) await writeFile(path, plant.source);
@@ -766,7 +1152,7 @@ async function withPlanted(copy: string, plants: readonly Plant[], judge: () => 
 const reject = (copy: string, violation: Violation): Promise<Check> =>
   withPlanted(copy, [violation, ...(violation.companions ?? [])], () => {
     const outcome = run(violation.tool, copy, violation.file);
-    const code = violation.expect.find(candidate => tools[violation.tool].caught(outcome, violation.file, candidate));
+    const code = violation.expect.find(candidate => tools[violation.tool].caught(outcome, violation.rejects ?? violation.file, candidate));
     return outcome.status !== 0 && code !== undefined
       ? pass(violation.name, code)
       : fail(violation.name, `expected ${violation.expect.join(' or ')}, exit ${String(outcome.status)}`);
@@ -794,7 +1180,7 @@ export const guardrails: Scenario = {
   summary: 'plants each violation a check must reject and each line it must accept, and proves both',
   run: async () => [
     ...(await withCopy(async copy => {
-      const checks: Check[] = (['tsc', 'eslint', 'depcruise', 'shape'] as const).map(tool => {
+      const checks: Check[] = (['tsc', 'eslint', 'depcruise', 'shape', 'sql-comments', 'model-names', 'db-types'] as const).map(tool => {
         const clean = run(tool, copy, '.');
         const name = `the unplanted copy passes ${tool}`;
         const problem = clean.status === 0 ? tools[tool].unclean?.(clean) : (tools[tool].summary ?? firstLines)(clean);

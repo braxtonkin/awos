@@ -1,7 +1,13 @@
-import { readFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { parseArgs } from 'node:util';
+import { z } from 'zod';
 import { fail, pass, type Check, type Scenario } from '../../tools/verify/check.ts';
+import { withPostgres, type TestPostgres } from '../../tools/verify/postgres.ts';
 import { checkModel, type TlcRun, type TraceState } from '../../tools/verify/tlc.ts';
+import { provePlants, type PlantProof } from './invariants.ts';
+import { checkCatalog, mutantName, profileName, profiles, simulate, mutants as storeMutants, type Catalog, type MutantName, type ProfileName, type Run } from './simulate.ts';
 
 type Shape = { readonly label: string; readonly holds: (run: TlcRun) => boolean };
 
@@ -299,6 +305,156 @@ function checkMutant(config: string, mutant: Mutant): Check {
   return violated && shaped ? pass(name, traceLine(run)) : fail(name, `expected ${mutant.violation}${shaped ? '' : ' with that trace'}, got ${got}`);
 }
 
+const simulationFlags = {
+  profile: { type: 'string' },
+  seeds: { type: 'string' },
+  from: { type: 'string' },
+  seed: { type: 'string' },
+  steps: { type: 'string' },
+  mutant: { type: 'string' },
+  trace: { type: 'string' },
+} as const;
+
+const simulationOptions = z.object({
+  profile: z.union([profileName, z.literal('all')]).default('default'),
+  seeds: z.coerce.number().int().positive().default(20),
+  from: z.coerce.number().int().nonnegative().default(1),
+  seed: z.coerce.number().int().nonnegative().optional(),
+  steps: z.coerce.number().int().positive().default(300),
+  mutant: z.union([mutantName, z.literal('all')]).optional(),
+  trace: z.string().optional(),
+});
+
+type SimulationOptions = z.infer<typeof simulationOptions>;
+
+const seedsOf = (options: SimulationOptions): readonly number[] =>
+  options.seed === undefined ? Array.from({ length: options.seeds }, (_, index) => options.from + index) : [options.seed];
+
+const median = (values: readonly number[]): number => [...values].sort((a, b) => a - b)[Math.floor(values.length / 2)] ?? 0;
+
+const replay = (run: Run): string =>
+  `npm run verify -- tasks-sim ${run.plan.mutant === undefined ? `--profile ${run.plan.profile}` : `--mutant ${run.plan.mutant}`} --seed ${String(run.seed)} --steps ${String(run.plan.steps)}`;
+
+function violation(run: Run): string {
+  if (run.failure === undefined) return `seed ${String(run.seed)} broke nothing`;
+  const { step, move, broken } = run.failure;
+  const names = [...new Set(broken.map(found => found.property))].join(', ');
+  const rows = broken.slice(0, 3).map(found => `${found.property} ${JSON.stringify(found.row)}`);
+  return `${names} violated at seed ${String(run.seed)}, step ${String(step)}, after ${move}: ${rows.join('; ')}; replay: ${replay(run)}`;
+}
+
+const traceWriter = (folder: string | undefined): ((run: Run) => void) | undefined =>
+  folder === undefined
+    ? undefined
+    : run => {
+        mkdirSync(folder, { recursive: true });
+        writeFileSync(join(folder, `${run.plan.profile}-${run.plan.mutant ?? 'every-guard'}-seed-${String(run.seed)}.json`), `${JSON.stringify(run, null, 2)}\n`);
+      };
+
+function everyBurstHasOneWinner(runs: readonly Run[]): Check {
+  const bursts = runs.flatMap(run => run.bursts);
+  const name = 'races: every burst had exactly 1 winner';
+  const winners = [...new Set(bursts.map(burst => burst.winners))].sort((a, b) => a - b);
+  return bursts.length > 0 && winners.join() === '1'
+    ? pass(name, `${String(bursts.length)} bursts of ${String(profiles.races.burst)} claims, median settle ${median(bursts.map(burst => burst.ms)).toFixed(1)} ms`)
+    : fail(name, `${String(bursts.length)} bursts, winners seen: ${winners.join(', ')}`);
+}
+
+function everySeedFinishesATask(profile: ProfileName, runs: readonly Run[]): Check {
+  const name = `${profile}: every seed took at least one task to done`;
+  const done = runs.map(run => run.done);
+  const idle = runs.filter(run => run.done === 0).map(run => run.seed);
+  return idle.length === 0
+    ? pass(name, `${String(Math.min(...done))} to ${String(Math.max(...done))} tasks done per seed, median ${String(median(done))}`)
+    : fail(name, `${String(idle.length)} seeds took no task to done: ${idle.slice(0, 10).join(', ')}${idle.length > 10 ? ', ...' : ''}`);
+}
+
+function everyHungAttemptLost(runs: readonly Run[]): Check {
+  const hung = runs.reduce((sum, run) => sum + run.hung, 0);
+  const notLost = runs.flatMap(run => run.hungNotLost);
+  const name = 'hangs: every hung attempt ended lost';
+  return hung > 0 && notLost.length === 0
+    ? pass(name, `${String(hung)} hung attempts, all lost`)
+    : fail(name, `${String(hung)} hung attempts, not lost: ${notLost.slice(0, 5).join(', ')}`);
+}
+
+async function profileChecks(postgres: TestPostgres, profile: ProfileName, options: SimulationOptions): Promise<readonly Check[]> {
+  const started = performance.now();
+  const runs = await simulate(postgres, [{ profile, seeds: seedsOf(options), steps: options.steps }], traceWriter(options.trace));
+  const seconds = (performance.now() - started) / 1000;
+  const failed = runs.filter(run => run.failure !== undefined);
+  const steps = runs.reduce((sum, run) => sum + run.steps, 0);
+  const bursts = runs.flatMap(run => run.bursts);
+  const hung = runs.reduce((sum, run) => sum + run.hung, 0);
+  const tally = new Map<string, number>();
+  for (const [outcome, times] of runs.flatMap(run => Object.entries(run.tally))) tally.set(outcome, (tally.get(outcome) ?? 0) + times);
+  const detail = [
+    `${String(options.steps)} steps each plus a quiet phase, ${String(steps)} steps in ${seconds.toFixed(1)} s, ${(steps / seconds).toFixed(0)} steps per second`,
+    `Postgres ready in ${(postgres.readyInMs / 1000).toFixed(1)} s`,
+    `${String(bursts.length)} bursts, median settle ${median(bursts.map(burst => burst.ms)).toFixed(1)} ms`,
+    `${String(hung)} hung attempts`,
+    [...tally].sort(([a], [b]) => a.localeCompare(b)).map(([outcome, times]) => `${outcome} ${String(times)}`).join(', '),
+  ].join('; ');
+  const name = `${profile}: ${String(runs.length)} seeds, ${String(failed.length)} violations`;
+  const [first] = failed;
+  return [
+    first === undefined ? pass(name, detail) : fail(name, violation(first)),
+    everySeedFinishesATask(profile, runs),
+    ...(profile === 'races' ? [everyBurstHasOneWinner(runs)] : []),
+    ...(profile === 'hangs' ? [everyHungAttemptLost(runs)] : []),
+  ];
+}
+
+async function mutantCheck(postgres: TestPostgres, mutant: MutantName, options: SimulationOptions): Promise<Check> {
+  const property = storeMutants[mutant];
+  const name = `${property} fails without ${mutant}`;
+  const runs = await simulate(postgres, [{ profile: 'default', seeds: seedsOf(options), steps: options.steps, mutant }], traceWriter(options.trace));
+  const first = runs.find(run => run.failure !== undefined);
+  if (first === undefined) return fail(name, `no violation in ${String(runs.length)} seeds of ${String(options.steps)} steps`);
+  return first.failure?.broken.some(found => found.property === property) === true ? pass(name, violation(first)) : fail(name, `expected ${property}, got ${violation(first)}`);
+}
+
+function catalogCheck(catalog: Catalog): Check {
+  const name = 'every named constraint, index, and trigger has a mutant or a reason in noMutantYet';
+  const problems = [
+    ...catalog.unlisted.map(guard => `${guard} is in neither list`),
+    ...catalog.absent.map(guard => `${guard} is listed, but the schema has no such guard`),
+    ...catalog.listedTwice.map(guard => `${guard} is listed twice`),
+  ];
+  const mutated = Object.keys(storeMutants).length;
+  return problems.length === 0
+    ? pass(name, `${String(catalog.guards)} guards: ${String(mutated)} with a mutant, ${String(catalog.guards - mutated)} with a reason`)
+    : fail(name, problems.join('; '));
+}
+
+function plantsCheck(proofs: readonly PlantProof[]): Check {
+  const name = "each property's plant trips that property's check";
+  const misses = proofs.flatMap(({ property, plant, atStart, reported }) => {
+    if (atStart.length > 0) return [`${property} plant ${String(plant)}: its setup already breaks ${atStart.join(', ')}`];
+    return reported.includes(property) ? [] : [`${property} plant ${String(plant)} reported ${reported.length === 0 ? 'nothing' : reported.join(', ')}`];
+  });
+  return misses.length === 0 ? pass(name, `${String(proofs.length)} of ${String(proofs.length)} plants caught`) : fail(name, misses.join('; '));
+}
+
+async function simulationChecks(postgres: TestPostgres, options: SimulationOptions): Promise<readonly Check[]> {
+  const checks: Check[] = [];
+  if (options.mutant === 'all') {
+    checks.push(catalogCheck(await checkCatalog(postgres)), plantsCheck(await provePlants(postgres)));
+    for (const mutant of mutantName.options) checks.push(await mutantCheck(postgres, mutant, options));
+  } else if (options.mutant !== undefined) {
+    checks.push(await mutantCheck(postgres, options.mutant, options));
+  } else {
+    for (const profile of options.profile === 'all' ? profileName.options : [options.profile]) checks.push(...(await profileChecks(postgres, profile, options)));
+  }
+  return checks;
+}
+
+function parseSimulationOptions(args: readonly string[]): SimulationOptions {
+  const parsed = simulationOptions.safeParse(parseArgs({ args: [...args], options: simulationFlags, strict: true, allowPositionals: false }).values);
+  if (!parsed.success) throw new Error(z.prettifyError(parsed.error));
+  return parsed.data;
+}
+
 export const scenarios: readonly Scenario[] = [
   {
     name: 'tasks-model',
@@ -307,6 +463,14 @@ export const scenarios: readonly Scenario[] = [
       if (args.includes('nightly')) return Promise.resolve([checkConfig('Tasks.nightly.cfg'), checkPlants('Tasks.nightly.cfg'), checkHolds('Tasks.nightly.cfg')]);
       const config = readConfig('Tasks.cfg');
       return Promise.resolve([checkConfig('Tasks.cfg'), checkPlants('Tasks.cfg'), checkHolds('Tasks.cfg'), ...mutants.map(mutant => checkMutant(config, mutant))]);
+    },
+  },
+  {
+    name: 'tasks-sim',
+    summary: 'runs seeded workers that claim, renew, pass, hang, crash, and race against real Postgres, and checks every property after each step',
+    run: args => {
+      const options = parseSimulationOptions(args);
+      return withPostgres(postgres => simulationChecks(postgres, options));
     },
   },
 ];
