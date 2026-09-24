@@ -105,10 +105,12 @@ export const properties = {
     breaks: sql`select t.id, t.step, t.retries, t.lost, t.input_waits, t.counts from task t
       where least(t.retries, t.lost, t.input_waits) < 0
         or exists (select 1 from jsonb_each(t.counts) c where jsonb_typeof(c.value) <> 'number' or (c.value)::int < 0)
-        or not exists (select 1 from facts f where f.workflow = t.workflow and f.step = t.step)`,
+        or not exists (select 1 from facts f where f.workflow = t.workflow and f.step = t.step)
+        or exists (select 1 from unnest(t.approved) a where not exists (select 1 from facts f where f.workflow = t.workflow and f.step = a::text and not f.is_last))`,
     plants: [
       { setup: [], violation: sql`update task set lost = -1 where id = 1` },
       { setup: [], violation: sql`update task set counts = '{"rounds": -1}' where id = 1` },
+      { setup: [], violation: sql`update task set approved = '{land}' where id = 1` },
     ],
   },
   OneLiveAttempt: {
@@ -242,8 +244,9 @@ export const properties = {
   StoppedTaskCanResume: {
     moment: 'each-step',
     breaks: sql`select s.id, s.was_step, s.step, s.was_approved, s.approved from diff s
-      where s.id in (select task_id from acted) and s.was_state = 'stopped' and s.state = 'ready'
-        and (s.step <> s.was_step
+      where s.id in (select task_id from acted where kind = 'retry_task') and s.was_state = 'stopped'
+        and (s.state <> 'ready'
+             or s.step <> s.was_step
              or s.approved is distinct from s.was_approved
              or not (s.was_outputs <@ s.outputs)
              or exists (select 1 from charges c where c.workflow = s.workflow and c.kind = 'review'
@@ -259,6 +262,14 @@ export const properties = {
         violation: sql`with retried as (insert into human_action (id, at, person_id, kind, task_id)
                          values ('00000000-0000-4000-8000-000000000007', ${t0} + interval '3 seconds', 1, 'retry_task', 1) returning task_id)
                        update task set state = 'ready', stopped_by = null, approved = '{}' from retried where task.id = retried.task_id`,
+      },
+      {
+        setup: [
+          personActs('stop_task', '00000000-0000-4000-8000-000000000006'),
+          sql`update task set state = 'stopped', stopped_by = '00000000-0000-4000-8000-000000000006' where id = 1`,
+        ],
+        violation: sql`insert into human_action (id, at, person_id, kind, task_id)
+                       values ('00000000-0000-4000-8000-000000000007', ${t0} + interval '3 seconds', 1, 'retry_task', 1)`,
       },
     ],
   },
@@ -399,12 +410,16 @@ export const properties = {
     breaks: sql`select s.id, c.counter, s.step, s.state from diff s
       join charges c on c.workflow = s.workflow and c.kind = 'return'
       where coalesce((s.counts ->> c.counter)::int, 0) > coalesce((s.was_counts ->> c.counter)::int, 0)
-        and not (s.step = c.to_step or s.state = 'waiting')`,
+        and not (s.step = c.to_step or (s.state = 'waiting' and s.waiting_on = 'retry'))`,
     plants: [
       { setup: [], violation: sql`update task set counts = '{"rounds": 1}' where id = 1` },
       {
         setup: [finishedAttempt('specify', 'pass'), finishedAttempt('implement', 'pass'), finishedAttempt('verify', 'pass'), sql`update task set step = 'land', approved = '{specify}' where id = 1`],
         violation: sql`update task set counts = '{"landRounds": 1}' where id = 1`,
+      },
+      {
+        setup: atLand,
+        violation: sql`update task set counts = '{"landRounds": 1}', state = 'waiting', waiting_on = 'outside_approval', waiting_reason = 'Planted.' where id = 1`,
       },
     ],
   },

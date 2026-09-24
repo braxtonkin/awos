@@ -406,7 +406,7 @@ PersonActsOn(t) == humanActions'[t] = humanActions[t] + 1
 
 OutsideApproves(t) == task[t].state = "awaitingApproval" /\ task'[t] = [task[t] EXCEPT !.state = "ready"] /\ humanActions' = humanActions
 
-FoundNoOne(t) == ~runnable[t] /\ task'[t] = [task[t] EXCEPT !.state = "waiting"]
+FoundNoOne(t) == task[t].state = "ready" /\ LiveOn(t) = {} /\ ~runnable[t] /\ task'[t] = [task[t] EXCEPT !.state = "waiting"]
 
 AttemptEndsOn(t) == \E w \in Workers : attempt[w] = t /\ attempt'[w] # t
 
