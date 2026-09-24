@@ -404,10 +404,10 @@ const violations: readonly Violation[] = [
   {
     name: 'dependency-cruiser rejects the dashboard importing the engine',
     file: 'services/dashboard/page.ts',
-    source: "import { engine } from '../engine/main.ts';\nexport const page = engine;\n",
+    source: "import { engine } from '../engine/planted-engine.ts';\nexport const page = engine;\n",
     tool: 'depcruise',
     expect: ['services-stay-apart'],
-    companions: [{ file: 'services/engine/main.ts', source: 'export const engine = 1;\n' }],
+    companions: [{ file: 'services/engine/planted-engine.ts', source: 'export const engine = 1;\n' }],
   },
   {
     name: 'dependency-cruiser rejects a circular import',
@@ -450,10 +450,10 @@ const violations: readonly Violation[] = [
   {
     name: 'dependency-cruiser rejects a feature importing a service',
     file: 'features/alpha/uses-service.ts',
-    source: "import { engine } from '../../services/engine/main.ts';\nexport const uses = engine;\n",
+    source: "import { engine } from '../../services/engine/planted-engine.ts';\nexport const uses = engine;\n",
     tool: 'depcruise',
     expect: ['features-import-no-services'],
-    companions: [{ file: 'services/engine/main.ts', source: 'export const engine = 1;\n' }],
+    companions: [{ file: 'services/engine/planted-engine.ts', source: 'export const engine = 1;\n' }],
   },
   {
     name: 'dependency-cruiser rejects a relative of pg in a Job',
