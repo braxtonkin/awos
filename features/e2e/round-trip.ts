@@ -79,7 +79,7 @@ const engineSettings = (world: World, image: string): Readonly<Record<string, st
   BRIDGE_PORT: String(bridgePort),
   BRIDGE_POLL_MS: '100',
   WORKER_EVERY_MS: '1000',
-  SWEEP_EVERY_MS: '2000',
+  SWEEP_EVERY_MS: '15000',
   REAPER_EVERY_MS: '5000',
   LEASE_MS: '60000',
   ATTEMPT_START_LEASE_MS: '240000',
