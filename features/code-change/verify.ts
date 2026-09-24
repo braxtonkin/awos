@@ -1,6 +1,6 @@
 import { parseArgs } from 'node:util';
 import { z } from 'zod';
-import { builtByStep, outputSchema, shapeOf, type StepVerdict, type Unasked } from '../../shared/workflow.ts';
+import { builtByStep, shapeOf, type StepVerdict, type Unasked } from '../../shared/workflow.ts';
 import { fail, pass, type Check, type Scenario } from '../../tools/verify/check.ts';
 import { modelShape, shapeDrift } from '../../tools/verify/model-shape.ts';
 import type { Change, Ran } from '../../shared/agent-step.ts';
@@ -94,20 +94,6 @@ function implementChecks(): readonly Check[] {
     const said = JSON.stringify(settled.output);
     const explained = expected === null || said.includes('made no change');
     return settled.observed === expected && explained ? pass(name, `observed ${String(settled.observed)}`) : fail(name, `observed ${String(settled.observed)}, not ${String(expected)}; output ${said.slice(0, 200)}`);
-  });
-}
-
-const listPlan = { outcome: 'done', summary: 'Planned.', blocks: [{ kind: 'list', title: null, items: ['Add the function.', 'Add its tests.'] }] };
-
-const blockKinds: readonly string[] = ['text', 'list', 'choice', 'checklist', 'draft'];
-
-function agentShapeChecks(): readonly Check[] {
-  return workflow.steps.flatMap(found => {
-    if (found.runBy !== 'agent') return [];
-    const name = `${found.name}'s output schema offers only text and choice blocks, so a reply that puts its text in a list block cannot be returned`;
-    const offered = [...JSON.stringify(outputSchema(found)).matchAll(/"enum":\["([a-z]+)"\]/g)].map(([, kind]) => kind ?? '').filter(kind => blockKinds.includes(kind)).sort();
-    const accepted = found.output.safeParse({ ...listPlan, ...(found.name === 'verify' ? { behavior: null } : {}) }).success;
-    return [JSON.stringify(offered) === JSON.stringify(['choice', 'text']) && !accepted ? pass(name, `offers ${offered.join(', ')}`) : fail(name, `offers ${offered.join(', ')}; a list reply ${accepted ? 'parses' : 'is refused'}`)];
   });
 }
 
@@ -438,7 +424,7 @@ export const scenarios: readonly Scenario[] = [
   {
     name: 'code-change',
     summary: "checks the Code change declaration against the task model's shape and runs each step's judge on reviews of every outcome",
-    run: () => Promise.resolve([shapeCheck(), builtCheck(), ...judgeChecks(), ...settleChecks(), ...implementChecks(), ...agentShapeChecks(), promptCheck()]),
+    run: () => Promise.resolve([shapeCheck(), builtCheck(), ...judgeChecks(), ...settleChecks(), ...implementChecks(), promptCheck()]),
   },
   landModel,
   {

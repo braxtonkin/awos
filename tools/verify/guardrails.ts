@@ -90,8 +90,8 @@ const optionalVerifyField: Edit = {
 const optionalExtra = `${codeChange} verify $.properties.extra is not in required`;
 
 const textBlockStartsWithBody: Edit = {
-  from: "text: z.strictObject({ kind: z.enum(['text']), title: z.string().nullable(), body: z.string() })",
-  to: "text: z.strictObject({ body: z.string(), kind: z.enum(['text']), title: z.string().nullable() })",
+  from: "z.strictObject({ kind: z.enum(['text']), title: z.string().nullable(), body: z.string() })",
+  to: "z.strictObject({ body: z.string(), kind: z.enum(['text']), title: z.string().nullable() })",
 };
 
 const bodyFirst = `${codeChange} specify $.properties.blocks.items.anyOf[0] starts with body`;
