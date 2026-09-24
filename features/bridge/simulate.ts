@@ -123,8 +123,6 @@ export const noMutantYet: Readonly<Record<string, readonly string[]>> = {
   ],
 };
 
-export const guardsOnAttempt: readonly string[] = ['bridge_token_is_a_hash', 'bridge_pid_is_a_process', 'high_water_counts_lines', 'received_counts_commands'];
-
 export const droppedBy = (mutant: MutantName): readonly string[] => (mutants[mutant].drops ?? []).map(drop => drop.name);
 
 const mirrored = {

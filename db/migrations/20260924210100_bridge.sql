@@ -1,13 +1,14 @@
 -- migrate:up
+create domain bridge_token_hash as bytea constraint bridge_token_is_a_hash check (length(value) = 32);
+create domain bridge_process as int constraint bridge_pid_is_a_process check (value > 0);
+create domain line_count as bigint constraint high_water_counts_lines check (value >= 0);
+create domain command_count as bigint constraint received_counts_commands check (value >= 0);
+
 alter table attempt
-  add column bridge_token_hash bytea,
-  add column bridge_pid int,
-  add column high_water bigint not null default 0,
-  add column commands_received bigint not null default 0,
-  add constraint bridge_token_is_a_hash check (length(bridge_token_hash) = 32),
-  add constraint bridge_pid_is_a_process check (bridge_pid > 0),
-  add constraint high_water_counts_lines check (high_water >= 0),
-  add constraint received_counts_commands check (commands_received >= 0);
+  add column bridge_token_hash bridge_token_hash,
+  add column bridge_pid bridge_process,
+  add column high_water line_count not null default 0,
+  add column commands_received command_count not null default 0;
 
 create type attempt_event_kind as enum ('app', 'pushed', 'end');
 
@@ -66,3 +67,4 @@ alter table attempt
   drop column bridge_pid,
   drop column high_water,
   drop column commands_received;
+drop domain bridge_token_hash, bridge_process, line_count, command_count;

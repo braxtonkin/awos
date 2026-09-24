@@ -9,7 +9,7 @@ import { withPostgres, type TestPostgres } from '../../tools/verify/postgres.ts'
 import { issueToken, receive, rules, type BridgeEngine } from './engine.ts';
 import { provePlants, world, worldStartsAt } from './invariants.ts';
 import { attemptId, protocolVersion, type Caller, type EventsPost } from './protocol.ts';
-import { droppedBy, guardsOnAttempt, mutantName, mutants, noMutantYet, simulate, type MutantName, type Plan, type Run } from './simulate.ts';
+import { droppedBy, mutantName, mutants, noMutantYet, simulate, type MutantName, type Plan, type Run } from './simulate.ts';
 
 const flags = { seeds: { type: 'string' }, seed: { type: 'string' }, steps: { type: 'string' }, mutant: { type: 'string' }, trace: { type: 'string' } } as const;
 
@@ -103,17 +103,19 @@ async function catalogCheck(postgres: TestPostgres): Promise<Check> {
       select i.relname from pg_index x join pg_class i on i.oid = x.indexrelid
       where x.indrelid in ('attempt_event'::regclass, 'attempt_command'::regclass) and not exists (select 1 from pg_constraint c where c.conindid = x.indexrelid and c.contype in ('p', 'u', 'x'))
       union all
-      select tgname from pg_trigger where tgrelid in ('attempt_event'::regclass, 'attempt_command'::regclass) and not tgisinternal`.execute(db);
+      select tgname from pg_trigger where tgrelid in ('attempt_event'::regclass, 'attempt_command'::regclass) and not tgisinternal
+      union all
+      select c.conname from pg_constraint c join pg_type d on d.oid = c.contypid join pg_attribute a on a.atttypid = d.oid and a.attrelid = 'attempt'::regclass`.execute(db);
     const { rows: everywhere } = await sql<{ name: string }>`
       select conname as name from pg_constraint union select tgname from pg_trigger where not tgisinternal union select relname from pg_class where relkind = 'i'`.execute(db);
-    const guards = [...scoped.map(row => row.name), ...guardsOnAttempt];
+    const guards = scoped.map(row => row.name);
     const known = new Set(everywhere.map(row => row.name));
     const listed = [...mutantName.options.flatMap(droppedBy), ...Object.values(noMutantYet).flat()];
     const problems = [
       ...guards.filter(guard => !listed.includes(guard)).map(guard => `${guard} is in neither list`),
       ...listed.filter(listedName => !known.has(listedName)).map(listedName => `${listedName} is listed, but the schema has no such guard`),
     ];
-    const name = 'every named constraint, index, and trigger on attempt_event and attempt_command, and each bridge guard on attempt, has a mutant or a reason in noMutantYet';
+    const name = 'every named constraint, index, and trigger on attempt_event and attempt_command, and each constraint on a domain of an attempt column, has a mutant or a reason in noMutantYet';
     return problems.length === 0 ? pass(name, guards.join(', ')) : fail(name, problems.join('; '));
   } finally {
     await db.destroy();
