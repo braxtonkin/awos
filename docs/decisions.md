@@ -334,6 +334,21 @@ Rejected options:
 - **A repository found per task at intake.** Intake would have no default and nothing to enforce.
 - **The agent chooses.** The pod clones the repository before the agent starts.
 
+### AutoWorker checks each repository before it works there, and takes skills from the clone
+
+Decided 23 Sep 2026. AutoWorker should build itself and other repositories, so a repository has to be easy to add and safe to work in. A repository stays a row with its settings, and every change to them records the person's action that made it. A check reads GitHub as each person a routine runs as, and stores findings. Each finding blocks or warns, and says the exact fix. The check runs when a repository is added or edited, and on Check now. It also runs before a claim when its last result is more than 6 hours old, and after an attempt fails to clone or push. A blocking finding keeps the task waiting with that fix, and an unknown result, such as GitHub being down, blocks nothing. By default, a Job starts only when the landing branch requires a pull request under a ruleset its identity cannot bypass. A repository can turn this off.
+
+Skills come from the clone. An attempt uses the skills in its start commit, which Codex loads from `.agents/skills/` and `.codex/skills/` only. A routine names skills for each step, the engine confirms they exist before the claim, and the attempt records which versions it used. The engine never puts skill text in a prompt. A repository's `.codex/config.toml` also loads into Codex, so the bridge pins every setting it relies on when it starts a thread.
+
+A merge never changes the running engine, because images are named by digest and a person deploys. The Job runs its bridge from the image, never from the clone. The bridge and the engine check a protocol number. Codex runs as a different user from the bridge, so the agent cannot read the bridge's token. GitHub holds the bar for AutoWorker's own repository. Since 23 Sep, a ruleset on `main` requires a pull request and the `check` and `models` jobs, and blocks force pushes and deletion. An admin can bypass it only through a pull request. AutoWorker works on itself as a separate team account, starting with draft pull requests, and merges only after the owner approves.
+
+Rejected options:
+
+- **A connect job that loads skills on a schedule.** Each Job's clone already holds the skills at the exact commit, and a copy drifts.
+- **A loop that checks every repository on a timer.** It checks pairs no task uses. Checking before use is the credential checks' rule.
+- **Copying `.claude/skills` into Codex's home.** No run has shown the need (E2), and those skills name tools Codex lacks.
+- **Land waiting when a branch requires no checks.** It would be an AutoWorker merge bar, and each repository's own rules already set that.
+
 ### Invariants live in structure, and behavior is checked by simulation
 
 Decided 23 Sep 2026. The owner's experience is that unit tests for models do little, and that simulating behavior finds far more. Each invariant lives where the build or the store enforces it, in a type, a schema constraint, or a TLA+ property. A negative control proves it can fail, such as a planted violation or a mutant that drops a constraint. Behavior is checked by running the real code in a seeded simulation against real Postgres. The simulation injects faults such as crashes, hangs, and bursts of concurrent claims, and checks every invariant after each step, under the same names the TLA+ model uses. A seed replays a failing run. A unit test is kept only for a pure function whose logic a simulation cannot reach. AGENTS.md records this as C6.
