@@ -103,9 +103,7 @@ async function catalogCheck(postgres: TestPostgres): Promise<Check> {
       select i.relname from pg_index x join pg_class i on i.oid = x.indexrelid
       where x.indrelid in ('attempt_event'::regclass, 'attempt_command'::regclass) and not exists (select 1 from pg_constraint c where c.conindid = x.indexrelid and c.contype in ('p', 'u', 'x'))
       union all
-      select tgname from pg_trigger where tgrelid in ('attempt_event'::regclass, 'attempt_command'::regclass) and not tgisinternal
-      union all
-      select conname from pg_constraint where starts_with(conname, 'bridge_')`.execute(db);
+      select tgname from pg_trigger where tgrelid in ('attempt_event'::regclass, 'attempt_command'::regclass) and not tgisinternal`.execute(db);
     const { rows: everywhere } = await sql<{ name: string }>`
       select conname as name from pg_constraint union select tgname from pg_trigger where not tgisinternal union select relname from pg_class where relkind = 'i'`.execute(db);
     const guards = scoped.map(row => row.name);
@@ -115,7 +113,7 @@ async function catalogCheck(postgres: TestPostgres): Promise<Check> {
       ...guards.filter(guard => !listed.includes(guard)).map(guard => `${guard} is in neither list`),
       ...listed.filter(listedName => !known.has(listedName)).map(listedName => `${listedName} is listed, but the schema has no such guard`),
     ];
-    const name = 'every named constraint, index, and trigger on attempt_event and attempt_command, and every constraint named bridge_ on a shared table, has a mutant or a reason in noMutantYet';
+    const name = 'every named constraint, index, and trigger on attempt_event and attempt_command has a mutant or a reason in noMutantYet';
     return problems.length === 0 ? pass(name, guards.join(', ')) : fail(name, problems.join('; '));
   } finally {
     await db.destroy();

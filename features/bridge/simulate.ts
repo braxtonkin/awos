@@ -109,12 +109,6 @@ export const noMutantYet: Readonly<Record<string, readonly string[]>> = {
   'zod refuses a line numbered below 1 at the endpoint and numberCommand counts from 1, so no move reaches a zero; the checks back the parse': ['event_numbers_count_from_one', 'command_numbers_count_from_one'],
   'parseLine marks a line a fragment only when it names its item, so no move reaches a nameless fragment': ['fragment_names_its_item'],
   'fragments_by_item speeds the prune and guards no property': ['fragments_by_item'],
-  'issueToken stores a SHA-256 hash, the bridge sends its own process id, and the endpoint only counts up from 0, so no move writes a value these checks on attempt refuse; zod backs each at the endpoint': [
-    'bridge_token_is_a_hash',
-    'bridge_pid_is_a_process',
-    'bridge_high_water_counts_lines',
-    'bridge_received_counts_commands',
-  ],
   'numberCommand shapes each kind of command itself, so no move reaches a row these checks refuse': ['command_carries_its_message', 'only_a_start_has_a_schema'],
   'storeLine sets received_at in the statement that sets acted_at, so no move acts on a command before receiving it': ['acted_on_after_received'],
   'numberCommand numbers under the attempt row lock with a fresh random message id, and the simulator runs one engine at a time, so no move reaches a second command with one number or one message id': [
