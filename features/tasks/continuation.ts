@@ -27,26 +27,20 @@ export async function continuation(db: Database, task: string): Promise<Continua
   const row = await db
     .selectFrom('task')
     .leftJoin('repository', 'repository.id', 'task.repository_id')
-    .select(eb => [
-      'task.id',
-      'repository.github',
-      'repository.branch',
-      eb
-        .selectFrom('attempt')
-        .select(['attempt.id'])
-        .whereRef('attempt.task_id', '=', 'task.id')
-        .whereRef('attempt.step', '=', 'task.step')
-        .orderBy('attempt.id', 'desc')
-        .limit(1)
-        .as('previous'),
-    ])
+    .select(['task.id', 'task.step', 'repository.github', 'repository.branch'])
     .where('task.id', '=', task)
     .executeTakeFirst();
   if (row === undefined) return { from: 'nowhere' };
-  if (row.previous !== null) {
-    const previous = await db.selectFrom('attempt').select(['attempt.verdict', 'attempt.last_pushed']).where('attempt.id', '=', row.previous).executeTakeFirstOrThrow();
-    if (previous.verdict === 'lost' && previous.last_pushed !== null) return { from: 'lost', commit: previous.last_pushed };
-  }
+  const previous = await db
+    .selectFrom('attempt')
+    .select(['attempt.id', 'attempt.verdict', 'attempt.last_pushed'])
+    .where('attempt.task_id', '=', task)
+    .where('attempt.step', '=', row.step)
+    .orderBy('attempt.id', 'desc')
+    .execute();
+  const kept = previous.findIndex(attempt => attempt.verdict !== 'lost');
+  const pushed = (kept < 0 ? previous : previous.slice(0, kept)).find(attempt => attempt.last_pushed !== null);
+  if (pushed?.last_pushed != null) return { from: 'lost', commit: pushed.last_pushed };
   const head = await taskBranchHead(db, task);
   if (head !== null) return { from: 'task', commit: head };
   if (row.github === null || row.branch === null) return { from: 'nowhere' };

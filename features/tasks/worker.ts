@@ -43,7 +43,7 @@ const noRepository: Instruction = 'This task has no repository, and its step run
 
 const reason = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
-async function startOf(db: Database, settings: WorkerSettings, task: string, runAs: string): Promise<Start | { readonly refused: Instruction } | null> {
+export async function startOf(db: Database, branchHead: WorkerSettings['branchHead'], task: string, runAs: string): Promise<Start | { readonly refused: Instruction } | null> {
   const found = await continuation(db, task);
   switch (found.from) {
     case 'lost':
@@ -51,7 +51,7 @@ async function startOf(db: Database, settings: WorkerSettings, task: string, run
     case 'task':
       return { commit: found.commit, inherited: false };
     case 'repository': {
-      const read = await settings.branchHead(runAs, found.github, found.branch);
+      const read = await branchHead(runAs, found.github, found.branch);
       return 'refused' in read ? read : { commit: read.head, inherited: false };
     }
     case 'nowhere':
@@ -106,7 +106,7 @@ async function launchAttempt(db: Database, settings: WorkerSettings, attempt: st
 
 async function take(db: Database, settings: WorkerSettings, task: string, now: Date): Promise<string> {
   const runAs = await settings.runAs(db, task);
-  const start = runAs === null ? null : await startOf(db, settings, task, runAs);
+  const start = runAs === null ? null : await startOf(db, settings.branchHead, task, runAs);
   if (start !== null && 'refused' in start) return `parked task ${task} before its claim: ${(await park(db, task, start.refused)) ? start.refused : 'it was no longer ready'}`;
   const claimed = await claim(db, task, now, settings.startLeaseMs, runAs, start);
   if ('refused' in claimed) return `did not claim task ${task}: ${claimed.refused}${'parked' in claimed && claimed.parked ? ', and parked it' : ''}`;
