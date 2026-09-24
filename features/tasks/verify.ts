@@ -21,14 +21,22 @@ type Mutant = {
   readonly shape?: Shape;
 };
 
-type TaskView = { readonly id: string; readonly stage: string; readonly state: string };
+type TaskView = { readonly id: string; readonly step: string; readonly state: string; readonly runnable: boolean };
 
 type AttemptView = { readonly worker: string; readonly task: string };
 
 const folder = fileURLToPath(new URL('.', import.meta.url));
 
+const unrunnableIn = (state: TraceState): readonly string[] =>
+  [...(/runnable = \(([^)]*)\)/.exec(state.text)?.[1] ?? '').matchAll(/(t\d+) :> FALSE/g)].map(([, id = '']) => id);
+
 const tasksIn = (state: TraceState): readonly TaskView[] =>
-  [...state.text.matchAll(/(t\d+) :>\s*\[\s*stage \|-> "(\w+)",\s*state \|-> "(\w+)"/g)].map(([, id = '', stage = '', status = '']) => ({ id, stage, state: status }));
+  [...state.text.matchAll(/(t\d+) :>\s*\[\s*step \|-> "(\w+)",\s*state \|-> "(\w+)"/g)].map(([, id = '', step = '', status = '']) => ({
+    id,
+    step,
+    state: status,
+    runnable: !unrunnableIn(state).includes(id),
+  }));
 
 const attemptsIn = (state: TraceState): readonly AttemptView[] =>
   [...state.text.matchAll(/(w\d+) :> (t\d+)\b/g)].map(([, worker = '', task = '']) => ({ worker, task }));
@@ -56,12 +64,27 @@ const lateResultAfterReap: Shape = {
 
 const loopsBetweenImplementAndVerify: Shape = {
   label: 'by a loop between implement and verify',
-  holds: run => loopedTask(run, views => views.every(view => view.state === 'ready') && ['implement', 'verify'].every(stage => views.some(view => view.stage === stage))),
+  holds: run => loopedTask(run, views => views.every(view => view.state === 'ready') && ['implement', 'verify'].every(step => views.some(view => view.step === step))),
 };
 
 const loopsFromLandToImplement: Shape = {
   label: 'by a loop from land back to implement',
-  holds: run => loopedTask(run, views => views.every(view => view.state === 'ready') && ['implement', 'verify', 'land'].every(stage => views.some(view => view.stage === stage))),
+  holds: run => loopedTask(run, views => views.every(view => view.state === 'ready') && ['implement', 'verify', 'land'].every(step => views.some(view => view.step === step))),
+};
+
+const readyTaskNoClaimTakes: Shape = {
+  label: 'by a ready task that no claim can take',
+  holds: run => {
+    const last = lastRealState(run);
+    const ending = run.stutters ? (last === undefined ? [] : [last]) : run.loop;
+    const stuck = (id: string): boolean => ending.every(state => tasksIn(state).some(view => view.id === id && view.state === 'ready' && !view.runnable));
+    return ending.length > 0 && tasksIn(ending[0] ?? { action: '', text: '' }).some(view => stuck(view.id));
+  },
+};
+
+const claimRunsTaskNobodyCanRunAs: Shape = {
+  label: 'by a claim that runs a task nobody can run as',
+  holds: run => run.trace.at(-1)?.action === 'Claim' && run.trace.some(state => state.action === 'Reassign'),
 };
 
 const approvesForever: Shape = {
@@ -71,7 +94,7 @@ const approvesForever: Shape = {
 
 const rerunsVerifyForever: Shape = {
   label: 'by verify rerunning forever',
-  holds: run => loopedTask(run, views => views.every(view => view.state === 'ready' && view.stage === 'verify')),
+  holds: run => loopedTask(run, views => views.every(view => view.state === 'ready' && view.step === 'verify')),
 };
 
 const losesAttemptsForever: Shape = {
@@ -81,7 +104,7 @@ const losesAttemptsForever: Shape = {
 
 const rerunsFailedStageForever: Shape = {
   label: 'by a failed stage rerunning forever',
-  holds: run => run.loopActions.includes('Finish') && loopedTask(run, views => new Set(views.map(view => view.stage)).size === 1 && views.every(view => view.state === 'ready' && view.stage !== 'verify')),
+  holds: run => run.loopActions.includes('Finish') && loopedTask(run, views => new Set(views.map(view => view.step)).size === 1 && views.every(view => view.state === 'ready' && view.step !== 'verify')),
 };
 
 const stoppedTaskKeepsAttempt: Shape = {
@@ -149,6 +172,8 @@ const onlyReaps = { MaxHumanActions: '0' };
 const mutants: readonly Mutant[] = [
   invariant('ClaimIsExclusive', 'a second worker can insert an attempt', 'OneLiveAttempt', twoWorkersClaimOneTask),
   invariant('ClaimNeedsReadyTask', 'a worker can claim a task that is not ready', 'LiveAttemptMeansReady'),
+  invariant('ClaimNeedsAPerson', 'a claim runs a task nobody can run as', 'AttemptRunsAsAPerson', claimRunsTaskNobodyCanRunAs),
+  unsettled('NoOneParksTask', 'a task nobody can run as stays ready', readyTaskNoClaimTakes),
   invariant('StopEndsAttempt', 'stopping a task leaves its attempt live', 'LiveAttemptMeansReady', stoppedTaskKeepsAttempt),
   invariant('RetryEndsAttempt', 'a retry leaves the old attempt live', 'LiveAttemptIsCurrent'),
   action('LateResultIsRefused', 'a late result still applies', 'LateWriteChangesNothing', { overrides: onlyReaps, shape: lateResultAfterReap }),
@@ -169,6 +194,7 @@ const mutants: readonly Mutant[] = [
   invariant('LostAttemptsAreCapped', 'lost attempts have no cap', 'LostAttemptsCapped'),
   unsettled('StageRetriesAreCapped', 'stage retries have no cap', rerunsFailedStageForever),
   invariant('StageRetriesAreCapped', 'stage retries have no cap', 'StageRetriesCapped'),
+  invariant('InputWaitsAreCapped', 'needs input has no cap', 'InputWaitsCapped'),
   invariant('PassResetsStageRetries', 'a pass keeps the stage retries', 'PassLeavesNoStageRetries'),
   action('RetryResetsStageRetries', "a person's retry keeps the stage retries", 'RetryLeavesNoStageRetries'),
   unsettled('ReaperIsFair', 'the reaper has no fairness', hungWorkerHoldsItsTask),
@@ -190,13 +216,13 @@ const readConfig = (file: string): string => readFileSync(new URL(file, import.m
 
 const typeInvariant = 'TypeOK';
 
-const bounds = ['Tasks', 'Workers', 'MaxRounds', 'MaxEnvReruns', 'MaxLost', 'MaxStageRetries', 'MaxHumanActions'] as const;
+const bounds = ['Tasks', 'Workers', 'MaxRounds', 'MaxEnvReruns', 'MaxLost', 'MaxStageRetries', 'MaxInputWaits', 'MaxHumanActions', 'MaxReassignments'] as const;
 
 type Bound = (typeof bounds)[number];
 
 const floors: Readonly<Record<string, Readonly<Record<Bound, number>>>> = {
-  'Tasks.cfg': { Tasks: 2, Workers: 2, MaxRounds: 2, MaxEnvReruns: 2, MaxLost: 2, MaxStageRetries: 1, MaxHumanActions: 2 },
-  'Tasks.nightly.cfg': { Tasks: 2, Workers: 2, MaxRounds: 3, MaxEnvReruns: 3, MaxLost: 3, MaxStageRetries: 2, MaxHumanActions: 3 },
+  'Tasks.cfg': { Tasks: 2, Workers: 2, MaxRounds: 2, MaxEnvReruns: 2, MaxLost: 2, MaxStageRetries: 1, MaxInputWaits: 1, MaxHumanActions: 2, MaxReassignments: 1 },
+  'Tasks.nightly.cfg': { Tasks: 2, Workers: 2, MaxRounds: 3, MaxEnvReruns: 3, MaxLost: 3, MaxStageRetries: 2, MaxInputWaits: 2, MaxHumanActions: 3, MaxReassignments: 1 },
 };
 
 type Section = 'CONSTANTS' | 'INVARIANTS' | 'PROPERTIES';
@@ -218,7 +244,7 @@ function parseConfig(config: string): ConfigShape {
   const problems: string[] = [];
   let section: Section | undefined;
   for (const line of config.split('\n').map(raw => raw.trimEnd())) {
-    const assignment = /^ {4}(\w+) = (\S.*)$/.exec(line);
+    const assignment = /^ {4}(\w+) (?:=|<-) (\S.*)$/.exec(line);
     const listed = /^ {4}(\w+)$/.exec(line)?.[1];
     if (line === '' || line === 'SPECIFICATION Spec') continue;
     if (/\\\*|\(\*/.test(line)) problems.push(`comment in "${line}"`);
@@ -481,7 +507,7 @@ function parseSimulationOptions(args: readonly string[]): SimulationOptions {
 export const scenarios: readonly Scenario[] = [
   {
     name: 'tasks-model',
-    summary: 'model-checks task claims, leases, and stages in TLC, and proves each property fails without its guard',
+    summary: 'model-checks task claims, leases, and workflow steps in TLC, and proves each property fails without its guard',
     run: args => {
       if (args.includes('nightly')) return Promise.resolve([checkConfig('Tasks.nightly.cfg'), checkPlants('Tasks.nightly.cfg'), checkHolds('Tasks.nightly.cfg')]);
       const config = readConfig('Tasks.cfg');
