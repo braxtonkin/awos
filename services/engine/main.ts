@@ -8,9 +8,11 @@ import { checksFor } from '../../features/credentials/checks.ts';
 import { githubApi } from '../../features/credentials/github-check.ts';
 import { openJiraLogin } from '../../features/credentials/jira-login.ts';
 import { sealingKey, type SealingKey } from '../../features/credentials/seal.ts';
-import { writeBack } from '../../features/credentials/store.ts';
+import { open, writeBack } from '../../features/credentials/store.ts';
 import { providerProblems, reconcile } from '../../features/environments/lifecycle.ts';
 import { providersByName } from '../../features/environments/provider.ts';
+import { clientsFrom, type OpenToken } from '../../features/github/client.ts';
+import { githubPerformers, outboxOwedAt } from '../../features/github/performers.ts';
 import type { JiraAccess } from '../../features/jira/client.ts';
 import { jiraPerformers } from '../../features/jira/performers.ts';
 import { jiraSearch } from '../../features/jira/source.ts';
@@ -64,10 +66,21 @@ const providers = providersByName([]);
 
 type ActionKind = OwedKinds<Workflow>;
 
+const githubToken =
+  (db: Database, key: SealingKey | undefined): OpenToken =>
+  async actsAs => {
+    if (key === undefined) return { failed: 'The engine has no CREDENTIAL_KEY, so it cannot open a GitHub token.' };
+    const opened = await open(db, key, { connector: 'github', owner: actsAs });
+    return 'secret' in opened ? { token: opened.secret } : { failed: opened.reason };
+  };
+
 const loopsFor = (given: Settings, key: SealingKey | undefined, db: Database): readonly Loop[] => {
   const jira: JiraAccess = { site: given.JIRA_SITE, timeoutMs: given.JIRA_TIMEOUT_MS, logins: person => openJiraLogin(db, key, person) };
   const sources = sourcesByKind([scheduleSource, jiraSearch(jira)]);
-  const performers = { ...jiraPerformers(jira, db) } satisfies Performers<ActionKind>;
+  const performers = {
+    ...jiraPerformers(jira, db),
+    ...githubPerformers({ clientFor: clientsFrom(githubToken(db, key), given.GITHUB_API_URL), owedAt: outboxOwedAt(db) }),
+  } satisfies Performers<ActionKind>;
   const actions = registryOf(performers);
   return [
     reaper({ everyMs: given.REAPER_EVERY_MS, leaseMs: given.LEASE_MS }),
