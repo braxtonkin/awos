@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import type { ConnectorKind, JsonObject } from '../../shared/db/types.ts';
+import type { ConnectorKind, CredentialState, JsonObject } from '../../shared/db/types.ts';
 
 type Inputs = {
   readonly codex: { readonly login: string; readonly madeForAutoWorker: boolean };
@@ -7,6 +7,20 @@ type Inputs = {
 };
 
 export type Secret = { readonly [K in ConnectorKind]: { readonly connector: K } & Inputs[K] }[ConnectorKind];
+
+export type Verdict = CredentialState;
+
+export type Checked = {
+  readonly verdict: Verdict;
+  readonly cause: string;
+  readonly expiresAt: Date | null;
+  readonly rotated?: string;
+};
+
+export type Check = {
+  readonly rotates: (secret: string) => boolean;
+  readonly run: (secret: string, now: Date) => Promise<Checked>;
+};
 
 export type Read =
   | { readonly text: string; readonly expiresAt: Date | null; readonly audit: JsonObject }
@@ -34,7 +48,7 @@ const accessToken = z
   .pipe(json)
   .pipe(z.looseObject({ exp: z.int().positive().max(lastSecondBeforeYear10000, { error: 'must be a time before the year 10000' }) }));
 
-const codexLogin = json.pipe(
+export const codexLogin = json.pipe(
   z.looseObject({
     tokens: z.looseObject({ access_token: accessToken, refresh_token: z.string() }),
   }),
@@ -61,6 +75,27 @@ function readGithub({ token }: Inputs['github']): Read {
     return { refused: 'malformed', reason: `This is not a GitHub token. Copy the token from GitHub again and paste only the token. ${z.prettifyError(parsed.error)}` };
   }
   return { text: parsed.data, expiresAt: null, audit: {} };
+}
+
+const rawLogin = json.pipe(z.looseObject({ tokens: z.looseObject({}) }));
+
+const accessOnlyLogin = z.string().brand<'AccessOnlyLogin'>();
+
+export type AccessOnlyLogin = z.infer<typeof accessOnlyLogin>;
+
+export type AccessOnly = { readonly login: AccessOnlyLogin; readonly expiresAt: Date } | { readonly refused: 'malformed'; readonly reason: string };
+
+export function accessOnly(login: string): AccessOnly {
+  const parsed = codexLogin.safeParse(login);
+  const raw = rawLogin.safeParse(login);
+  if (!parsed.success || !raw.success) return { refused: 'malformed', reason: 'The stored Codex login is not a Codex auth.json, so no access-only copy was made. Replace the login.' };
+  const blanked = { ...raw.data, tokens: { ...raw.data.tokens, refresh_token: '' } };
+  return { login: accessOnlyLogin.parse(`${JSON.stringify(blanked, null, 2)}\n`), expiresAt: new Date(parsed.data.tokens.access_token.exp * 1000) };
+}
+
+export function refreshable(login: string): boolean {
+  const parsed = codexLogin.safeParse(login);
+  return parsed.success && parsed.data.tokens.refresh_token.trim() !== '';
 }
 
 export function read(secret: Secret): Read {

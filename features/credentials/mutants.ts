@@ -54,6 +54,7 @@ const guardName = z.enum([
   'credential_scope_matches_connector',
   'one_credential_per_connector_and_person',
   'personal_credential_has_person',
+  'checked_credential_has_time',
   'one_target',
   'target_fits_kind',
 ]);
@@ -163,6 +164,14 @@ const mutants: Readonly<Record<GuardName, Guard>> = {
     refuses: 'a personal credential that names no person',
     expect: { kind: 'check', name: 'personal_credential_has_person' },
     probe: insertCredential({ person_id: null }),
+  },
+  checked_credential_has_time: {
+    table: 'credential',
+    refuses: 'a credential with a check state and no check time',
+    expect: { kind: 'check', name: 'checked_credential_has_time' },
+    probe: (world, targets) =>
+      sql`insert into credential (connector, scope, person_id, ciphertext, key_version, action_id, state)
+          values ('codex', 'personal', ${world.ada}, ${randomBytes(44)}, 1, ${targets.action}, 'valid')`.execute(world.engine),
   },
   one_target: {
     table: 'human_action',

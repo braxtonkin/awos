@@ -1,8 +1,12 @@
 import type { ColumnType } from "kysely";
 
+export type CheckOutcome = "invalid" | "lost" | "unknown" | "valid";
+
 export type ConnectorKind = "codex" | "github";
 
 export type ConnectorScope = "personal" | "team";
+
+export type CredentialState = "invalid" | "unknown" | "valid";
 
 export type Generated<T> = T extends ColumnType<infer S, infer I, infer U>
   ? ColumnType<S, I | undefined, U>
@@ -57,6 +61,7 @@ export interface Connector {
 
 export interface Credential {
   action_id: string;
+  checked_at: Timestamp | null;
   ciphertext: Buffer;
   connector: ConnectorKind;
   expires_at: Timestamp | null;
@@ -64,6 +69,21 @@ export interface Credential {
   key_version: number;
   person_id: Int8 | null;
   scope: ConnectorScope;
+  state: CredentialState | null;
+}
+
+export interface CredentialCheck {
+  cause: string | null;
+  checker: string;
+  claimed_at: Timestamp;
+  credential_id: Int8;
+  finished_at: Timestamp | null;
+  id: Generated<Int8>;
+  lease_until: Timestamp;
+  opened_expires_at: Timestamp | null;
+  outcome: CheckOutcome | null;
+  refreshes: boolean;
+  replacement: string;
 }
 
 export interface HumanAction {
@@ -155,6 +175,7 @@ export interface DB {
   attempt: Attempt;
   connector: Connector;
   credential: Credential;
+  credential_check: CredentialCheck;
   human_action: HumanAction;
   person: Person;
   repository: Repository;
