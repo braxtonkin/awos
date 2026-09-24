@@ -1,7 +1,7 @@
 import { sql } from 'kysely';
 import { z } from 'zod';
 import { actionKinds, type Enqueue } from '../../shared/actions.ts';
-import type { AgentSteps, Earlier, Evidence, Ran } from '../../shared/agent-step.ts';
+import type { AgentSteps, Change, Earlier, Evidence, Ran } from '../../shared/agent-step.ts';
 import type { Database } from '../../shared/db/client.ts';
 import { finalMessage, reduce } from '../../shared/items.ts';
 import type { Transacting } from '../../shared/transaction.ts';
@@ -311,10 +311,26 @@ const owing =
     await runner.enqueue(tx, { task: standing.task, actsAs: standing.actsAs, now }, actions);
   };
 
+async function changeOf(tx: Transacting, step: Step): Promise<Change> {
+  const own = await tx.selectFrom('attempt').select('attempt.last_pushed').where('attempt.id', '=', step.attempt).executeTakeFirstOrThrow();
+  const carried =
+    step.start === null
+      ? undefined
+      : await tx
+          .selectFrom('attempt')
+          .select('attempt.last_pushed')
+          .where('attempt.task_id', '=', step.task)
+          .where('attempt.step', '=', step.kind.name)
+          .where('attempt.verdict', '=', 'lost')
+          .where('attempt.last_pushed', '=', step.start)
+          .executeTakeFirst();
+  return { pushed: own.last_pushed, carried: carried?.last_pushed ?? null };
+}
+
 export async function finishStep(runner: StepRunner, tx: Transacting, attempt: string, now: Date): Promise<void> {
   const step = await stepOf(tx, runner, attempt);
   const lines = await tx.selectFrom('attempt_event').select('body').where('attempt_id', '=', attempt).where('kind', '=', 'app').orderBy('seq').execute();
-  const settled = step.agent.settle({ step: step.kind.name, output: replyOf(finalMessage(reduce(lines))), commands: lines.flatMap(line => ranOf(line.body)) });
+  const settled = step.agent.settle({ step: step.kind.name, output: replyOf(finalMessage(reduce(lines))), commands: lines.flatMap(line => ranOf(line.body)), change: await changeOf(tx, step) });
   if (settled.evidence !== null) {
     await tx
       .insertInto('evidence')
@@ -322,5 +338,5 @@ export async function finishStep(runner: StepRunner, tx: Transacting, attempt: s
       .onConflict(conflict => conflict.column('attempt_id').doNothing())
       .execute();
   }
-  await advanceWithin(tx, runner.workflows, attempt, { output: settled.output, observed: null }, now, owing(runner, step, settled.output, settled.evidence, now));
+  await advanceWithin(tx, runner.workflows, attempt, { output: settled.output, observed: settled.observed }, now, owing(runner, step, settled.output, settled.evidence, now));
 }

@@ -187,7 +187,7 @@ const owes = (verdicted: Verdicted): readonly Owe[] => {
   }
 };
 
-const simAgent: AgentSteps = { input: ({ ticket }) => `Ticket ${ticket.key}: ${ticket.title}`, settle: ({ output }) => ({ output, evidence: null }), owes };
+const simAgent: AgentSteps = { input: ({ ticket }) => `Ticket ${ticket.key}: ${ticket.title}`, settle: ({ output }) => ({ output, evidence: null, observed: null }), owes };
 
 const byName = workflowsByName(workflows);
 const runsAs = coreRunAs(null);

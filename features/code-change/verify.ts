@@ -1,9 +1,9 @@
 import { parseArgs } from 'node:util';
 import { z } from 'zod';
-import { builtByStep, shapeOf, type StepVerdict } from '../../shared/workflow.ts';
+import { builtByStep, shapeOf, type StepVerdict, type Unasked } from '../../shared/workflow.ts';
 import { fail, pass, type Check, type Scenario } from '../../tools/verify/check.ts';
 import { modelShape, shapeDrift } from '../../tools/verify/model-shape.ts';
-import type { Ran } from '../../shared/agent-step.ts';
+import type { Change, Ran } from '../../shared/agent-step.ts';
 import { agentSteps, reproduction } from './stage-output.ts';
 import { defineModel, type Shape } from '../../tools/verify/models.ts';
 import type { TlcRun } from '../../tools/verify/tlc.ts';
@@ -73,9 +73,27 @@ const settleCases: readonly (readonly [string, readonly Ran[], 'fixed' | 'still_
 function settleChecks(): readonly Check[] {
   return settleCases.map(([what, commands, expected]) => {
     const name = `Verify's behavior comes from its stored runs: ${what}`;
-    const settled = agentSteps.settle({ step: 'verify', output: { outcome: 'done', summary: 'Ran both.', blocks: [], behavior: 'fixed' }, commands });
+    const settled = agentSteps.settle({ step: 'verify', output: { outcome: 'done', summary: 'Ran both.', blocks: [], behavior: 'fixed' }, commands, change: { pushed: 'a'.repeat(40), carried: null } });
     const behavior = typeof settled.output === 'object' && settled.output !== null && 'behavior' in settled.output ? settled.output.behavior : 'missing';
     return behavior === expected ? pass(name, `behavior ${String(expected)}, evidence ${settled.evidence === null ? 'none' : 'stored'}`) : fail(name, `behavior ${String(behavior)}, not ${String(expected)}`);
+  });
+}
+
+const doneImplement = { outcome: 'done', summary: 'Implemented the ticket.', blocks: [{ kind: 'text', title: null, body: 'Added the function.' }] };
+
+const implementCases: readonly (readonly [string, Change, Unasked | null])[] = [
+  ['an attempt that pushed a commit', { pushed: 'a'.repeat(40), carried: null }, null],
+  ["an attempt that pushed nothing but started from a lost attempt's push", { pushed: null, carried: 'b'.repeat(40) }, null],
+  ['an attempt that pushed nothing and carried nothing, so the agent made no change', { pushed: null, carried: null }, 'fail'],
+];
+
+function implementChecks(): readonly Check[] {
+  return implementCases.map(([what, change, expected]) => {
+    const name = `Implement's verdict comes from its change: ${what}`;
+    const settled = agentSteps.settle({ step: 'implement', output: doneImplement, commands: [], change });
+    const said = JSON.stringify(settled.output);
+    const explained = expected === null || said.includes('made no change');
+    return settled.observed === expected && explained ? pass(name, `observed ${String(settled.observed)}`) : fail(name, `observed ${String(settled.observed)}, not ${String(expected)}; output ${said.slice(0, 200)}`);
   });
 }
 
@@ -406,7 +424,7 @@ export const scenarios: readonly Scenario[] = [
   {
     name: 'code-change',
     summary: "checks the Code change declaration against the task model's shape and runs each step's judge on reviews of every outcome",
-    run: () => Promise.resolve([shapeCheck(), builtCheck(), ...judgeChecks(), ...settleChecks(), promptCheck()]),
+    run: () => Promise.resolve([shapeCheck(), builtCheck(), ...judgeChecks(), ...settleChecks(), ...implementChecks(), promptCheck()]),
   },
   landModel,
   {

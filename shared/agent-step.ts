@@ -1,5 +1,6 @@
 import type { Owe } from './actions.ts';
 import type { Verdict } from './db/types.ts';
+import type { Unasked } from './workflow.ts';
 
 export type Ran = { readonly command: string; readonly cwd: string | null; readonly exitCode: number | null; readonly output: string };
 
@@ -16,9 +17,11 @@ export type StepInput = {
   readonly earlier: readonly Earlier[];
 };
 
-export type Reply = { readonly step: string; readonly output: unknown; readonly commands: readonly Ran[] };
+export type Change = { readonly pushed: string | null; readonly carried: string | null };
 
-export type Settled = { readonly output: unknown; readonly evidence: Evidence | null };
+export type Reply = { readonly step: string; readonly output: unknown; readonly commands: readonly Ran[]; readonly change: Change };
+
+export type Settled = { readonly output: unknown; readonly evidence: Evidence | null; readonly observed: Unasked | null };
 
 export type Verdicted = {
   readonly step: string;

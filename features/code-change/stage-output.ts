@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { actionKinds, owe, ticket, type Owe, type OwedKinds } from '../../shared/actions.ts';
-import type { AgentSteps, Earlier, Evidence, Ran, Reply, Settled, StepInput, Verdicted } from '../../shared/agent-step.ts';
+import type { AgentSteps, Change, Earlier, Evidence, Ran, Reply, Settled, StepInput, Verdicted } from '../../shared/agent-step.ts';
 import { review } from '../../shared/review.ts';
 import { workflow } from './workflow.ts';
 
@@ -110,17 +110,26 @@ function settleVerify(output: unknown, commands: readonly Ran[]): Settled {
         };
   const behavior = runs === undefined ? null : behaviorOf(runs.before, runs.after);
   const judged = typeof output === 'object' && output !== null && !Array.isArray(output) ? { ...output, behavior } : output;
-  return { output: judged, evidence };
+  return { output: judged, evidence, observed: null };
 }
 
-function settle({ step, output, commands }: Reply): Settled {
+const madeNoChange = "Implement made no change: the attempt pushed no commit, and it did not start from a lost attempt's push. Verify can only compare a change with the base, so the attempt failed.";
+
+const noChange = { outcome: 'fail', summary: 'The agent made no change.', blocks: [{ kind: 'text', title: null, body: madeNoChange }] };
+
+function settleImplement(output: unknown, change: Change): Settled {
+  const changed = change.pushed !== null || change.carried !== null;
+  return changed ? { output, evidence: null, observed: null } : { output: noChange, evidence: null, observed: 'fail' };
+}
+
+function settle({ step, output, commands, change }: Reply): Settled {
   switch (step) {
     case 'specify': {
       const plan = textOf(output);
-      return { output, evidence: plan === null ? null : { plan } };
+      return { output, evidence: plan === null ? null : { plan }, observed: null };
     }
     case 'implement':
-      return { output, evidence: null };
+      return settleImplement(output, change);
     case 'verify':
       return settleVerify(output, commands);
     default:
