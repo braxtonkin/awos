@@ -1,5 +1,8 @@
+import { once } from 'node:events';
+import { createServer } from 'node:http';
 import { hostname } from 'node:os';
 import { z } from 'zod';
+import { bridgeListener, noStepRunner, rules } from '../../features/bridge/engine.ts';
 import { landLoops } from '../../features/code-change/land-loop.ts';
 import { coreReview, type ReadMergeState } from '../../features/code-change/land.ts';
 import { checkLoop } from '../../features/credentials/check-loop.ts';
@@ -50,6 +53,10 @@ const settings = z.object({
   LAND_EVERY_MS: milliseconds.default(10_000),
   LAND_READ_TIMEOUT_MS: milliseconds.default(20_000),
   ...jobSettings,
+  BRIDGE_PORT: z.coerce.number().int().min(0).max(65_535).default(4520),
+  BRIDGE_POLL_MS: milliseconds.default(250),
+  BRIDGE_KEEPALIVE_MS: milliseconds.default(5_000),
+  BRIDGE_BODY_LIMIT_BYTES: z.coerce.number().int().positive().default(64 * 1024 * 1024),
 });
 
 type Settings = z.infer<typeof settings>;
@@ -122,11 +129,27 @@ async function run(given: Settings, key: SealingKey | undefined): Promise<void> 
       process.exitCode = 1;
       return;
     }
+    const bridge = createServer(
+      bridgeListener(
+        db,
+        { leaseMs: given.LEASE_MS, finish: noStepRunner, now: () => new Date(), rules },
+        { pollMs: given.BRIDGE_POLL_MS, keepAliveMs: given.BRIDGE_KEEPALIVE_MS, bodyLimitBytes: given.BRIDGE_BODY_LIMIT_BYTES, stop: stop.signal },
+      ),
+    );
+    bridge.listen(given.BRIDGE_PORT);
+    await once(bridge, 'listening');
+    stop.signal.addEventListener('abort', () => {
+      bridge.close();
+      bridge.closeIdleConnections();
+    });
+    const address = bridge.address();
+    say(`The engine serves the bridge on port ${typeof address === 'object' && address !== null ? String(address.port) : String(given.BRIDGE_PORT)}.`);
     const loops = loopsFor(given, key);
     if (key === undefined) say('The engine has no CREDENTIAL_KEY, so it opens and checks no credentials.');
     if (given.JOB_IMAGE === undefined) say('The engine has no JOB_IMAGE, so it launches no Jobs and sweeps none.');
     say(`The engine runs the workflows ${[...workflows.keys()].join(', ')}, the Verify providers ${[...providers.keys()].join(', ')}, and the loops ${loops.map(loop => `${loop.name} every ${String(loop.everyMs)} ms`).join(', ')}.`);
     await Promise.all(loops.map(loop => runLoop(loop, db, realClock, stop.signal, say)));
+    bridge.closeAllConnections();
     say('The engine stopped.');
   } finally {
     await db.destroy();
