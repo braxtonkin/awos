@@ -432,6 +432,7 @@ const violations: readonly Violation[] = [
     edit: { from: "import { spawn } from 'node:child_process';\n", to: "import { spawn } from 'node:child_process';\nimport 'pg';\n" },
     tool: 'depcruise',
     expect: ['job-has-no-database'],
+    rejects: 'services/job/main.ts',
   },
   {
     name: 'dependency-cruiser rejects a Kubernetes client in a Job',
