@@ -188,7 +188,16 @@ export async function runBridge(settings: BridgeSettings, afterTurn: AfterTurn, 
   });
 
   let initialized = false;
-  createInterface({ input: app.stdout, crlfDelay: Infinity }).on('line', text => {
+  const reader = createInterface({ input: app.stdout, crlfDelay: Infinity });
+  const drained = new Promise<void>(resolve => reader.once('close', () => {
+    resolve();
+  }));
+  const quiet = async (): Promise<void> => {
+    app.kill('SIGTERM');
+    await Promise.race([drained, wait(settings.stopGraceMs)]);
+  };
+  reader.on('line', text => {
+    if (endLine !== undefined) return;
     box.push({ kind: 'app', text });
     posting.nudge();
     let json: unknown;
@@ -207,7 +216,7 @@ export async function runBridge(settings: BridgeSettings, afterTurn: AfterTurn, 
     if (completed.success) turnDone();
     if (completed.success && !finishing) {
       finishing = true;
-      void afterTurn(completed.data.params).then(
+      void quiet().then(() => afterTurn(completed.data.params)).then(
         pushed => {
           if (pushed !== undefined) box.push({ kind: 'pushed', commit: pushed.commit, branch: pushed.branch });
           endLine = box.push({ kind: 'end' });
