@@ -49,6 +49,19 @@ const resolves = (top: Schema, ref: string): boolean => {
   return target !== undefined;
 };
 
+const discriminates = (property: unknown): boolean => isSchema(property) && ('const' in property || (Array.isArray(property['enum']) && property['enum'].length === 1));
+
+const firstKeyFix = 'Declare the same one-value field, such as kind, first in every member, because Codex writes an object\'s first key before it picks the member, and a member that starts with another key is one it cannot reach.';
+
+function unionProblems(options: unknown, at: string): readonly Found[] {
+  if (!Array.isArray(options)) return [];
+  const firsts = options.map((option: unknown) => (isSchema(option) && isSchema(option['properties']) ? Object.entries(option['properties'])[0] : undefined));
+  const leading = firsts.find(first => first !== undefined && discriminates(first[1]))?.[0];
+  return firsts.flatMap((first, index) =>
+    first === undefined || (discriminates(first[1]) && first[0] === leading) ? [] : [{ at: `${at}.anyOf[${String(index)}]`, problem: `starts with ${first[0]}, which is not a one-value field that every member starts with. ${firstKeyFix}` }],
+  );
+}
+
 const members = (value: unknown, at: string): readonly (readonly [string, unknown])[] =>
   isSchema(value) ? Object.entries(value).map(([key, child]) => [`${at}.${key}`, child] as const) : [];
 
@@ -74,6 +87,7 @@ function problemsIn(schema: unknown, at: string, top: Schema): readonly Found[] 
       found.push({ at: `${at}.properties.${key}`, problem: `is not in required, and strict mode rejects the whole schema. ${nullable}` });
     }
   }
+  found.push(...unionProblems(schema['anyOf'], at));
   const items = schema['items'];
   const children = [
     ...members(schema['properties'], `${at}.properties`),

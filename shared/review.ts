@@ -4,21 +4,15 @@ export const outcomes = ['done', 'needs_input', 'blocked'] as const;
 
 const option = z.strictObject({ id: z.string(), label: z.string() });
 
-const blocks = {
-  text: z.strictObject({ kind: z.enum(['text']), title: z.string().nullable(), body: z.string() }),
-  list: z.strictObject({ kind: z.enum(['list']), title: z.string().nullable(), items: z.array(z.string()) }),
-  choice: z.strictObject({ kind: z.enum(['choice']), title: z.string().nullable(), question: z.string(), options: z.array(option), recommended: z.string().nullable() }),
-  checklist: z.strictObject({ kind: z.enum(['checklist']), title: z.string().nullable(), items: z.array(option) }),
-  draft: z.strictObject({ kind: z.enum(['draft']), title: z.string().nullable(), body: z.string() }),
-} as const;
+const block = z.union([
+  z.strictObject({ kind: z.enum(['text']), title: z.string().nullable(), body: z.string() }),
+  z.strictObject({ kind: z.enum(['list']), title: z.string().nullable(), items: z.array(z.string()) }),
+  z.strictObject({ kind: z.enum(['choice']), title: z.string().nullable(), question: z.string(), options: z.array(option), recommended: z.string().nullable() }),
+  z.strictObject({ kind: z.enum(['checklist']), title: z.string().nullable(), items: z.array(option) }),
+  z.strictObject({ kind: z.enum(['draft']), title: z.string().nullable(), body: z.string() }),
+]);
 
-type Blocks = typeof blocks;
-
-const reviewOf = <S extends z.ZodType>(block: S) => z.strictObject({ outcome: z.enum(outcomes), summary: z.string(), blocks: z.array(block) });
-
-export const review = reviewOf(z.union([blocks.text, blocks.list, blocks.choice, blocks.checklist, blocks.draft]));
-
-export const reviewWith = <A extends keyof Blocks, B extends keyof Blocks>(first: A, second: B) => reviewOf(z.union([blocks[first], blocks[second]]));
+export const review = z.strictObject({ outcome: z.enum(outcomes), summary: z.string(), blocks: z.array(block) });
 
 export type Review = z.infer<typeof review>;
 
