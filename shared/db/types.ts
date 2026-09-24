@@ -1,6 +1,10 @@
 import type { ColumnType } from "kysely";
 import type { IPostgresInterval } from "postgres-interval";
 
+export type AttemptCommandKind = "turn.start" | "turn.steer" | "turn.stop";
+
+export type AttemptEventKind = "app" | "end" | "pushed";
+
 export type CheckOutcome = "invalid" | "lost" | "unknown" | "valid";
 
 export type ConnectorKind = "codex" | "github";
@@ -48,8 +52,12 @@ export type Verdict = "behavior_fail" | "changes_requested" | "environment_fail"
 export type WaitingOn = "answer" | "approval" | "outside_approval" | "retry";
 
 export interface Attempt {
+  bridge_pid: number | null;
+  bridge_token_hash: Buffer | null;
+  commands_received: Generated<Int8>;
   epoch: number;
   finished_at: Timestamp | null;
+  high_water: Generated<Int8>;
   id: Generated<Int8>;
   lease_until: Timestamp;
   live: Generated<boolean | null>;
@@ -61,6 +69,29 @@ export interface Attempt {
   step: string;
   task_id: Int8;
   verdict: Verdict | null;
+}
+
+export interface AttemptCommand {
+  acted_at: Timestamp | null;
+  attempt_id: Int8;
+  client_message_id: string | null;
+  input: string | null;
+  kind: AttemptCommandKind;
+  output_schema: Json | null;
+  received_at: Timestamp | null;
+  sent_at: Timestamp;
+  seq: Int8;
+}
+
+export interface AttemptEvent {
+  attempt_id: Int8;
+  body: Json;
+  fragment: boolean;
+  item_id: string | null;
+  kind: AttemptEventKind;
+  method: string | null;
+  seq: Int8;
+  stored_at: Timestamp;
 }
 
 export interface Connector {
@@ -241,6 +272,8 @@ export interface VerifyEnvironment {
 
 export interface DB {
   attempt: Attempt;
+  attempt_command: AttemptCommand;
+  attempt_event: AttemptEvent;
   connector: Connector;
   credential: Credential;
   credential_check: CredentialCheck;

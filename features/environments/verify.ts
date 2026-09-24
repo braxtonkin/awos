@@ -172,7 +172,7 @@ async function liveChecks(postgres: TestPostgres): Promise<readonly Check[]> {
 
 const engineMain = fileURLToPath(new URL('../../services/engine/main.ts', import.meta.url));
 
-const quickEngine = { ENVIRONMENTS_EVERY_MS: '200', REAPER_EVERY_MS: '200', LEASE_MS: '600000' } as const;
+const quickEngine = { ENVIRONMENTS_EVERY_MS: '200', REAPER_EVERY_MS: '200', LEASE_MS: '600000', BRIDGE_PORT: '0' } as const;
 
 type RunningEngine = { readonly said: () => string; readonly waitFor: (text: string) => Promise<boolean>; readonly terminate: () => Promise<number | null> };
 
@@ -237,7 +237,7 @@ async function engineChecks(postgres: TestPostgres): Promise<readonly Check[]> {
       await wait(20);
     }
     const stoppedInMs = performance.now() - endedAt;
-    const statuses = ready.every(Boolean) ? await Promise.all(engines.map(engine => engine.terminate())) : [];
+    const statuses = await Promise.all(engines.map(engine => engine.terminate()));
     const said = engines.map((engine, index) => `engine ${String(index + 1)}: ${engine.said().replaceAll('\n', ' ')}`).join(' | ');
     const stopName = 'with two engines running, the ended attempt has one environment row, and it reads stopped within one interval';
     const exitName = 'both engines exit 0 on SIGTERM';
@@ -246,7 +246,7 @@ async function engineChecks(postgres: TestPostgres): Promise<readonly Check[]> {
       started.kind === 'started' && rows.length === 1 && rows[0]?.stopped_at !== null && stoppedInMs <= 200 * 1.1 + 200
         ? pass(stopName, `stopped ${stoppedInMs.toFixed(0)} ms after the attempt ended; ${said}`)
         : fail(stopName, `${JSON.stringify(started)}, rows ${JSON.stringify(rows)} after ${stoppedInMs.toFixed(0)} ms; ${said}`),
-      statuses.length === 2 && statuses.every(status => status === 0) ? pass(exitName, statuses.join(', ')) : fail(exitName, `exits ${statuses.join(', ')}; ${said}`),
+      ready.every(Boolean) && statuses.length === 2 && statuses.every(status => status === 0) ? pass(exitName, statuses.join(', ')) : fail(exitName, `started ${ready.join(', ')}, exits ${statuses.join(', ')}; ${said}`),
     ];
   } finally {
     await db.destroy();
