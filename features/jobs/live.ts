@@ -293,6 +293,7 @@ const codexProbe = [
   'cat /proc/1/environ > /dev/null 2>&1 && echo "pid 1 environ read" || echo "pid 1 environ refused"',
   'for p in /proc/[0-9]*; do if [ "$p" != "/proc/$$" ] && grep -q ATTEMPT_TOKEN "$p/environ" 2> /dev/null; then echo "token readable in $p"; fi; done',
   'grep -rl ATTEMPT_TOKEN /workspace /home/codex 2> /dev/null | head -3 | sed "s/^/token file /"',
+  'touch /var/lib/autoworker/attempt.git/config 2> /dev/null && echo "bridge git writable" || echo "bridge git refused"',
   'echo "probe done"',
 ].join('; ');
 
@@ -323,12 +324,13 @@ async function noKube(world: World): Promise<readonly Check[]> {
       /No such file or directory/.test(log) &&
       (status === '401' || status === '403') &&
       log.includes('pid 1 environ refused') &&
+      log.includes('bridge git refused') &&
       !log.includes('token readable') &&
       !log.includes('token file') &&
       log.includes('probe done') &&
       volumes.length === 0 &&
       containerMounts.length === 0;
-    const name = `the ${step} Job has no token mounted, the API refuses its Codex user, and that user cannot read the bridge's token`;
+    const name = `the ${step} Job has no token mounted, the API refuses its Codex user, and that user can neither read the bridge's token nor write its git directory`;
     checks.push(good ? pass(name, `${String(volumes.length)} volumes; ${log.split('\n').slice(1).join(' | ')}`) : fail(name, `${done.state}; volumes ${String(volumes.length)}: ${log.slice(-600)}`));
   }
   return checks;

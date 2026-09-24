@@ -85,7 +85,15 @@ export function manifests(input: LaunchInput, settings: JobSettings): Manifests 
             automountServiceAccountToken: false,
             enableServiceLinks: false,
             securityContext: { runAsNonRoot: true },
-            containers: [{ name: containerName, image: input.image, imagePullPolicy: 'IfNotPresent', envFrom: [{ secretRef: { name } }] }],
+            containers: [
+              {
+                name: containerName,
+                image: input.image,
+                imagePullPolicy: 'IfNotPresent',
+                envFrom: [{ secretRef: { name } }],
+                securityContext: { capabilities: { drop: ['ALL'], add: ['SETUID', 'SETGID', 'KILL'] }, seccompProfile: { type: 'RuntimeDefault' } },
+              },
+            ],
           },
         },
       },

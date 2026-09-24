@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { z } from 'zod';
 import { codexLogin } from '../../shared/codex-login.ts';
 
-export const layout = { workspace: '/workspace', codexHome: '/home/codex/.codex' } as const;
+export const layout = { workspace: '/workspace', codexHome: '/home/codex/.codex', bridgeGit: '/var/lib/autoworker/attempt.git', startBundle: '/var/lib/autoworker/start.bundle' } as const;
 
 const commit = z.string().regex(/^[0-9a-f]{40}$/, { error: 'must be a full 40-character commit id' });
 
@@ -50,14 +50,17 @@ export async function accounts(): Promise<Accounts> {
   return { bridge, codex };
 }
 
-const credentialHelper = '!f() { test "$1" = get && printf "username=x-access-token\\npassword=%s\\n" "$GITHUB_TOKEN"; }; f';
+const credentialHelper = '!f() { test "$1" = get && printf "username=x-access-token\npassword=%s\n" "$GITHUB_TOKEN"; }; f';
 
 type Run = { readonly as: Account; readonly env: Readonly<Record<string, string>>; readonly input?: string };
 
-const asCodex = (as: Account, env: JobEnvironment): Run => ({
-  as,
-  env: { PATH: process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin', HOME: as.home, GITHUB_TOKEN: env.GITHUB_TOKEN, GIT_TERMINAL_PROMPT: '0' },
-});
+const path = (): string => process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin';
+
+const quiet = { GIT_TERMINAL_PROMPT: '0', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' } as const;
+
+const asBridge = (as: Account, env: JobEnvironment): Run => ({ as, env: { PATH: path(), HOME: as.home, GITHUB_TOKEN: env.GITHUB_TOKEN, ...quiet } });
+
+const asCodex = (as: Account): Run => ({ as, env: { PATH: path(), HOME: as.home, ...quiet } });
 
 function run(command: string, args: readonly string[], { as, env, input }: Run, cwd = '/'): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -76,41 +79,61 @@ function run(command: string, args: readonly string[], { as, env, input }: Run, 
   });
 }
 
-const git = (args: readonly string[], given: Run): Promise<string> => run('git', ['-C', layout.workspace, ...args], given);
+const bridgeGit = (args: readonly string[], given: Run): Promise<string> => run('git', [`--git-dir=${layout.bridgeGit}`, `--work-tree=${layout.workspace}`, ...args], given);
+
+const codexGit = (args: readonly string[], given: Run): Promise<string> => run('git', ['-C', layout.workspace, ...args], given);
 
 export type Ready = { readonly commit: string; readonly branch: string };
 
 export async function prepareWorkspace(env: JobEnvironment): Promise<Ready> {
-  const { codex } = await accounts();
-  const given = asCodex(codex, env);
-  await run('git', ['init', '--quiet', `--initial-branch=${env.ATTEMPT_BRANCH}`, layout.workspace], given);
+  const { bridge, codex } = await accounts();
+  const owner = asBridge(bridge, env);
+  const agent = asCodex(codex);
+  const ref = `refs/heads/${env.ATTEMPT_BRANCH}`;
+  await run('git', ['init', '--quiet', '--bare', layout.bridgeGit], owner);
   for (const [key, value] of [
-    ['credential.helper', credentialHelper],
+    ['core.bare', 'false'],
+    [`credential.${new URL(env.REPO_URL).origin}.helper`, credentialHelper],
     ['user.name', env.GIT_AUTHOR_NAME],
     ['user.email', env.GIT_AUTHOR_EMAIL],
   ] as const) {
-    await git(['config', key, value], given);
+    await bridgeGit(['config', key, value], owner);
   }
-  await git(['remote', 'add', 'origin', env.REPO_URL], given);
-  await git(['fetch', '--quiet', 'origin', env.START_COMMIT], given);
-  await git(['checkout', '--quiet', '-B', env.ATTEMPT_BRANCH, env.START_COMMIT], given);
-  const head = await git(['rev-parse', 'HEAD'], given);
-  if (head !== env.START_COMMIT) throw new Error(`the workspace is at ${head}, not the start commit ${env.START_COMMIT}`);
-  await run('sh', ['-c', 'umask 077 && mkdir -p "$1" && cat > "$1/auth.json"', 'sh', layout.codexHome], { ...given, input: env.CODEX_AUTH_JSON });
-  return { commit: head, branch: env.ATTEMPT_BRANCH };
+  await bridgeGit(['fetch', '--quiet', env.REPO_URL, env.START_COMMIT], owner);
+  await bridgeGit(['update-ref', ref, env.START_COMMIT], owner);
+  await bridgeGit(['symbolic-ref', 'HEAD', ref], owner);
+  await bridgeGit(['bundle', 'create', '--quiet', layout.startBundle, ref], owner);
+  await run('git', ['clone', '--quiet', '--no-checkout', layout.startBundle, layout.workspace], agent);
+  for (const [key, value] of [
+    ['user.name', env.GIT_AUTHOR_NAME],
+    ['user.email', env.GIT_AUTHOR_EMAIL],
+  ] as const) {
+    await codexGit(['config', key, value], agent);
+  }
+  await codexGit(['checkout', '--quiet', '-B', env.ATTEMPT_BRANCH, env.START_COMMIT], agent);
+  await bridgeGit(['read-tree', 'HEAD'], owner);
+  const heads = [await bridgeGit(['rev-parse', 'HEAD'], owner), await codexGit(['rev-parse', 'HEAD'], agent)];
+  if (heads.some(head => head !== env.START_COMMIT)) throw new Error(`the workspace is at ${heads.join(' and ')}, not the start commit ${env.START_COMMIT}`);
+  await run('sh', ['-c', 'umask 077 && mkdir -p "$1" && cat > "$1/auth.json"', 'sh', layout.codexHome], { ...agent, input: env.CODEX_AUTH_JSON });
+  return { commit: env.START_COMMIT, branch: env.ATTEMPT_BRANCH };
 }
 
 export type StepPush = { readonly pushed: string } | { readonly unchanged: string };
 
 export async function pushStep(env: JobEnvironment, message: string, lastPushed: string | undefined): Promise<StepPush> {
-  const { codex } = await accounts();
-  const given = asCodex(codex, env);
-  await git(['add', '--all'], given);
-  const staged = await git(['diff', '--cached', '--name-only'], given);
-  if (staged !== '') await git(['commit', '--quiet', '--message', message], given);
-  const head = await git(['rev-parse', 'HEAD'], given);
+  const { bridge } = await accounts();
+  const owner = asBridge(bridge, env);
+  await bridgeGit(['add', '--all'], owner);
+  const staged = await bridgeGit(['diff', '--cached', '--name-only'], owner);
+  if (staged !== '') await bridgeGit(['commit', '--quiet', '--no-verify', '--message', message], owner);
+  const head = await bridgeGit(['rev-parse', 'HEAD'], owner);
   if (head === (lastPushed ?? env.START_COMMIT)) return { unchanged: head };
   const ref = `refs/heads/${env.ATTEMPT_BRANCH}`;
-  await git(['push', '--quiet', '--no-verify', `--force-with-lease=${ref}:${lastPushed ?? ''}`, 'origin', `HEAD:${ref}`], given);
+  try {
+    await bridgeGit(['push', '--quiet', '--no-verify', `--force-with-lease=${ref}:${lastPushed ?? ''}`, env.REPO_URL, `HEAD:${ref}`], owner);
+  } catch (error) {
+    const remote = (await bridgeGit(['ls-remote', env.REPO_URL, ref], owner)).split('\t')[0];
+    if (remote !== head) throw error;
+  }
   return { pushed: head };
 }

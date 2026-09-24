@@ -8,7 +8,8 @@ RUN apt-get update \
  && install -o root -g bridge -m 0750 /usr/local/bin/node /usr/local/bin/node-bridge \
  && setcap cap_setuid,cap_setgid,cap_kill=ep /usr/local/bin/node-bridge \
  && apt-get purge -y libcap2-bin && rm -rf /var/lib/apt/lists/* \
- && install -d -o codex -g codex -m 0755 /workspace
+ && install -d -o codex -g codex -m 0755 /workspace \
+ && install -d -o bridge -g bridge -m 0755 /var/lib/autoworker
 RUN npm install --global @openai/codex@0.156.0 && npm cache clean --force
 WORKDIR /app
 COPY package.json package-lock.json ./
