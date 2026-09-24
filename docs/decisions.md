@@ -230,6 +230,26 @@ Rejected options:
 - **One fixed pipeline.** No routine could stop at a pull request or ask for a plan review.
 - **Stages each routine defines for itself.** No model could check every shape, the dashboard could not show one, and a prompt could decide when to merge.
 
+### A routine picks a workflow, and code defines each workflow's steps
+
+Decided 23 Sep 2026. Not every routine changes code. A daily chat update needs no repository, a clean-up may only close stale branches, and a fork may review pull requests. So the core runs workflows, and a workflow is an ordered list of step kinds. A step kind is code. It names its input, its output schema, and its core prompt when it runs an agent. It also says whether it needs a repository, which actions it may owe, where a failure sends the task, and how the task page shows its output. Code change, with Specify, Implement, Verify, and Land, is the first workflow. Each workflow lives in its own feature folder, and the engine's entry point hands the runner the list, so the runner never names a workflow or a step. Where tasks come from is chosen the same way, from sources such as a Jira search or a schedule that makes one task per run.
+
+A routine picks its workflow and its source in the dashboard, and the [routine settings](#a-routine-sets-where-it-ends-its-gates-and-its-stage-instructions) apply to that workflow's steps. Adding a workflow or a step kind takes a pull request. The core ships its own workflows, and a fork adds its own in its own folders. No workflow in the core approves a pull request.
+
+Rejected options:
+
+- **One fixed pipeline.** A chat update or a pull request review would be a fork's own program, outside routines and their gates.
+- **Steps each routine defines for itself.** The engine would need a generic outside request, TLC could check only what holds for any list of steps, and the dashboard could show a new output only as raw JSON.
+
+### A person's note on Retry or Send back reaches the agent
+
+Decided 23 Sep 2026. A person who turns down a plan or retries a task usually knows what went wrong, and the agent should hear it. Retry takes an optional note. A gate offers Send back beside Approve, which runs the gated step again and needs a note. The note goes into that step's next prompt after the routine's instructions, and the action that carries it records who wrote it.
+
+Rejected options:
+
+- **A note on Retry only.** Turning down a plan would take a Stop and then a Retry.
+- **No notes.** A person could steer only a running attempt, or edit the ticket before a Retry.
+
 ### Review feedback comes back once, as a whole review
 
 Decided 23 Sep 2026. Land acts on a whole submitted review rather than on single comments, and returns the task to Implement at most once, with every comment as its input. After that round, a routine chooses whether later reviews wait for a person or are ignored, because later rounds tend to be nits and noise. When they are ignored, AutoWorker carries on toward Land, and GitHub's own rules still decide whether the pull request can merge. A repository can list reviewers whose reviews are always ignored, such as review bots. Formally dismissing someone's review on GitHub stays out of the core, because it overrides a reviewer, and a fork can add it.
@@ -295,9 +315,9 @@ Rejected options:
 - **A Job refreshes its own copy.** A refresh token works once, so a Job's refresh would sign out every other copy, and two Jobs refreshing at once would race.
 - **The engine calls OpenAI's refresh endpoint itself.** It is undocumented, and it would be a second implementation of Codex's login.
 
-### Every task works in one repository
+### A task works in one repository when a step needs one
 
-Decided 23 Sep 2026. A routine names the repository its work happens in, and each task copies that repository when the routine finds it. Every attempt then knows what to clone before its agent starts, and a task's repository never changes while it runs. The schema holds this as a rule and refuses a task with no repository. For now the only repository is AutoWorker's own. Repositories are rows of their own, since several routines will share one, and facts about a repository belong in one place. A row names the repository and the branch changes land on.
+Decided 23 Sep 2026. A routine names the repository its work happens in, and each task copies that repository when the routine finds it. Every attempt then knows what to clone before its agent starts, and a task's repository never changes while it runs. A workflow with no step that needs a repository, such as a daily chat update, names none. The schema refuses a task with no repository when its workflow has such a step. For now the only repository is AutoWorker's own. Repositories are rows of their own, since several routines will share one, and facts about a repository belong in one place. A row names the repository and the branch changes land on.
 
 Rejected options:
 
