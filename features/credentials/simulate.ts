@@ -192,6 +192,10 @@ function fakeChecks(sim: Sim, checker: () => Checker | undefined, by: string, us
       rotates: () => false,
       run: gated(checker, use, () => Promise.resolve({ checked: { verdict: 'valid', cause: '200 from GET /user', expiresAt: null, refresh: { kind: 'unused' } }, presented: false })),
     },
+    jira: {
+      rotates: () => false,
+      run: gated(checker, use, () => Promise.resolve({ checked: { verdict: 'valid', cause: '200 from GET /rest/api/3/myself', expiresAt: null, refresh: { kind: 'unused' } }, presented: false })),
+    },
   };
 }
 

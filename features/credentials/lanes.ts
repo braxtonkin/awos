@@ -33,6 +33,7 @@ async function inLane(postgres: TestPostgres, expiresInMs: number, work: (lane: 
       checks: {
         codex: { rotates: () => true, run: () => Promise.resolve(verdicts()) },
         github: { rotates: () => false, run: () => Promise.resolve(verdicts()) },
+        jira: { rotates: () => false, run: () => Promise.resolve(verdicts()) },
       },
       checker: 'lane',
       now: () => new Date(time),

@@ -7,11 +7,13 @@ export type AttemptEventKind = "app" | "end" | "pushed";
 
 export type CheckOutcome = "invalid" | "lost" | "unknown" | "valid";
 
-export type ConnectorKind = "codex" | "github";
+export type ConnectorKind = "codex" | "github" | "jira";
 
 export type ConnectorScope = "personal" | "team";
 
 export type CredentialState = "invalid" | "unknown" | "valid";
+
+export type DraftLeaves = "at-once" | "when-green";
 
 export type Generated<T> = T extends ColumnType<infer S, infer I, infer U>
   ? ColumnType<S, I | undefined, U>
@@ -167,9 +169,12 @@ export interface Person {
 
 export interface Repository {
   branch: string;
+  draft_leaves: Generated<DraftLeaves>;
   fast_test_command: string | null;
   github: string;
   id: Generated<Int8>;
+  ignorable_checks: Generated<string[]>;
+  ignored_reviewers: Generated<string[]>;
   job_image: string | null;
   saved_by: string;
   verify_provider: Generated<string>;
@@ -221,6 +226,8 @@ export interface RoutineVersion {
   gates: Generated<string[]>;
   goal: string;
   ignore_later_reviews: Generated<boolean>;
+  jira_end_status: string | null;
+  jira_start_status: string | null;
   last_step: string | null;
   name: string;
   needs_repository: boolean;
