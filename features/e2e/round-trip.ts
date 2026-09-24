@@ -1,15 +1,14 @@
 import { randomBytes } from 'node:crypto';
-import { readFile, writeFile } from 'node:fs/promises';
+import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { setTimeout as wait } from 'node:timers/promises';
 import { sql } from 'kysely';
 import { z } from 'zod';
-import { accessOnly } from '../../shared/codex-login.ts';
 import { fail, pass, type Check, type Scenario } from '../../tools/verify/check.ts';
 import { buildAttemptImage, ensureRegistry, gitServer, jobNamespace, kindAddress, kubernetes, pushByDigest, registry, seedRepository, sh, type GitServer } from '../../tools/verify/cluster.ts';
 import { kind } from '../../tools/verify/kind.ts';
 import { withPostgres } from '../../tools/verify/postgres.ts';
-import { actAs, applySetup, closeStore, fakeCodexLogin, openStore, startEngine, until, type Engine, type Store } from './autoworker.ts';
+import { accessCopy, actAs, applySetup, closeStore, fakeCodexLogin, openStore, startEngine, until, type Engine, type Store } from './autoworker.ts';
 import { standInPlan, ticking } from './codex-stand-in.ts';
 
 const owner = 'owner@example.com';
@@ -286,12 +285,6 @@ type Lane = (typeof lanes)[number];
 
 const isLane = (name: string): name is Lane => lanes.some(lane => lane === name);
 
-async function realLogin(): Promise<string> {
-  const copy = accessOnly(await readFile('/codex/auth.json', 'utf8'));
-  if ('refused' in copy) throw new Error(copy.reason);
-  return copy.login;
-}
-
 async function roundTripLive(args: readonly string[], out: (line: string) => void): Promise<readonly Check[]> {
   const chosen = args.length === 0 || args.includes('all') ? [...lanes] : args;
   const unknown = chosen.filter(name => !isLane(name));
@@ -326,7 +319,7 @@ async function roundTripLive(args: readonly string[], out: (line: string) => voi
             if (name === 'outage') checks.push(...(await outage(world, standIn)));
             if (name === 'stop') checks.push(...(await stopMidTurn(world, standIn)));
             if (name === 'real') {
-              const reseeded = await seedWorld(store, await realLogin());
+              const reseeded = await seedWorld(store, await accessCopy());
               await store.db.updateTable('credential').set({ state: 'valid', checked_at: new Date() }).where('connector', '=', 'github').execute();
               checks.push(...(await roundTrip({ ...world, routine: reseeded }, attemptImage, 'real', stored => stored.trim().length > 0)));
             }

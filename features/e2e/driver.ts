@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { connect } from '../../shared/db/client.ts';
+import { driveAutoWorker } from './autoworker.ts';
 import { evidenceComment, planComment } from './frontier.ts';
 import type { GitHub, Pull } from './github.ts';
 import type { Issue, Jira } from './jira.ts';
@@ -218,7 +219,7 @@ const playAutoWorker =
     await jira.comment(ticket, `Merged [pull request ${String(opened.number)}|${opened.html_url}] into ${branch} as [${merged.slice(0, 7)}|${github.commitLink(merged)}].`);
   };
 
-export const driverNames = ['none', 'throwaway', 'identity'] as const;
+export const driverNames = ['none', 'throwaway', 'identity', 'autoworker'] as const;
 
 export type DriverName = (typeof driverNames)[number];
 
@@ -226,4 +227,5 @@ export const drivers: Readonly<Record<DriverName, (assignment: Assignment) => Pr
   none: async () => {},
   throwaway: playAutoWorker(codex),
   identity: playAutoWorker(identity),
+  autoworker: driveAutoWorker,
 };

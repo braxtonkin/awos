@@ -1,12 +1,15 @@
 import { execFile, spawn, type ChildProcess } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as wait } from 'node:timers/promises';
 import { promisify } from 'node:util';
+import { sql } from 'kysely';
+import { accessOnly } from '../../shared/codex-login.ts';
 import { connect, type Database } from '../../shared/db/client.ts';
-import { repositoryRoot } from '../../tools/verify/cluster.ts';
+import { buildAttemptImage, ensureRegistry, jobNamespace, kindAddress, kubernetes, registry, repositoryRoot } from '../../tools/verify/cluster.ts';
+import { kind } from '../../tools/verify/kind.ts';
 
 const run = promisify(execFile);
 
@@ -91,3 +94,152 @@ export const fakeCodexLogin = (): string => {
   const token = `${part({ alg: 'none' })}.${part({ exp: Math.floor(Date.now() / 1000) + 30 * 86_400 })}.${part({ signature: 'none' })}`;
   return `${JSON.stringify({ tokens: { access_token: token, refresh_token: '', id_token: token, account_id: 'stand-in' } }, null, 2)}\n`;
 };
+
+export type RunRecord = {
+  readonly attempt: string;
+  readonly step: string;
+  readonly verdict: string | null;
+  readonly runAs: string;
+  readonly branch: string | null;
+  readonly pushed: string | null;
+  readonly owed: readonly string[];
+  readonly inputTokens: number | null;
+};
+
+export async function runRecord(db: Database, key: string): Promise<readonly RunRecord[]> {
+  const rows = await db
+    .selectFrom('attempt')
+    .innerJoin('task', 'task.id', 'attempt.task_id')
+    .innerJoin('person', 'person.id', 'attempt.run_as_id')
+    .select(eb => [
+      'attempt.id',
+      'attempt.step',
+      'attempt.verdict',
+      'person.email',
+      'attempt.branch',
+      'attempt.last_pushed',
+      eb
+        .selectFrom('outbox')
+        .select(sql<string[]>`coalesce(array_agg(outbox.kind order by outbox.position), '{}')`.as('kinds'))
+        .whereRef('outbox.task_id', '=', 'task.id')
+        .whereRef('outbox.owed_at', '=', 'attempt.finished_at')
+        .as('owed'),
+      eb
+        .selectFrom('attempt_event')
+        .select(sql<string | null>`max((body -> 'params' -> 'tokenUsage' -> 'total' ->> 'inputTokens')::bigint)::text`.as('tokens'))
+        .whereRef('attempt_event.attempt_id', '=', 'attempt.id')
+        .where('attempt_event.method', '=', 'thread/tokenUsage/updated')
+        .as('input_tokens'),
+    ])
+    .where('task.key', '=', key)
+    .orderBy('attempt.id')
+    .execute();
+  return rows.map(row => ({
+    attempt: row.id,
+    step: row.step,
+    verdict: row.verdict,
+    runAs: row.email,
+    branch: row.branch,
+    pushed: row.last_pushed,
+    owed: row.owed ?? [],
+    inputTokens: row.input_tokens === null ? null : Number(row.input_tokens),
+  }));
+}
+
+export const describeRecord = (record: RunRecord): string =>
+  `attempt ${record.attempt} ${record.step} ${record.verdict ?? 'live'} as ${record.runAs} on ${record.branch ?? 'no branch'} pushed ${record.pushed ?? 'nothing'} owed [${record.owed.join(', ')}] input tokens ${record.inputTokens === null ? 'unknown' : String(record.inputTokens)}`;
+
+export type Drive = {
+  readonly ticket: string;
+  readonly branch: string;
+  readonly databaseUrl: string;
+  readonly jira: { readonly site: string; readonly email: string; readonly accountId: () => Promise<string> };
+  readonly github: { readonly repository: string };
+  readonly signal: AbortSignal;
+  readonly log: (line: string) => void;
+};
+
+const e2eServiceAccount = 'autoworker-job';
+
+const e2eBridgePort = 4521;
+
+export async function accessCopy(): Promise<string> {
+  const copy = accessOnly(await readFile('/codex/auth.json', 'utf8'));
+  if ('refused' in copy) throw new Error(copy.reason);
+  return copy.login;
+}
+
+export async function driveAutoWorker(drive: Drive): Promise<void> {
+  const up = await kind.run(['up']);
+  const broken = up.find(check => !check.passed);
+  if (broken !== undefined) throw new Error(`kind did not come up: ${broken.name}, ${broken.detail}`);
+  drive.log(await ensureRegistry());
+  const image = await buildAttemptImage(`${registry.host}/autoworker-job:e2e`);
+  const address = await kindAddress();
+  const core = kubernetes();
+  const namespace = `e2e-${randomBytes(3).toString('hex')}`;
+  await jobNamespace(core, namespace, e2eServiceAccount);
+  const store = await openStore(drive.databaseUrl);
+  try {
+    const login = join(store.folder, 'codex.json');
+    await writeFile(login, await accessCopy(), { mode: 0o600 });
+    const run = drive.branch.replace(/^e2e\/run-/, '');
+    const project = drive.ticket.split('-')[0] ?? 'SBX';
+    const owner = drive.jira.email.toLowerCase();
+    const setup = await applySetup(
+      store,
+      {
+        admin: owner,
+        people: [{ name: 'Sandbox owner', email: owner, jiraAccountId: await drive.jira.accountId(), logins: { github: { env: 'GITHUB_TOKEN' }, codex: { file: login }, jira: { env: 'AUTOWORKER_JIRA_LOGIN' } } }],
+        repositories: [{ github: drive.github.repository, branch: drive.branch, fastTestCommand: 'npm ci && npm test' }],
+        routines: [
+          {
+            name: 'End to end',
+            goal: 'Take each sandbox ticket to a merged pull request.',
+            workflow: 'code-change',
+            source: { kind: 'jira-search', jql: `project = ${project} AND labels = e2e-run-${run}` },
+            everyMinutes: 1,
+            repository: { github: drive.github.repository, branch: drive.branch },
+            creator: owner,
+            gates: [],
+            lastStep: 'land',
+            jiraStartStatus: 'In Progress',
+            jiraEndStatus: 'Done',
+          },
+        ],
+      },
+      {
+        GITHUB_TOKEN: process.env['GITHUB_TOKEN'] ?? '',
+        AUTOWORKER_JIRA_LOGIN: `${drive.jira.email}:${process.env['JIRA_API_TOKEN'] ?? ''}`,
+      },
+    );
+    if (setup.code !== 0) throw new Error(`setup failed: ${setup.out}`);
+    drive.log(setup.out.replaceAll('\n', '; '));
+    const engine = startEngine(store, {
+      JOB_IMAGE: image,
+      JOB_NAMESPACE: namespace,
+      JOB_ENGINE_URL: `http://${address}:${String(e2eBridgePort)}/`,
+      BRIDGE_PORT: String(e2eBridgePort),
+      JIRA_SITE: drive.jira.site,
+      WORKER_EVERY_MS: '2000',
+      SCHEDULER_EVERY_MS: '10000',
+    });
+    let printed = '';
+    try {
+      while (!drive.signal.aborted) {
+        const lines = (await runRecord(store.db, drive.ticket)).map(describeRecord).join('\n');
+        if (lines !== printed) {
+          for (const line of lines.split('\n').filter(line => line !== '' && !printed.includes(line))) drive.log(line);
+          printed = lines;
+        }
+        await wait(5_000, undefined, { signal: drive.signal }).catch(() => undefined);
+      }
+    } finally {
+      await engine.stop();
+      drive.log(`engine said: ${engine.said().split('\n').slice(-20).join(' | ')}`);
+    }
+  } finally {
+    await closeStore(store);
+    await core.deleteNamespace({ name: namespace });
+  }
+}
