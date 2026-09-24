@@ -115,12 +115,6 @@ export const noMutantYet: Readonly<Record<string, readonly string[]>> = {
     'one_command_per_number',
     'one_command_per_message',
   ],
-  'the engine stores only a SHA-256 hash, zod refuses a process id below 1, and both counters only rise from 0, so no move reaches a value these checks refuse': [
-    'bridge_token_is_a_hash',
-    'bridge_pid_is_a_process',
-    'high_water_counts_lines',
-    'received_counts_commands',
-  ],
 };
 
 export const droppedBy = (mutant: MutantName): readonly string[] => (mutants[mutant].drops ?? []).map(drop => drop.name);
