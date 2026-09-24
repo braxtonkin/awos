@@ -60,9 +60,6 @@ export type Delivery = 'sent' | 'received' | 'acted on';
 
 export type Polled = { readonly frames: readonly CommandFrame[]; readonly ended: boolean };
 
-export const noStepRunner: Finish = (_writer, attempt) =>
-  Promise.reject(new Error(`The engine has no step runner to judge attempt ${attempt}, so it leaves the attempt live and stores none of its end line.`));
-
 const hashOf = (token: string): Buffer => createHash('sha256').update(token, 'utf8').digest();
 
 const refused = (kind: RefusalKind, reason: string): Refused => ({ refused: kind, reason });
