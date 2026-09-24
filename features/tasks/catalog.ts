@@ -1,3 +1,4 @@
+import { readdirSync } from 'node:fs';
 import { sql } from 'kysely';
 import { connect } from '../../shared/db/client.ts';
 import type { DB } from '../../shared/db/types.ts';
@@ -5,6 +6,12 @@ import type { TestPostgres } from '../../tools/verify/postgres.ts';
 import { mutants } from './simulate.ts';
 
 const ownedTables = ['person', 'repository', 'routine', 'routine_version', 'routine_step', 'task', 'human_action', 'attempt'] as const satisfies readonly (keyof DB)[];
+
+const otherFeatures = readdirSync(new URL('../', import.meta.url), { withFileTypes: true })
+  .filter(entry => entry.isDirectory() && entry.name !== 'tasks')
+  .map(entry => `${entry.name.replaceAll('-', '_')}_`);
+
+const ownedByAnother = (name: string): boolean => otherFeatures.some(prefix => name.startsWith(prefix));
 
 export const noMutantYet: Readonly<Record<string, readonly string[]>> = {
   'Postgres will not drop the key that live_attempt_matches_ready_task points at while that foreign key stands': ['live_attempt_target'],
@@ -130,7 +137,7 @@ export async function checkCatalog(postgres: TestPostgres): Promise<Catalog> {
       from pg_constraint c
       join pg_type d on d.oid = c.contypid
       where c.contypid <> 0 and d.typnamespace = 'public'::regnamespace`.execute(db);
-    const guards = new Set(rows.map(row => row.name));
+    const guards = new Set(rows.map(row => row.name).filter(name => !ownedByAnother(name)));
     const listed = [...Object.keys(mutants), ...Object.values(noMutantYet).flat()];
     return {
       guards: guards.size,
