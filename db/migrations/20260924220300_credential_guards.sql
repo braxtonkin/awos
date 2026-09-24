@@ -5,6 +5,7 @@ begin
     using errcode = 'check_violation', constraint = tg_name;
 end
 $$;
+revoke execute on function refuse_older_login() from public;
 
 create trigger stored_login_is_newest before update of action_id, expires_at on credential for each row
   when (new.action_id = old.action_id and old.expires_at is not null and (new.expires_at is null or new.expires_at < old.expires_at))
