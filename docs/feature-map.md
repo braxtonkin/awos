@@ -4,5 +4,4 @@ Every user-facing feature, how to reach it, and where its code lives. Update thi
 
 | Feature | What it does | How to reach it | Code |
 | --- | --- | --- | --- |
-
-No features yet.
+| Stored credentials | Stores each person's GitHub token and Codex login sealed with AES-256-GCM. The dashboard's database role can replace a credential but never read one back, and each replacement records who made it and when. The engine opens a credential for the person a run acts as. | No screen yet. `npm run verify -- credentials` runs every behavior against Postgres. | `features/credentials/`, `db/migrations/20260923232000_credential_kinds.sql`, `db/migrations/20260923232100_credentials.sql` |

@@ -1,10 +1,14 @@
 import type { ColumnType } from "kysely";
 
+export type ConnectorKind = "codex" | "github";
+
+export type ConnectorScope = "personal" | "team";
+
 export type Generated<T> = T extends ColumnType<infer S, infer I, infer U>
   ? ColumnType<S, I | undefined, U>
   : ColumnType<T, T | undefined, T>;
 
-export type HumanActionKind = "edit_routine" | "pause_routine" | "resume_routine" | "retry_task" | "stop_task";
+export type HumanActionKind = "edit_routine" | "pause_routine" | "replace_credential" | "resume_routine" | "retry_task" | "stop_task";
 
 export type Int8 = ColumnType<string, bigint | number | string, bigint | number | string>;
 
@@ -45,8 +49,25 @@ export interface Attempt {
   verdict: Verdict | null;
 }
 
+export interface Connector {
+  kind: ConnectorKind;
+  scope: ConnectorScope;
+}
+
+export interface Credential {
+  action_id: string;
+  ciphertext: Buffer;
+  connector: ConnectorKind;
+  expires_at: Timestamp | null;
+  id: Generated<Int8>;
+  key_version: number;
+  person_id: Int8 | null;
+  scope: ConnectorScope;
+}
+
 export interface HumanAction {
   at: Timestamp;
+  connector: ConnectorKind | null;
   detail: Generated<Json>;
   id: string;
   kind: HumanActionKind;
@@ -108,6 +129,8 @@ export interface Task {
 
 export interface DB {
   attempt: Attempt;
+  connector: Connector;
+  credential: Credential;
   human_action: HumanAction;
   person: Person;
   repository: Repository;

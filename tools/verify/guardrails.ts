@@ -900,6 +900,20 @@ const violations: readonly Violation[] = [
     expect: [staleTypes],
     rejects: generatedTypes,
   },
+  {
+    name: 'tsc rejects a sealing key that sealingKey did not parse from the environment',
+    file: 'features/credentials/planted-key.ts',
+    source: "import { createSecretKey } from 'node:crypto';\nimport { seal } from './seal.ts';\n\nexport const sealed = seal({ version: 1, key: createSecretKey(Buffer.alloc(31)) }, 'token', 'context');\n",
+    tool: 'tsc',
+    expect: ['TS2345'],
+  },
+  {
+    name: 'tsc rejects a Codex login stored without saying whether it was made for AutoWorker',
+    file: 'features/credentials/planted-login.ts',
+    source: "import type { Secret } from './kinds.ts';\n\nexport const login: Secret = { connector: 'codex', login: '{}' };\n",
+    tool: 'tsc',
+    expect: ['TS2322', 'TS2741'],
+  },
 ];
 
 const plantedModel: Violation = {
