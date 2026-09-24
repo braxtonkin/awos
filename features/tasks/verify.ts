@@ -380,12 +380,24 @@ const traceLine = (run: TlcRun): string => {
   return `${shown.join(' -> ')}${ending}`;
 };
 
+const liveness = 'EveryTaskSettles';
+
+function splitByLiveness(config: string): readonly [string, string] {
+  const [constants = ''] = config.split('\nINVARIANTS');
+  return [config.replace(`    ${liveness}\n`, ''), `${constants}\nPROPERTY\n    ${liveness}\n`];
+}
+
 function checkHolds(file: string): Check {
-  const run = checkModel(folder, 'Tasks', readConfig(file));
   const name = `${file} holds every property`;
-  return run.clean
-    ? pass(name, `${String(run.distinctStates)} distinct states in ${run.seconds.toFixed(1)} s, no error has been found`)
-    : fail(name, run.error ?? run.output.trim().split('\n').slice(-3).join(' | '));
+  const [safetyConfig, livenessConfig] = splitByLiveness(readConfig(file));
+  const safety = checkModel(folder, 'Tasks', safetyConfig);
+  const settles = checkModel(folder, 'Tasks', livenessConfig);
+  const failed = [safety, settles].find(run => !run.clean);
+  if (failed !== undefined) return fail(name, failed.error ?? failed.output.trim().split('\n').slice(-3).join(' | '));
+  return pass(
+    name,
+    `${String(settles.distinctStates)} distinct states, safety in ${safety.seconds.toFixed(1)} s and ${liveness} in ${settles.seconds.toFixed(1)} s, no error has been found`,
+  );
 }
 
 function checkMutant(config: string, mutant: Mutant): Check {
