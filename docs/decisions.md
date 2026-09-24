@@ -232,7 +232,7 @@ Rejected options:
 
 ### A routine picks a workflow, and code defines each workflow's steps
 
-Decided 23 Sep 2026. Not every routine changes code. A daily chat update needs no repository, a clean-up may only close stale branches, and a fork may review pull requests. So the core runs workflows, and a workflow is an ordered list of step kinds. A step kind is code. It names its input, its output schema, and its core prompt when it runs an agent. It also says whether it needs a repository, which actions it may owe, where a failure sends the task, and how the task page shows its output. Code change, with Specify, Implement, Verify, and Land, is the first workflow. Each workflow lives in its own feature folder, and the engine's entry point hands the runner the list, so the runner never names a workflow or a step. Where tasks come from is chosen the same way, from sources such as a Jira search or a schedule that makes one task per run.
+Decided 23 Sep 2026. Not every routine changes code. A daily chat update needs no repository, a clean-up may only close stale branches, and a fork may review pull requests. So the core runs workflows, and a workflow is an ordered list of step kinds. A step kind is code. It names its input, its output schema, and its core prompt when it runs an agent. It also says whether it needs a repository, which actions it may owe, where a failure sends the task, and which [review](#an-agent-step-ends-with-a-review-a-person-can-answer) blocks it requires. Code change, with Specify, Implement, Verify, and Land, is the first workflow. Each workflow lives in its own feature folder, and the engine's entry point hands the runner the list, so the runner never names a workflow or a step. Where tasks come from is chosen the same way, from sources such as a Jira search or a schedule that makes one task per run.
 
 A routine picks its workflow and its source in the dashboard, and the [routine settings](#a-routine-sets-where-it-ends-its-gates-and-its-stage-instructions) apply to that workflow's steps. Adding a workflow or a step kind takes a pull request. The core ships its own workflows, and a fork adds its own in its own folders. No workflow in the core approves a pull request.
 
@@ -249,6 +249,15 @@ Rejected options:
 
 - **A note on Retry only.** Turning down a plan would take a Stop and then a Retry.
 - **No notes.** A person could steer only a running attempt, or edit the ticket before a Retry.
+
+### An agent step ends with a review a person can answer
+
+Decided 23 Sep 2026. An agent often needs to show a person something and get an answer, such as a plan, a draft chat message, or a list of branches to delete. So every agent step ends its turn with a review in one fixed format, which Codex receives as the turn's output schema. A review has an outcome, which is done, needs input, or blocked, and a list of blocks. The block kinds are text, list, choice, checklist, and draft. A person answers a choice by picking an option, a checklist by unticking items, and a draft by editing it. Approve or Send back covers the whole review. A step kind names the blocks it requires and what happens to the answers, and the answers go into the next prompt. The dashboard draws every review with one component. When an agent returns needs input, the task waits for a person even without a gate, up to a cap. A routine's instructions say what to show, and a new kind of control becomes a new block kind in the core. On 23 Sep, three real turns returned a plan, a draft, and a checklist that all matched this format. A schema with an optional field failed its turn at once, so every field is required and "none" is null.
+
+Rejected options:
+
+- **Fields each routine defines.** Anyone can edit a routine, one wrong field fails every attempt, and the engine can't act on fields it doesn't know.
+- **A view per step kind.** Every new step kind would need its own page code and its own answer handling.
 
 ### Review feedback comes back once, as a whole review
 
