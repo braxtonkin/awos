@@ -213,7 +213,7 @@ const pull = {
 
 const plants: readonly Plant[] = [
   { schema: 'jira.comments', valid: { startAt: 0, total: 1, comments: [{ id: '1', body: 'h3. Plan', created: '2026-09-24T00:00:00.000+0000' }] }, remove: ['comments', 0, 'body'] },
-  { schema: 'jira.issue', valid: { key: 'SBX-1', fields: { summary: 's', description: null, labels: [], created: 'c', assignee: null } }, remove: ['fields', 'labels'] },
+  { schema: 'jira.issue', valid: { key: 'SBX-1', fields: { summary: 's', description: null, labels: [], created: 'c', assignee: null, status: { name: 'To Do' } } }, remove: ['fields', 'labels'] },
   { schema: 'jira.myself', valid: { accountId: 'a' }, remove: ['accountId'] },
   { schema: 'github.pull', valid: pull, remove: ['merged_at'] },
   { schema: 'github.pulls', valid: [pull], remove: [0, 'head', 'sha'] },

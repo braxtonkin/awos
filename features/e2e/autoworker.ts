@@ -171,6 +171,10 @@ export type RunAs = (typeof runAsNames)[number];
 
 export const teamAccount = 'autoworker-team@users.noreply.example.com';
 
+export const startStatus = 'In Progress';
+
+export const endStatus = 'Done';
+
 export type Drive = {
   readonly ticket: string;
   readonly branch: string;
@@ -253,8 +257,8 @@ function setupFile(drive: Drive, login: string, accountId: string): object {
         ...(drive.runAs === 'team' ? { runAs: teamAccount } : {}),
         gates: [],
         lastStep: 'land',
-        jiraStartStatus: 'In Progress',
-        jiraEndStatus: 'Done',
+        jiraStartStatus: startStatus,
+        jiraEndStatus: endStatus,
       },
     ],
   };

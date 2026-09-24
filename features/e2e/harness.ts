@@ -7,13 +7,13 @@ import { connectCluster } from '../../shared/cluster.ts';
 import { connect, type Database } from '../../shared/db/client.ts';
 import { fail, pass, type Check } from '../../tools/verify/check.ts';
 import { withPostgres } from '../../tools/verify/postgres.ts';
-import { teamAccount, type Fault, type RunAs } from './autoworker.ts';
+import { endStatus, teamAccount, type Fault, type RunAs } from './autoworker.ts';
 import type { Entry } from './catalog.ts';
 import type { CleanSources } from './clean.ts';
 import { drivers, type DriverName } from './driver.ts';
 import { steps, walk, type DriverEnd, type Reached, type Walk } from './frontier.ts';
 import type { GitHub, SeedFile } from './github.ts';
-import type { Comment } from './jira.ts';
+import type { Comment, Jira } from './jira.ts';
 import { agentTurnMs, plantedSecretCheck, recordChecks } from './record-checks.ts';
 import { linksFrom, renderReport, seconds, stepRuns, type StepRun } from './report.ts';
 import type { World } from './world.ts';
@@ -129,6 +129,12 @@ function duplicateComments(comments: readonly Comment[]): Check {
   return repeated.length === 0 ? pass(name, `${String(comments.length)} comments, each once`) : fail(name, repeated.map(([body, count]) => `${String(count)} times: ${body.slice(0, 80)}`).join('; '));
 }
 
+async function endStatusCheck(jira: Jira, ticket: string): Promise<Check> {
+  const status = (await jira.issue(ticket)).fields.status.name;
+  const name = `the ticket ends in ${endStatus}, the routine's end status`;
+  return status === endStatus ? pass(name, `${ticket} is ${status}`) : fail(name, `${ticket} is ${status}`);
+}
+
 async function pullRequestCheck(github: GitHub, branch: string, ticket: string): Promise<Check> {
   const naming = (await github.pulls(branch)).filter(pull => pull.title.includes(ticket) || (pull.body ?? '').includes(ticket));
   const name = `pull requests ${String(naming.length)}`;
@@ -228,7 +234,7 @@ export async function runEndToEnd(world: World, options: Options, out: (line: st
       const filedAt = result.reached.find(step => step.name === 'ticket filed')?.at;
       const toCleanMs = cleanAt === undefined || filedAt === undefined ? undefined : cleanAt.getTime() - filedAt.getTime();
       const expectedRunAs = options.runAs === 'team' ? teamAccount : jira.email.toLowerCase();
-      const recorded = cleanAt === undefined || options.driver !== 'autoworker' ? [] : [...(await recordChecks(database, ticket, expectedRunAs)), await plantedSecretCheck(clean, ticket)];
+      const recorded = cleanAt === undefined || options.driver !== 'autoworker' ? [] : [...(await recordChecks(database, ticket, expectedRunAs)), await endStatusCheck(jira, ticket), await plantedSecretCheck(clean, ticket)];
       const autoworkerOverheadMs = toCleanMs === undefined || options.driver !== 'autoworker' ? undefined : toCleanMs - (await agentTurnMs(database, ticket));
       const inspected = options.inspect === undefined ? [] : await options.inspect({ database, clean, ticket });
       driverStop.abort();

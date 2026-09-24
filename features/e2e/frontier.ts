@@ -60,7 +60,7 @@ const exitIn = (body: string, where: string): number | undefined => {
 };
 
 export function readEvidence(body: string): { readonly script: string; readonly before: number; readonly after: number } | undefined {
-  const script = /Reproduction script:\s*```[a-z]*\n([\s\S]*?)```/.exec(body)?.[1]?.trim();
+  const script = /Reproduction script:\s*```(?:sh)?([\s\S]*?)```/.exec(body)?.[1]?.trim();
   const before = exitIn(body, 'On the base commit');
   const after = exitIn(body, 'On the change');
   if (script === undefined || script === '' || before === undefined || after === undefined) return undefined;
