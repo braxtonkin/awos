@@ -1,8 +1,14 @@
+import { execFile } from 'node:child_process';
 import { randomBytes, randomUUID } from 'node:crypto';
-import { isDeepStrictEqual, parseArgs } from 'node:util';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { isDeepStrictEqual, parseArgs, promisify } from 'node:util';
 import { sql } from 'kysely';
 import { getContainerRuntimeClient } from 'testcontainers';
 import { z } from 'zod';
+import { connect, type Database } from '../../shared/db/client.ts';
 import { fail, pass, type Check, type Scenario } from '../../tools/verify/check.ts';
 import { withPostgres, type TestPostgres } from '../../tools/verify/postgres.ts';
 import type { Secret } from './kinds.ts';
@@ -446,6 +452,334 @@ const storeChecks: readonly Entry[] = [
   { name: 'sealing and opening one token takes at most 1 ms at the median of 3 runs of 10,000', run: offline(sealAndOpenSpeed) },
 ];
 
+const repositoryRoot = fileURLToPath(new URL('../../', import.meta.url));
+
+const setupCommand = join(repositoryRoot, 'services', 'engine', 'setup.ts');
+
+const setupBudget = { runs: 5, freshMs: 5000, repeatMs: 2000 };
+
+const setupTables = ['person', 'credential', 'human_action', 'repository', 'routine', 'routine_version', 'routine_step'] as const;
+
+const childFailure = z.object({ code: z.number(), stdout: z.string(), stderr: z.string() });
+
+type Run = { readonly code: number; readonly stdout: string; readonly stderr: string; readonly ms: number };
+
+type SetupWorld = {
+  readonly url: string;
+  readonly engine: Database;
+  readonly env: Readonly<Record<string, string>>;
+  readonly secrets: readonly string[];
+  readonly apply: (file: object, env?: Readonly<Record<string, string>>) => Promise<Run>;
+  readonly rows: () => Promise<Readonly<Record<string, number>>>;
+};
+
+const sandboxRepository = { github: 'example/sandbox', branch: 'main' };
+
+const adaLogins = { github: { env: 'ADA_GITHUB_TOKEN' }, codex: { file: 'ada-codex.json', madeForAutoWorker: true } };
+
+const ada = { name: 'Ada', email: 'Ada@Example.com', jiraAccountId: 'jira-ada', logins: adaLogins };
+
+const sandboxRoutine = {
+  name: 'Sandbox tickets',
+  goal: 'Take each sandbox ticket to a merged pull request.',
+  workflow: 'code-change',
+  source: { kind: 'jira-search' },
+  repository: sandboxRepository,
+  creator: 'ada@example.com',
+  gates: ['specify'],
+  steps: { implement: { instructions: 'Keep the change small.', skills: ['typescript'] } },
+};
+
+const setupFile = { admin: 'ada@example.com', people: [ada], repositories: [sandboxRepository], routines: [sandboxRoutine] };
+
+const firstRun = ['people 1 added, 0 changed', 'team accounts 0 added, 0 changed', 'logins 2 sealed', 'repositories 1 added', 'routines 1 added, 0 changed', ''].join('\n');
+
+const repeatRun = ['people 0 added, 0 changed', 'team accounts 0 added, 0 changed', 'logins 0 sealed', 'repositories 0 added', 'routines 0 added, 0 changed', ''].join('\n');
+
+const describeRun = (run: Run): string => `exit ${String(run.code)}, stdout ${JSON.stringify(run.stdout)}, stderr ${JSON.stringify(run.stderr)}`;
+
+const leaks = (secrets: readonly string[], runs: readonly Run[]): readonly string[] =>
+  runs.flatMap((run, index) => (secrets.some(secret => run.stdout.includes(secret) || run.stderr.includes(secret)) ? [`run ${String(index + 1)} printed a secret`] : []));
+
+const nothingWritten = (rows: Readonly<Record<string, number>>): readonly string[] =>
+  Object.entries(rows).flatMap(([table, count]) => (count === 0 ? [] : [`${table} holds ${String(count)} rows`]));
+
+const lineWith = (text: string, needle: string): string => text.split('\n').find(line => line.includes(needle))?.trim() ?? '';
+
+async function runSetup(folder: string, file: object, env: Readonly<Record<string, string>>): Promise<Run> {
+  const path = join(folder, `setup-${randomUUID()}.json`);
+  await writeFile(path, JSON.stringify(file, null, 2));
+  const started = performance.now();
+  const finished = await promisify(execFile)(process.execPath, [setupCommand, path], { env, cwd: repositoryRoot, timeout: 60_000 }).then(
+    ({ stdout, stderr }) => ({ code: 0, stdout, stderr }),
+    (error: unknown) => childFailure.parse(error),
+  );
+  return { ...finished, ms: performance.now() - started };
+}
+
+async function inSetupWorld<T>(postgres: TestPostgres, work: (world: SetupWorld) => Promise<T>): Promise<T> {
+  const scratch = await postgres.scratch();
+  const engine = connect(scratch.url, 1);
+  const folder = await mkdtemp(join(tmpdir(), 'setup-'));
+  const login = fakeLogin(day(30), fakeRefreshToken());
+  const token = fakeGithubToken();
+  const key = randomBytes(32).toString('base64');
+  await writeFile(join(folder, 'ada-codex.json'), login.text);
+  const env = { DATABASE_URL: scratch.url, CREDENTIAL_KEY: key, CREDENTIAL_KEY_VERSION: '1', ADA_GITHUB_TOKEN: token };
+  const rows = async (): Promise<Readonly<Record<string, number>>> => {
+    const counted: Record<string, number> = {};
+    for (const table of setupTables) counted[table] = Number((await sql<{ rows: string }>`select count(*) as rows from ${sql.table(table)}`.execute(engine)).rows[0]?.rows ?? -1);
+    return counted;
+  };
+  try {
+    return await work({ url: scratch.url, engine, env, secrets: [login.text, ...login.tokens, token, key], apply: (file, changed = env) => runSetup(folder, file, changed), rows });
+  } finally {
+    await rm(folder, { recursive: true, force: true });
+    await engine.destroy();
+    await scratch.drop();
+  }
+}
+
+const inSetup =
+  (check: (world: SetupWorld) => Promise<Outcome>) =>
+  (postgres: TestPostgres): Promise<Outcome> =>
+    inSetupWorld(postgres, check);
+
+async function appliesOnce(world: SetupWorld): Promise<Outcome> {
+  const first = await world.apply(setupFile);
+  const afterFirst = await world.rows();
+  const second = await world.apply(setupFile);
+  const afterSecond = await world.rows();
+  const unsaved = await world.engine
+    .selectFrom('repository')
+    .leftJoin('human_action', on => on.onRef('human_action.id', '=', 'repository.saved_by').on('human_action.kind', '=', 'add_repository').onRef('human_action.repository_id', '=', 'repository.id'))
+    .select('repository.github')
+    .where('human_action.id', 'is', null)
+    .execute();
+  const version = await world.engine
+    .selectFrom('routine_version')
+    .select(['workflow', 'source', 'needs_repository', sql<string[]>`gates::text[]`.as('gates'), 'last_step', 'version'])
+    .executeTakeFirst();
+  const steps = await world.engine.selectFrom('routine_step').select(['step', 'instructions', sql<string[]>`skills::text[]`.as('skills')]).execute();
+  const person = await world.engine.selectFrom('person').select(['id', 'email', 'jira_account_id', 'kind']).executeTakeFirst();
+  const key = sealingKey(world.env);
+  const owner = person?.id ?? '0';
+  const opened = [await open(world.engine, key, { connector: 'github', owner }), await open(world.engine, key, { connector: 'codex', owner })];
+  const openedTexts = opened.map(item => ('secret' in item ? item.secret : item.reason));
+  const expectedVersion = { workflow: 'code-change', source: { kind: 'jira-search' }, needs_repository: true, gates: ['specify'], last_step: null, version: 1 };
+  return {
+    problems: [
+      ...(first.code === 0 && first.stdout === firstRun ? [] : [`the first run gave ${describeRun(first)}`]),
+      ...(second.code === 0 && second.stdout === repeatRun ? [] : [`the second run gave ${describeRun(second)}`]),
+      ...(isDeepStrictEqual(afterFirst, afterSecond) ? [] : [`the second run changed row counts from ${JSON.stringify(afterFirst)} to ${JSON.stringify(afterSecond)}`]),
+      ...unsaved.map(row => `repository ${row.github} does not name an add_repository action in saved_by`),
+      ...(isDeepStrictEqual(version, expectedVersion) ? [] : [`the routine version is ${JSON.stringify(version)}, not ${JSON.stringify(expectedVersion)}`]),
+      ...(isDeepStrictEqual(steps, [{ step: 'implement', instructions: 'Keep the change small.', skills: ['typescript'] }]) ? [] : [`the routine steps are ${JSON.stringify(steps)}`]),
+      ...(isDeepStrictEqual(person, { id: owner, email: 'ada@example.com', jira_account_id: 'jira-ada', kind: 'person' }) ? [] : [`the person is ${JSON.stringify(person)}`]),
+      ...(isDeepStrictEqual(openedTexts, [world.env['ADA_GITHUB_TOKEN'], world.secrets[0]]) ? [] : ['the engine did not open both logins to the made-up values the file named']),
+      ...leaks(world.secrets, [first, second]),
+    ],
+    detail: `first run printed ${JSON.stringify(first.stdout)}; second printed ${JSON.stringify(second.stdout)}; row counts ${JSON.stringify(afterSecond)} after both; the repository's saved_by names its add_repository action; the engine opened both logins byte for byte`,
+  };
+}
+
+async function dumpHoldsNoSetupSecret(world: SetupWorld): Promise<Outcome> {
+  const run = await world.apply(setupFile);
+  const dump = await pgDump(world.url);
+  const needles = [
+    ...world.secrets.flatMap((secret, index) => needlesOf(`secret ${String(index + 1)}`, Buffer.from(secret, 'utf8'), 'utf8')),
+    ...['github_pat_', 'ATATT', 'eyJ'].map(prefix => ({ name: `the prefix ${prefix}`, text: prefix })),
+  ];
+  return {
+    problems: [...(run.code === 0 ? [] : [`setup gave ${describeRun(run)}`]), ...needles.filter(needle => dump.includes(needle.text)).map(needle => `the dump holds ${needle.name}`)],
+    detail: `a ${String(dump.length)}-character pg_dump after setup holds none of ${String(needles.length)} needles: the made-up logins and key as text and hex, and github_pat_, ATATT, and eyJ`,
+  };
+}
+
+async function refusesInline(world: SetupWorld): Promise<Outcome> {
+  const token = world.env['ADA_GITHUB_TOKEN'] ?? '';
+  const plants = [
+    { field: 'people[0].logins.github', says: 'Never write a login into the setup file', logins: { ...adaLogins, github: token } },
+    { field: 'people[0].logins.github', says: 'Unrecognized key: "token"', logins: { ...adaLogins, github: { env: 'ADA_GITHUB_TOKEN', token } } },
+    { field: 'people[0].logins.codex', says: 'and no other field', logins: { ...adaLogins, codex: { env: 'ADA_CODEX_LOGIN', file: 'ada-codex.json' } } },
+    { field: 'people[0].logins', says: '"token"', logins: { ...adaLogins, token } },
+  ];
+  const problems: string[] = [];
+  const said: string[] = [];
+  for (const { field, says, logins } of plants) {
+    const run = await world.apply({ ...setupFile, people: [{ ...ada, logins }] });
+    if (run.code !== 1 || !run.stderr.includes(`at ${field}\n`) || !run.stderr.includes(says)) problems.push(`the plant at ${field} gave ${describeRun(run)}`);
+    problems.push(...leaks(world.secrets, [run]), ...nothingWritten(await world.rows()));
+    said.push(`${lineWith(run.stderr, says)} ${lineWith(run.stderr, `at ${field}`)}`);
+  }
+  return { problems, detail: `each of ${String(plants.length)} planted login fields, three holding the token inline, was refused by field name and wrote nothing: ${said.join(' | ')}` };
+}
+
+async function refreshNeedsSetupMark(world: SetupWorld): Promise<Outcome> {
+  const unmarked = await world.apply({ ...setupFile, people: [{ ...ada, logins: { ...adaLogins, codex: { file: 'ada-codex.json' } } }] });
+  const written = await world.rows();
+  const marked = await world.apply(setupFile);
+  const codexRow = await world.engine
+    .selectFrom('credential')
+    .innerJoin('human_action', 'human_action.id', 'credential.action_id')
+    .select(['credential.person_id', 'credential.expires_at', 'human_action.detail'])
+    .where('credential.connector', '=', 'codex')
+    .executeTakeFirst();
+  return {
+    problems: [
+      ...(unmarked.code === 1 && unmarked.stderr.includes('at people[0].logins.codex\n') && unmarked.stderr.includes('refresh token') ? [] : [`the unmarked login gave ${describeRun(unmarked)}`]),
+      ...nothingWritten(written),
+      ...(marked.code === 0 && marked.stdout.includes('logins 2 sealed') ? [] : [`the marked login gave ${describeRun(marked)}`]),
+      ...(isDeepStrictEqual(codexRow?.detail, { owner: codexRow?.person_id, madeForAutoWorker: true }) ? [] : [`the stored Codex login records ${JSON.stringify(codexRow?.detail)}`]),
+      ...(codexRow?.expires_at?.getTime() === day(30).getTime() ? [] : [`the stored Codex login expires ${codexRow?.expires_at?.toISOString() ?? 'never'}`]),
+      ...leaks(world.secrets, [unmarked, marked]),
+    ],
+    detail: `unmarked, setup refused it and wrote nothing; marked, it was stored as made for AutoWorker and so refreshable, expiring at its access token's exp. The refusal: ${lineWith(unmarked.stderr, 'refresh token')}`,
+  };
+}
+
+async function replacementRecorded(world: SetupWorld): Promise<Outcome> {
+  await world.apply(setupFile);
+  const token = fakeGithubToken();
+  const before = Date.now();
+  const run = await world.apply(setupFile, { ...world.env, ADA_GITHUB_TOKEN: token });
+  const after = Date.now();
+  const actions = await world.engine.selectFrom('human_action').select(['id', 'person_id', 'at', 'connector']).where('kind', '=', 'replace_credential').orderBy('at').execute();
+  const credential = await world.engine.selectFrom('credential').select(['action_id', 'person_id']).where('connector', '=', 'github').executeTakeFirstOrThrow();
+  const latest = actions.at(-1);
+  const opened = await open(world.engine, sealingKey(world.env), { connector: 'github', owner: credential.person_id });
+  const at = latest?.at.getTime() ?? 0;
+  return {
+    problems: [
+      ...(run.code === 0 && run.stdout.includes('logins 1 sealed') ? [] : [`the second apply gave ${describeRun(run)}`]),
+      ...(actions.length === 3 ? [] : [`${String(actions.length)} replace_credential actions are recorded, not 3`]),
+      ...(latest?.connector === 'github' && latest.person_id === credential.person_id && latest.id === credential.action_id ? [] : ['the GitHub credential does not cite the newest replacement, made by Ada']),
+      ...(at >= before && at <= after ? [] : [`the newest replacement is recorded at ${latest?.at.toISOString() ?? 'no time'}, outside the run`]),
+      ...('secret' in opened && opened.secret === token ? [] : ['the engine did not open the replaced token']),
+      ...leaks([...world.secrets, token], [run]),
+    ],
+    detail: `a new made-up token sealed 1 login and recorded replace_credential ${latest?.id ?? ''} by person ${latest?.person_id ?? ''} at ${latest?.at.toISOString() ?? ''}, which the credential cites`,
+  };
+}
+
+async function convergesOnChanges(world: SetupWorld): Promise<Outcome> {
+  await world.apply(setupFile);
+  const run = await world.apply({ ...setupFile, people: [{ ...ada, name: 'Ada Lovelace' }], routines: [{ ...sandboxRoutine, gates: [], lastStep: 'implement' }] });
+  const versions = await world.engine.selectFrom('routine_version').select(['version', sql<string[]>`gates::text[]`.as('gates'), 'last_step']).orderBy('version').execute();
+  const actions = await world.engine.selectFrom('human_action').select('id').where('kind', '=', 'edit_routine').execute();
+  const names = await world.engine.selectFrom('person').select('name').execute();
+  const expected = [
+    { version: 1, gates: ['specify'], last_step: null },
+    { version: 2, gates: [], last_step: 'implement' },
+  ];
+  return {
+    problems: [
+      ...(run.code === 0 && run.stdout.includes('people 0 added, 1 changed') && run.stdout.includes('routines 0 added, 1 changed') ? [] : [`the changed file gave ${describeRun(run)}`]),
+      ...(isDeepStrictEqual(versions, expected) ? [] : [`the routine versions are ${JSON.stringify(versions)}`]),
+      ...(actions.length === 2 ? [] : [`${String(actions.length)} edit_routine actions are recorded, not 2`]),
+      ...(isDeepStrictEqual(names, [{ name: 'Ada Lovelace' }]) ? [] : [`the people are ${JSON.stringify(names)}`]),
+    ],
+    detail: `a renamed person and a routine with other gates and last step printed ${JSON.stringify(run.stdout)}, and the routine kept version 1 and gained version 2 under a second edit_routine action`,
+  };
+}
+
+async function refusesUnknownRunAs(world: SetupWorld): Promise<Outcome> {
+  const run = await world.apply({ ...setupFile, routines: [{ ...sandboxRoutine, runAs: 'cy@example.com' }] });
+  return {
+    problems: [
+      ...(run.code === 1 && run.stderr.includes('at routines[0].runAs\n') && run.stderr.includes('cy@example.com') ? [] : [`setup gave ${describeRun(run)}`]),
+      ...nothingWritten(await world.rows()),
+    ],
+    detail: `refused before any write: ${lineWith(run.stderr, 'cy@example.com')}`,
+  };
+}
+
+async function duplicateAccountRollsBack(world: SetupWorld): Promise<Outcome> {
+  const run = await world.apply({ ...setupFile, people: [ada, { ...ada, name: 'Bo', email: 'bo@example.com' }] });
+  return {
+    problems: [
+      ...(run.code === 1 && run.stderr.includes('one_person_per_jira_account') && run.stdout === '' ? [] : [`setup gave ${describeRun(run)}`]),
+      ...nothingWritten(await world.rows()),
+    ],
+    detail: `Postgres refused the second person and the people section rolled back: ${run.stderr.trim()}`,
+  };
+}
+
+async function dashboardCannotReadSetupLogins(world: SetupWorld): Promise<Outcome> {
+  const run = await world.apply(setupFile);
+  const login = `dashboard_${randomBytes(6).toString('hex')}`;
+  const password = randomBytes(18).toString('hex');
+  const address = new URL(world.url);
+  address.username = login;
+  address.password = password;
+  await sql`create role ${sql.id(login)} login password ${sql.lit(password)} in role dashboard`.execute(world.engine);
+  const dashboard = connect(address.toString(), 1);
+  try {
+    const visible = await dashboard.selectFrom('credential').select(['id', 'connector']).execute();
+    const sealed = await dashboard
+      .selectFrom('credential')
+      .select('ciphertext')
+      .execute()
+      .then(
+        () => 'returned rows',
+        (error: unknown) => messageOf(error),
+      );
+    return {
+      problems: [
+        ...(run.code === 0 ? [] : [`setup gave ${describeRun(run)}`]),
+        ...(visible.length === 2 ? [] : [`the dashboard role sees ${String(visible.length)} credentials, not 2`]),
+        ...(sealed.startsWith('permission denied') ? [] : [`selecting ciphertext as the dashboard role ${sealed}`]),
+      ],
+      detail: `the dashboard role lists ${String(visible.length)} set-up credentials, and selecting ciphertext answers: ${sealed}`,
+    };
+  } finally {
+    await dashboard.destroy();
+    await sql`drop role if exists ${sql.id(login)}`.execute(world.engine);
+  }
+}
+
+function setupSpeed(postgres: TestPostgres): Promise<Outcome> {
+  return inSetupWorld(postgres, async repeated => {
+    const seeded = await repeated.apply(setupFile);
+    const fresh: number[] = [];
+    const repeats: number[] = [];
+    const problems: string[] = seeded.code === 0 ? [] : [`the first apply gave ${describeRun(seeded)}`];
+    for (let index = 0; index < setupBudget.runs; index += 1) {
+      const run = await inSetupWorld(postgres, world => world.apply(setupFile));
+      if (run.stdout !== firstRun) problems.push(`a fresh apply gave ${describeRun(run)}`);
+      fresh.push(run.ms);
+      const again = await repeated.apply(setupFile);
+      if (again.stdout !== repeatRun) problems.push(`a repeat apply gave ${describeRun(again)}`);
+      repeats.push(again.ms);
+    }
+    const shown = (values: readonly number[]): string => values.map(ms => ms.toFixed(0)).join(', ');
+    return {
+      problems: [
+        ...problems,
+        ...fresh.filter(ms => ms > setupBudget.freshMs).map(ms => `a fresh apply took ${ms.toFixed(0)} ms, over ${String(setupBudget.freshMs)}`),
+        ...repeats.filter(ms => ms > setupBudget.repeatMs).map(ms => `a repeat apply took ${ms.toFixed(0)} ms, over ${String(setupBudget.repeatMs)}`),
+      ],
+      detail: `fresh applies ${shown(fresh)} ms (median ${median(fresh).toFixed(0)}, budget ${String(setupBudget.freshMs)}); repeat applies ${shown(repeats)} ms (median ${median(repeats).toFixed(0)}, budget ${String(setupBudget.repeatMs)}), each timing the whole node process`,
+    };
+  });
+}
+
+const setupChecks: readonly Entry[] = [
+  { name: 'a first apply adds 1 person, seals 2 logins, adds 1 repository and 1 routine, and a second apply changes nothing', run: inSetup(appliesOnce) },
+  { name: 'pg_dump after setup holds no made-up login, no key, and no github_pat_, ATATT, or eyJ', run: inSetup(dumpHoldsNoSetupSecret) },
+  { name: 'a token written inline is refused by field name, and nothing is written', run: inSetup(refusesInline) },
+  { name: 'a Codex login with a refresh token is refused unless the file marks it made for AutoWorker', run: inSetup(refreshNeedsSetupMark) },
+  { name: 'a changed login is sealed again, and its replace_credential action records who and when', run: inSetup(replacementRecorded) },
+  { name: 'a changed person is updated, and a changed routine saves a new version beside the old one', run: inSetup(convergesOnChanges) },
+  { name: 'a run-as person the file does not list is refused by name, and nothing is written', run: inSetup(refusesUnknownRunAs) },
+  { name: 'two people with one Jira account id are refused by Postgres, and the people section rolls back', run: inSetup(duplicateAccountRollsBack) },
+  { name: 'after setup, the dashboard role cannot select a sealed column', run: inSetup(dashboardCannotReadSetupLogins) },
+  {
+    name: `a fresh apply takes at most ${String(setupBudget.freshMs)} ms and a repeat apply at most ${String(setupBudget.repeatMs)} ms, over ${String(setupBudget.runs)} of each`,
+    run: setupSpeed,
+  },
+];
+
 async function settle(name: string, work: () => Promise<Outcome>): Promise<Check> {
   try {
     const { problems, detail } = await work();
@@ -479,5 +813,11 @@ export const scenarios: readonly Scenario[] = [
       const { mutant } = parseOptions(args);
       return withPostgres(postgres => runEntries(postgres, mutant === undefined ? storeChecks : mutantEntries(mutant)));
     },
+  },
+  {
+    name: 'setup',
+    summary:
+      'runs node services/engine/setup.ts as a child process against fresh Postgres databases with made-up logins, and proves it applies a file once, refuses inline tokens and unmarked refreshable Codex logins, records each replacement, never prints or stores a secret in the clear, and stays within its time budget',
+    run: () => withPostgres(postgres => runEntries(postgres, setupChecks)),
   },
 ];
