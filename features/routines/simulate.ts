@@ -555,12 +555,12 @@ async function summarize(db: Database): Promise<Summary> {
 }
 
 async function outerStep(world: World): Promise<void> {
+  await restartCrashed(world);
   const due = world.virtual.nextDue();
   const clock = now(world).getTime();
   if (due !== undefined && due <= clock + world.profile.stepMs && (world.quiet || world.random() < 0.6)) {
     const from = world.log.length;
     await world.virtual.fire();
-    await restartCrashed(world);
     await checkStep(world, 'engine', world.log.slice(from).join('; ') || 'nothing due');
     return;
   }
