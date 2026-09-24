@@ -6,6 +6,9 @@ import { githubApi } from '../../features/credentials/github-check.ts';
 import { sealingKey, type SealingKey } from '../../features/credentials/seal.ts';
 import { writeBack } from '../../features/credentials/store.ts';
 import { outboxLoops, registryOf } from '../../features/outbox/perform.ts';
+import { scheduleSource } from '../../features/routines/schedule-source.ts';
+import { postgresNow, scheduler } from '../../features/routines/scheduler.ts';
+import { sourcesByKind } from '../../features/routines/source.ts';
 import { reaper } from '../../features/tasks/reaper.ts';
 import { startProblems } from '../../features/tasks/start.ts';
 import type { OwedKinds, Performers } from '../../shared/actions.ts';
@@ -22,6 +25,8 @@ const settings = z.object({
   DATABASE_CONNECT_TIMEOUT_MS: milliseconds.default(10_000),
   LEASE_MS: milliseconds.default(60_000),
   REAPER_EVERY_MS: milliseconds.default(30_000),
+  SCHEDULER_EVERY_MS: milliseconds.default(10_000),
+  ROUTINE_LEASE_MS: milliseconds.default(300_000),
   CHECKS_EVERY_MS: milliseconds.default(60_000),
   CHECK_LEASE_MS: milliseconds.default(300_000),
   CHECK_TIMEOUT_MS: milliseconds.default(120_000),
@@ -34,6 +39,8 @@ const settings = z.object({
 
 type Settings = z.infer<typeof settings>;
 
+const sources = sourcesByKind([scheduleSource]);
+
 type ActionKind = OwedKinds<Workflow>;
 
 const performers = {} satisfies Performers<ActionKind>;
@@ -42,6 +49,7 @@ const actions = registryOf(performers);
 
 const loopsFor = (given: Settings, key: SealingKey | undefined): readonly Loop[] => [
   reaper({ everyMs: given.REAPER_EVERY_MS, leaseMs: given.LEASE_MS }),
+  scheduler({ everyMs: given.SCHEDULER_EVERY_MS, leaseMs: given.ROUTINE_LEASE_MS, sources, workflows, now: postgresNow }),
   ...outboxLoops({ everyMs: given.OUTBOX_EVERY_MS, leaseMs: given.OUTBOX_LEASE_MS, marginMs: given.OUTBOX_MARGIN_MS, maxTries: given.OUTBOX_MAX_TRIES, clock: realClock, registry: actions }),
   ...(key === undefined
     ? []

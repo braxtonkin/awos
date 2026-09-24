@@ -651,7 +651,6 @@ async function saveRoutine(db: Database, person: string, repository: string, wor
       version: 1,
       name: 'Engine start',
       goal: 'Start the engine.',
-      schedule: '0 0 * * *',
       repository_id: repository,
       action_id: action,
       workflow,
@@ -743,7 +742,7 @@ async function engineStartChecks(postgres: TestPostgres): Promise<readonly Check
       .executeTakeFirstOrThrow();
     await saveRoutine(db, person.id, repository.id, 'code-change');
     const known = runEngine(scratch.stableUrl, quickEngine);
-    const started = await known.waitFor('The engine runs the workflows code-change, and the loops reaper every 200 ms.');
+    const started = await known.waitFor('The engine runs the workflows code-change, and the loops reaper every 200 ms, scheduler every 10000 ms.');
     const knownStatus = started ? await known.terminate() : null;
     const stranger = await saveRoutine(db, person.id, repository.id, 'no-such-flow');
     const unknown = startEngine({ ...process.env, DATABASE_URL: scratch.stableUrl });

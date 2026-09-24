@@ -57,7 +57,6 @@ async function recordTask(assignment: Assignment, issue: Issue): Promise<void> {
           version: 1,
           name: 'end-to-end throwaway',
           goal: 'Take each sandbox ticket to a merged pull request',
-          schedule: '* * * * *',
           repository_id: repository.id,
           action_id: action,
           workflow: 'code-change',

@@ -1141,7 +1141,6 @@ async function setUp(db: Database, profile: Profile, steps: number, engines: Eng
         version: 1,
         name: `Simulated ${planned.workflow.name}`,
         goal: 'Take each labeled ticket as far as the routine says.',
-        schedule: '*/15 * * * *',
         repository_id: needsRepository ? repository.id : null,
         action_id: action,
         workflow: planned.workflow.name,

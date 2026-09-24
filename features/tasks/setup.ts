@@ -14,8 +14,6 @@ type Outcome = 'added' | 'changed' | 'same';
 
 type Problem = { readonly path: readonly (string | number)[]; readonly message: string };
 
-const schedule = '*/15 * * * *';
-
 const words = z.string().trim().min(1, { error: 'must not be blank' });
 
 const email = z.string().trim().toLowerCase().pipe(z.email({ error: 'must be an email address' }));
@@ -34,6 +32,7 @@ const routine = z.strictObject({
   goal: words,
   workflow: slug,
   source: z.strictObject({ kind: slug }),
+  everyMinutes: z.number().int().min(1).max(24 * 60).default(15),
   repository: repository.optional(),
   creator: email,
   runAs: email.optional(),
@@ -187,6 +186,7 @@ export function applyRepositories<L>(db: Database, file: SetupFile<L>): Promise<
 
 type Version = {
   readonly name: string;
+  readonly everyMinutes: number;
   readonly source: unknown;
   readonly gates: readonly string[];
   readonly lastStep: string | null;
@@ -203,7 +203,7 @@ async function saveVersion(trx: Database, routineId: string, version: number, ad
       version,
       name: planned.name,
       goal: planned.goal,
-      schedule,
+      every: `${String(planned.everyMinutes)} minutes`,
       repository_id: repositoryId,
       action_id: action,
       workflow: planned.workflow,
@@ -227,7 +227,7 @@ async function applyRoutine(trx: Database, admin: string, planned: Routine): Pro
   const found = await trx
     .selectFrom('routine_version as version')
     .innerJoin('routine', 'routine.id', 'version.routine_id')
-    .select(['routine.id', 'routine.creator_id', 'routine.run_as_id', 'version.version', 'version.name', 'version.source', sql<string[]>`version.gates::text[]`.as('gates'), 'version.last_step'])
+    .select(['routine.id', 'routine.creator_id', 'routine.run_as_id', 'version.version', 'version.name', sql<number>`(extract(epoch from version.every) / 60)::float8`.as('everyMinutes'), 'version.source', sql<string[]>`version.gates::text[]`.as('gates'), 'version.last_step'])
     .where('version.workflow', '=', planned.workflow)
     .where('version.goal', '=', planned.goal)
     .where('version.repository_id', 'is not distinct from', repositoryId)
@@ -248,12 +248,13 @@ async function applyRoutine(trx: Database, admin: string, planned: Routine): Pro
     .execute();
   const stored: Version = {
     name: found.name,
+    everyMinutes: found.everyMinutes,
     source: found.source,
     gates: found.gates,
     lastStep: found.last_step,
     steps: Object.fromEntries(stepRows.map(row => [row.step, { instructions: row.instructions, skills: row.skills }])),
   };
-  const wanted: Version = { name: planned.name, source: planned.source, gates: planned.gates, lastStep: planned.lastStep ?? null, steps: planned.steps };
+  const wanted: Version = { name: planned.name, everyMinutes: planned.everyMinutes, source: planned.source, gates: planned.gates, lastStep: planned.lastStep ?? null, steps: planned.steps };
   const routineChanged = found.creator_id !== creator || found.run_as_id !== runAs;
   const versionChanged = !isDeepStrictEqual(stored, wanted);
   if (routineChanged) await trx.updateTable('routine').set({ creator_id: creator, run_as_id: runAs }).where('id', '=', found.id).execute();

@@ -32,8 +32,8 @@ const world: readonly Statement[] = [
       insert into repository (github, branch, saved_by) select 'example/sandbox', 'main', id from saved`,
   sql`insert into routine (creator_id, run_as_id) values (1, 1)`,
   sql`insert into human_action (id, at, person_id, kind, routine_id) values (${firstAction}, ${t0}, 1, 'edit_routine', 1)`,
-  sql`insert into routine_version (routine_id, version, name, goal, schedule, repository_id, action_id, workflow, source, needs_repository, gates)
-      values (1, 1, 'Plants', 'Break one property at a time.', '0 0 * * *', 1, ${firstAction}, 'code-change', '{"kind": "jira-search"}', true, '{specify}')`,
+  sql`insert into routine_version (routine_id, version, name, goal, repository_id, action_id, workflow, source, needs_repository, gates)
+      values (1, 1, 'Plants', 'Break one property at a time.', 1, ${firstAction}, 'code-change', '{"kind": "jira-search"}', true, '{specify}')`,
   sql`insert into task (routine_id, found_version, repository_id, key, title, found_at, assignee_account_id, workflow, needs_repository, step)
       values (1, 1, 1, 'PLANT-1', 'Plant', ${t0}, 'acc-ada', 'code-change', true, 'specify')`,
 ];

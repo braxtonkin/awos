@@ -28,8 +28,8 @@ export const worldOf = (tasks: number): readonly Statement[] => [
       insert into repository (github, branch, saved_by) select 'example/sandbox', 'main', id from saved`,
   sql`insert into routine (creator_id, run_as_id) values (1, 1)`,
   sql`insert into human_action (id, at, person_id, kind, routine_id) values ('00000000-0000-4000-8000-000000000001', ${t0}, 1, 'edit_routine', 1)`,
-  sql`insert into routine_version (routine_id, version, name, goal, schedule, repository_id, action_id, workflow, source, needs_repository)
-      values (1, 1, 'Outbox', 'Owe actions and perform them.', '0 0 * * *', 1, '00000000-0000-4000-8000-000000000001', 'code-change', '{"kind": "schedule"}', true)`,
+  sql`insert into routine_version (routine_id, version, name, goal, repository_id, action_id, workflow, source, needs_repository)
+      values (1, 1, 'Outbox', 'Owe actions and perform them.', 1, '00000000-0000-4000-8000-000000000001', 'code-change', '{"kind": "schedule"}', true)`,
   sql`insert into task (routine_id, found_version, repository_id, key, title, found_at, workflow, needs_repository, step)
       select 1, 1, 1, 'SIM-' || n, 'Simulated task ' || n, ${t0}, 'code-change', true, 's1' from generate_series(1, ${sql.lit(tasks)}) n`,
 ];

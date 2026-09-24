@@ -143,7 +143,7 @@ Rejected options:
 
 ### Routines are goals that anyone on the team edits in the dashboard
 
-Decided 23 Sep 2026. A routine is a goal in plain words and a schedule. The goal states what to do and where to stop, so a routine has no settings for what it may touch or how far it may go. Definitions live in Postgres. Anyone on the team may add or change a routine with no approval step, because AutoWorker is an internal service. A person can pause a routine, change its schedule, or run it now.
+Decided 23 Sep 2026. A routine is a goal in plain words and a schedule. The goal states what to do and where to stop, so a routine has no settings for what it may touch or how far it may go. Definitions live in Postgres. Anyone on the team may add or change a routine with no approval step, because AutoWorker is an internal service. A person can pause a routine, change its schedule, or run it now. On 24 Sep the coordinator replaced the five-field cron schedule with an interval, `routine_version.every`, which defaults to 15 minutes, and calendar schedules wait for the Daily update workflow.
 
 Rejected options:
 

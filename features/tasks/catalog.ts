@@ -53,7 +53,7 @@ export const noMutantYet: Readonly<Record<string, readonly string[]>> = {
     'version_saved_by_action',
     'routine_version_is_final',
     'goal_not_blank',
-    'schedule_is_five_cron_fields',
+    'every_is_a_positive_span_without_months',
     'pause_names_its_action',
     'action_on_routine',
     'action_taken_by_person',
@@ -68,6 +68,7 @@ export const noMutantYet: Readonly<Record<string, readonly string[]>> = {
     'setting_of_version',
     'routine_step_is_final',
   ],
+  'the routines simulator in features/routines records tasks and owns this guard, and its mutant drops it there': ['task_keeps_its_routine'],
   'the badName fault writes a bad skill, step, and workflow name and a waiting reason that is not a sentence, and its seed fails unless the domain refuses the write, but dropGuard drops only table constraints, indexes, and triggers, so a domain has no mutant yet': [
     'workflow_name_is_a_slug',
     'step_name_is_a_slug',

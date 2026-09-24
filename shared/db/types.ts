@@ -1,4 +1,5 @@
 import type { ColumnType } from "kysely";
+import type { IPostgresInterval } from "postgres-interval";
 
 export type CheckOutcome = "invalid" | "lost" | "unknown" | "valid";
 
@@ -12,9 +13,11 @@ export type Generated<T> = T extends ColumnType<infer S, infer I, infer U>
   ? ColumnType<S, I | undefined, U>
   : ColumnType<T, T | undefined, T>;
 
-export type HumanActionKind = "add_repository" | "approve" | "edit_draft" | "edit_repository" | "edit_routine" | "pause_routine" | "pick_choice" | "replace_credential" | "resume_routine" | "retry_task" | "send_back" | "stop_task" | "untick_items";
+export type HumanActionKind = "add_repository" | "approve" | "edit_draft" | "edit_repository" | "edit_routine" | "pause_routine" | "pick_choice" | "replace_credential" | "resume_routine" | "retry_task" | "run_now" | "send_back" | "stop_task" | "untick_items";
 
 export type Int8 = ColumnType<string, bigint | number | string, bigint | number | string>;
+
+export type Interval = ColumnType<IPostgresInterval, IPostgresInterval | number | string, IPostgresInterval | number | string>;
 
 export type Json = JsonValue;
 
@@ -31,6 +34,10 @@ export type JsonValue = JsonArray | JsonObject | JsonPrimitive;
 export type OutboxState = "done" | "dropped" | "failed" | "owed" | "refused";
 
 export type PersonKind = "person" | "shared";
+
+export type RunOutcome = "done" | "failed" | "lost" | "paused";
+
+export type RunReason = "run_now" | "schedule";
 
 export type TaskState = "done" | "ready" | "stopped" | "waiting";
 
@@ -141,6 +148,31 @@ export interface Routine {
   run_as_id: Int8 | null;
 }
 
+export interface RoutineOverlap {
+  routine_id: Int8;
+  run_id: Int8;
+  task_id: Int8;
+}
+
+export interface RoutineRun {
+  claim: string | null;
+  claimed_at: Timestamp | null;
+  covers: Generated<number>;
+  finished_at: Timestamp | null;
+  finished_by: string | null;
+  found: Generated<number>;
+  id: Generated<Int8>;
+  lease_until: Timestamp | null;
+  note: string | null;
+  outcome: RunOutcome | null;
+  pressed_by: string | null;
+  reason: RunReason;
+  routine_id: Int8;
+  slot: Timestamp | null;
+  started_at: Timestamp | null;
+  version: number;
+}
+
 export interface RoutineStep {
   instructions: Generated<string>;
   routine_id: Int8;
@@ -151,6 +183,7 @@ export interface RoutineStep {
 
 export interface RoutineVersion {
   action_id: string;
+  every: Generated<Interval>;
   gates: Generated<string[]>;
   goal: string;
   ignore_later_reviews: Generated<boolean>;
@@ -159,7 +192,6 @@ export interface RoutineVersion {
   needs_repository: boolean;
   repository_id: Int8 | null;
   routine_id: Int8;
-  schedule: string;
   source: Json;
   version: number;
   workflow: string;
@@ -202,6 +234,8 @@ export interface DB {
   person: Person;
   repository: Repository;
   routine: Routine;
+  routine_overlap: RoutineOverlap;
+  routine_run: RoutineRun;
   routine_step: RoutineStep;
   routine_version: RoutineVersion;
   task: Task;
