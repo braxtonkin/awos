@@ -38,7 +38,7 @@ async function replayed(db: Database, attempt: string): Promise<{ readonly store
   return { stored, replayed: transcript.items.filter(item => item.completed).map(item => item.id) };
 }
 
-export async function recordChecks(db: Database, ticket: string, runAs: string): Promise<readonly Check[]> {
+export async function recordChecks(db: Database, ticket: string, runAs: string, description: string): Promise<readonly Check[]> {
   const tasks = await db.selectFrom('task').select(['id', 'state']).where('key', '=', ticket).execute();
   const task = await taskFor(db, ticket);
   if (task === undefined) return [fail('record: one task for the ticket', `no task has the key ${ticket}`)];
@@ -50,6 +50,9 @@ export async function recordChecks(db: Database, ticket: string, runAs: string):
     check('record: attempts in step order with their verdicts', JSON.stringify(passed) === JSON.stringify(stepOrder) && attempts.every(attempt => attempt.verdict !== null), described),
     check(`record: every attempt ran as ${runAs}`, attempts.length > 0 && attempts.every(attempt => attempt.runAs === runAs), attempts.map(attempt => `${attempt.id} as ${attempt.runAs}`).join(', ')),
   ];
+  const prompts = await db.selectFrom('attempt_command').innerJoin('attempt', 'attempt.id', 'attempt_command.attempt_id').select(['attempt.id', 'attempt_command.input']).where('attempt.task_id', '=', task.id).where('attempt_command.kind', '=', 'turn.start').orderBy('attempt.id').execute();
+  const blind = prompts.filter(row => !(row.input ?? '').includes(description.trim())).map(row => row.id);
+  checks.push(check("record: every agent prompt holds the ticket's description", prompts.length > 0 && blind.length === 0, blind.length === 0 ? `${String(prompts.length)} prompts` : `attempts ${blind.join(', ')} lack it`));
   const seen: string[] = [];
   for (const attempt of attempts.filter(entry => agentSteps.has(entry.step))) seen.push(...(await models(db, attempt.id)).map(model => `${attempt.id} ${model}`));
   const agentAttempts = attempts.filter(entry => agentSteps.has(entry.step)).length;

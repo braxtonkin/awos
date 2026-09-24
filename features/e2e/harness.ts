@@ -234,7 +234,7 @@ export async function runEndToEnd(world: World, options: Options, out: (line: st
       const filedAt = result.reached.find(step => step.name === 'ticket filed')?.at;
       const toCleanMs = cleanAt === undefined || filedAt === undefined ? undefined : cleanAt.getTime() - filedAt.getTime();
       const expectedRunAs = options.runAs === 'team' ? teamAccount : jira.email.toLowerCase();
-      const recorded = cleanAt === undefined || options.driver !== 'autoworker' ? [] : [...(await recordChecks(database, ticket, expectedRunAs)), await endStatusCheck(jira, ticket), await plantedSecretCheck(clean, ticket)];
+      const recorded = cleanAt === undefined || options.driver !== 'autoworker' ? [] : [...(await recordChecks(database, ticket, expectedRunAs, options.entry.description)), await endStatusCheck(jira, ticket), await plantedSecretCheck(clean, ticket)];
       const autoworkerOverheadMs = toCleanMs === undefined || options.driver !== 'autoworker' ? undefined : toCleanMs - (await agentTurnMs(database, ticket));
       const inspected = options.inspect === undefined ? [] : await options.inspect({ database, clean, ticket });
       driverStop.abort();
