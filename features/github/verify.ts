@@ -289,8 +289,8 @@ async function cleanSeeds(options: SimulationOptions): Promise<readonly Check[]>
       ? pass(name, `${String(options.steps)} steps a seed in ${seconds.toFixed(1)} s: ${String(sum(run => run.reads))} merge-state reads, ${String(sum(run => run.merged))} merges, ${String(sum(run => run.settled))} tasks settled, ${String(sum(run => run.lostReplies))} lost replies`)
       : fail(name, failed.slice(0, 3).map(failureOf).join('; ')),
     idle.length === 0
-      ? pass('every seed settled a task, merged or parked after its retries', `fewest settled in a seed: ${String(Math.min(...runs.map(run => run.settled)))}`)
-      : fail('every seed settled a task, merged or parked after its retries', `seeds ${idle.map(run => String(run.seed)).join(', ')} settled nothing`),
+      ? pass('every seed settled a task: merged, awaiting a review, or parked after its retries', `fewest settled in a seed: ${String(Math.min(...runs.map(run => run.settled)))}`)
+      : fail('every seed settled a task: merged, awaiting a review, or parked after its retries', `seeds ${idle.map(run => String(run.seed)).join(', ')} settled nothing`),
     unseen.length === 0 || options.seed !== undefined
       ? pass('the reads reached every merge-state value', [...seen].join(', '))
       : fail('the reads reached every merge-state value', `never read: ${unseen.join(', ')}`),

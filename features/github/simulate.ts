@@ -62,7 +62,9 @@ export type Run = {
   readonly values: ReadonlySet<string>;
 };
 
-type Step = 'open' | 'land' | 'implement' | 'done' | 'waiting';
+type Step = 'open' | 'land' | 'implement' | 'awaiting' | 'done' | 'waiting';
+
+const settledSteps: ReadonlySet<Step> = new Set(['awaiting', 'done', 'waiting']);
 
 type Task = {
   readonly key: string;
@@ -109,7 +111,7 @@ const chance = (random: () => number, odds: number): boolean => random() < odds;
 
 const now = (world: World): Date => new Date(Date.UTC(2026, 0, 1) + world.time * 1000);
 
-const active = (sim: Sim): Task | undefined => sim.tasks.find(task => task.step !== 'done' && task.step !== 'waiting');
+const active = (sim: Sim): Task | undefined => sim.tasks.find(task => !settledSteps.has(task.step));
 
 const pullOf = (sim: Sim, task: Task): FakePull | undefined => sim.world.pulls.find(pull => pull.number === task.pull);
 
@@ -194,7 +196,9 @@ function decide(sim: Sim, task: Task, head: string, value: MergeValue): void {
       return;
     case 'queued':
     case 'waiting-for-checks':
+      return;
     case 'review-required':
+      task.step = 'awaiting';
       return;
   }
 }
@@ -436,7 +440,7 @@ async function runSeed(seed: number, plan: Plan): Promise<Run> {
     const broken = observations.flatMap(judge);
     if (broken.length > 0) failure = { step, move: move.name, broken };
   }
-  return { seed, plan, failure, merged: sim.world.merges.length, settled: sim.tasks.filter(task => task.step === 'done' || task.step === 'waiting').length, reads: sim.reads, lostReplies: sim.fault.count, values: sim.values };
+  return { seed, plan, failure, merged: sim.world.merges.length, settled: sim.tasks.filter(task => settledSteps.has(task.step)).length, reads: sim.reads, lostReplies: sim.fault.count, values: sim.values };
 }
 
 export async function simulate(plans: readonly Plan[]): Promise<readonly Run[]> {
