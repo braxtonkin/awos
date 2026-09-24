@@ -3,7 +3,8 @@ import { refusal, type Database } from '../../shared/db/client.ts';
 import type { ConnectorKind, DB } from '../../shared/db/types.ts';
 import type { Loop } from '../../shared/loop.ts';
 import type { Checks } from './checks.ts';
-import { accessOnly, type AccessOnlyLogin, type Check, type Checked } from './kinds.ts';
+import { accessOnly, type AccessOnlyLogin } from '../../shared/codex-login.ts';
+import type { Check, Checked } from './kinds.ts';
 import type { SealingKey } from './seal.ts';
 import { open, type Held, type WriteBack } from './store.ts';
 

@@ -81,7 +81,7 @@ const codeChange = 'code-change';
 
 const noBrandAssertions = 'autoworker/no-brand-assertions';
 
-const accessOnlyLoginFrom = "import { accessOnly, type AccessOnlyLogin } from './kinds.ts';\n\nconst launch = (login: AccessOnlyLogin): string => login;\n";
+const accessOnlyLoginFrom = "import { accessOnly, type AccessOnlyLogin } from '../../shared/codex-login.ts';\n\nconst launch = (login: AccessOnlyLogin): string => login;\n";
 
 const plantedCheck = "import type { Checks } from './checks.ts';\nimport type { Check } from './kinds.ts';\n\nconst check: Check = { rotates: () => false, run: () => Promise.reject(new Error('planted')) };\n";
 
@@ -391,7 +391,7 @@ const violations: readonly Violation[] = [
   },
   {
     name: 'dependency-cruiser rejects a Job reaching the database through a helper',
-    file: 'services/job/main.ts',
+    file: 'services/job/through-helper.ts',
     source: "import { helper } from '../../shared/helper.ts';\nexport const job = helper;\n",
     tool: 'depcruise',
     expect: ['job-has-no-database'],
@@ -969,7 +969,7 @@ const violations: readonly Violation[] = [
   {
     name: 'eslint rejects a type assertion that makes an AccessOnlyLogin',
     file: 'features/credentials/planted-assertion.ts',
-    source: "import type { AccessOnlyLogin } from './kinds.ts';\n\nexport const login = '{}' as AccessOnlyLogin;\n",
+    source: "import type { AccessOnlyLogin } from '../../shared/codex-login.ts';\n\nexport const login = '{}' as AccessOnlyLogin;\n",
     tool: 'eslint',
     expect: [noBrandAssertions],
   },
