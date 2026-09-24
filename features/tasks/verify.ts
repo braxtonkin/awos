@@ -811,9 +811,9 @@ async function idleCheck(postgres: TestPostgres): Promise<Check> {
     if (started) await wait(900);
     const status = await engine.terminate();
     const passes = passesIn(engine.said());
-    return status === 0 && passes >= 3 && engine.errors() === ''
+    return started && status === 0 && passes >= 3 && engine.errors() === ''
       ? pass(name, engine.said().replaceAll('\n', ' '))
-      : fail(name, `exit ${String(status)} after ${String(passes)} clean passes: ${engine.said()} ${engine.errors()}`);
+      : fail(name, `started ${String(started)}, exit ${String(status)} after ${String(passes)} clean passes: ${engine.said()} ${engine.errors()}`);
   } finally {
     await scratch.drop();
   }
