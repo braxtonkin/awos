@@ -189,6 +189,8 @@ const said = (summary: string, body: string, answers: Answer | null = null): Lan
   ...(answers === null ? {} : { answers }),
 });
 
+export type TicketStatuses = { readonly start: string | null; readonly end: string | null };
+
 export type AtLand = {
   readonly task: string;
   readonly key: string;
@@ -196,6 +198,7 @@ export type AtLand = {
   readonly awaiting: boolean;
   readonly owes: boolean;
   readonly attempt: string | null;
+  readonly statuses: TicketStatuses;
   readonly record: LandRecord;
 };
 
@@ -231,10 +234,10 @@ function owedFor(action: Owing, task: AtLand, reading: Reading): Owe {
 
 function afterMerge(task: AtLand, reading: Reading): readonly Owe[] {
   const pull = task.pull.number === null ? 'the pull request' : `pull request #${String(task.pull.number)}`;
-  const comment = ticketKey.test(task.key)
-    ? [owe(actionKinds.ticketComment, { ticket: task.key, text: `AutoWorker merged ${pull} at ${reading.state.head}.`, linkPullRequest: true })]
-    : [];
-  return [...comment, owe(actionKinds.branchDelete, { repository: task.pull.repository, branch: task.pull.branch })];
+  const ticket = ticketKey.test(task.key);
+  const comment = ticket ? [owe(actionKinds.ticketComment, { ticket: task.key, text: `AutoWorker merged ${pull} at ${reading.state.head}.`, linkPullRequest: true })] : [];
+  const ended = ticket && task.statuses.end !== null ? [owe(actionKinds.ticketTransition, { ticket: task.key, status: task.statuses.end, from: task.statuses.start })] : [];
+  return [...comment, ...ended, owe(actionKinds.branchDelete, { repository: task.pull.repository, branch: task.pull.branch })];
 }
 
 async function act(land: Land, task: AtLand, attempt: string, reading: Reading, decision: Decision): Promise<string> {

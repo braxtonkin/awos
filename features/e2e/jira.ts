@@ -36,7 +36,7 @@ type NewTicket = {
   readonly summary: string;
   readonly description: string;
   readonly label: string;
-  readonly assignee: string;
+  readonly assignee: string | null;
 };
 
 export type Jira = {
@@ -89,7 +89,7 @@ export function jiraAt(site: string, email: string, token: string): Jira {
             summary: ticket.summary,
             description: ticket.description,
             labels: [ticket.label],
-            assignee: { accountId: ticket.assignee },
+            assignee: ticket.assignee === null ? null : { accountId: ticket.assignee },
           },
         })
       ).key,

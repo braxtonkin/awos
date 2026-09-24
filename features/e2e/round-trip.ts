@@ -5,10 +5,10 @@ import { setTimeout as wait } from 'node:timers/promises';
 import { sql } from 'kysely';
 import { z } from 'zod';
 import { fail, pass, type Check, type Scenario } from '../../tools/verify/check.ts';
-import { buildAttemptImage, ensureRegistry, gitServer, jobNamespace, kindAddress, kubernetes, pushByDigest, registry, seedRepository, sh, type GitServer } from '../../tools/verify/cluster.ts';
+import { buildAttemptImage, ensureRegistry, gitServer, jobNamespace, kindAddress, kubernetes, registry, seedRepository, type GitServer } from '../../tools/verify/cluster.ts';
 import { kind } from '../../tools/verify/kind.ts';
 import { withPostgres } from '../../tools/verify/postgres.ts';
-import { accessCopy, actAs, applySetup, closeStore, fakeCodexLogin, openStore, startEngine, until, type Engine, type Store } from './autoworker.ts';
+import { accessCopy, actAs, applySetup, closeStore, fakeCodexLogin, openStore, standInImage, startEngine, until, type Engine, type Store } from './autoworker.ts';
 import { standInPlan, ticking } from './codex-stand-in.ts';
 
 const owner = 'owner@example.com';
@@ -329,18 +329,6 @@ ${note}`) && prompt.indexOf(note) > prompt.indexOf('# Implement')
   } finally {
     await engine.stop();
   }
-}
-
-async function standInImage(attemptImage: string): Promise<string> {
-  const tag = `${registry.host}/autoworker-job-stand-in:round-trip`;
-  const dockerfile = [
-    `FROM ${attemptImage}`,
-    'USER root',
-    `RUN rm -f /usr/local/bin/codex && printf '#!/bin/sh\\nexec node /app/features/e2e/codex-stand-in.ts "$@"\\n' > /usr/local/bin/codex && chmod 755 /usr/local/bin/codex`,
-    'USER 10001:10001',
-  ].join('\n');
-  await sh(`printf '%s\\n' '${dockerfile.replaceAll("'", "'\\''")}' | docker build -q -t ${tag} -`);
-  return pushByDigest(tag);
 }
 
 const lanes = ['stand-in', 'send-back', 'outage', 'stop', 'retry', 'real'] as const;

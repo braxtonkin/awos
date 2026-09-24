@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import type { Database } from '../../shared/db/client.ts';
 import type { Entry } from './catalog.ts';
+import { leftovers, places, type CleanSources } from './clean.ts';
 import type { GitHub, Pull } from './github.ts';
 import type { Comment, Jira } from './jira.ts';
 import { PayloadRejected } from './payload.ts';
@@ -12,12 +13,13 @@ export type Run = {
   readonly branch: string;
   readonly ticket: string;
   readonly label: string;
-  readonly accountId: string;
+  readonly assignee: string | null;
   readonly entry: Entry;
   readonly jira: Jira;
   readonly github: GitHub;
   readonly database: Database;
   readonly workdir: string;
+  readonly clean: CleanSources;
   readonly signal: AbortSignal;
 };
 
@@ -30,37 +32,39 @@ type Outcome =
 
 type Step = { readonly name: string; readonly probe: (run: Run) => Promise<Outcome> };
 
-type Evidence = { readonly script: string; readonly before: Exit; readonly after: Exit };
+type Ran = Exit & { readonly command: string };
+
+type Evidence = { readonly script: string; readonly before: Ran; readonly after: Ran };
 
 const pending = (note: string): Outcome => ({ state: 'pending', note });
 const failed = (reason: string): Outcome => ({ state: 'failed', reason });
 const reached = (detail: string, links: readonly Link[] = []): Outcome => ({ state: 'reached', detail, links });
 
-const planHeading = 'h3. Plan';
-const evidenceHeading = 'h3. Evidence';
+export const planHeading = "AutoWorker's plan:";
+export const evidenceHeading = "AutoWorker's evidence:";
 const shownOutput = 4000;
+const fence = '```';
 
 export const planComment = (plan: string): string => `${planHeading}\n\n${plan.trim()}`;
 
+const ranText = (where: string, ran: Ran): string => `${where}: \`${ran.command}\` exited ${String(ran.code)}.\n\n${fence}\n${ran.output.trim().slice(-shownOutput)}\n${fence}`;
+
 export const evidenceComment = (evidence: Evidence): string =>
-  [
-    evidenceHeading,
-    'Reproduction script:',
-    `{code}\n${evidence.script.trim()}\n{code}`,
-    `Before the change, exit ${String(evidence.before.code)}:`,
-    `{noformat}\n${evidence.before.output.trim().slice(-shownOutput)}\n{noformat}`,
-    `After the change, exit ${String(evidence.after.code)}:`,
-    `{noformat}\n${evidence.after.output.trim().slice(-shownOutput)}\n{noformat}`,
-  ].join('\n');
+  [evidenceHeading, `Reproduction script:\n\n${fence}sh\n${evidence.script.trim()}\n${fence}`, ranText('On the base commit', evidence.before), ranText('On the change', evidence.after)].join('\n\n');
 
 const startsWith = (heading: string) => (comment: Comment) => comment.body.trimStart().startsWith(heading);
 
-function readEvidence(body: string): { readonly script: string; readonly before: number; readonly after: number } | undefined {
-  const script = /Reproduction script:\s*\{code[^}]*\}([\s\S]*?)\{code\}/.exec(body)?.[1]?.trim();
-  const before = /Before the change, exit (\d+):/.exec(body)?.[1];
-  const after = /After the change, exit (\d+):/.exec(body)?.[1];
-  if (script === undefined || before === undefined || after === undefined) return undefined;
-  return { script, before: Number(before), after: Number(after) };
+const exitIn = (body: string, where: string): number | undefined => {
+  const found = new RegExp(`${where}: [^\\n]*? exited (\\d+)\\.`).exec(body)?.[1];
+  return found === undefined ? undefined : Number(found);
+};
+
+export function readEvidence(body: string): { readonly script: string; readonly before: number; readonly after: number } | undefined {
+  const script = /Reproduction script:\s*```[a-z]*\n([\s\S]*?)```/.exec(body)?.[1]?.trim();
+  const before = exitIn(body, 'On the base commit');
+  const after = exitIn(body, 'On the change');
+  if (script === undefined || script === '' || before === undefined || after === undefined) return undefined;
+  return { script, before, after };
 }
 
 async function commentStep(run: Run, heading: string, judge: (comment: Comment) => Outcome): Promise<Outcome> {
@@ -105,8 +109,9 @@ export const steps = [
     probe: async run => {
       const issue = await run.jira.issue(run.ticket);
       if (!issue.fields.labels.includes(run.label)) return failed(`${run.ticket} lacks the label ${run.label}`);
-      if (issue.fields.assignee?.accountId !== run.accountId) return failed(`${run.ticket} is not assigned to the token's own account`);
-      return reached(`${run.ticket}, labeled ${run.label}`, [{ label: 'ticket', url: run.jira.browse(run.ticket) }]);
+      const assignee = issue.fields.assignee?.accountId ?? null;
+      if (assignee !== run.assignee) return failed(run.assignee === null ? `${run.ticket} is assigned to ${assignee ?? ''}, and the lane files it with no assignee` : `${run.ticket} is not assigned to the token's own account`);
+      return reached(`${run.ticket}, labeled ${run.label}, ${run.assignee === null ? 'with no assignee' : "assigned to the token's own account"}`, [{ label: 'ticket', url: run.jira.browse(run.ticket) }]);
     },
   },
   {
@@ -159,6 +164,13 @@ export const steps = [
         { label: 'pull request CI run', url: onPull.html_url },
         { label: 'run branch CI run', url: onBranch.html_url },
       ]);
+    },
+  },
+  {
+    name: 'clean',
+    probe: async run => {
+      const found = await leftovers(run.clean, run.ticket);
+      return found.length === 0 ? reached(`nothing left in ${places.join(', ')}`) : pending(found.map(entry => `${entry.place}: ${entry.name} ${entry.detail}`).join('; '));
     },
   },
 ] as const satisfies readonly Step[];

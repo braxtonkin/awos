@@ -291,18 +291,19 @@ async function reportLane(): Promise<readonly Check[]> {
         steps: runs,
         links: linksFrom(jira.browse(ticket), [{ links: reportLinks }]),
         overheadMs: 4000,
+        autoworkerOverheadMs: 90_000,
       });
       const posted = await jira.comment(ticket, body);
       const link = jira.commentLink(ticket, posted);
       const sent = fake.posted[0]?.body ?? '';
-      const rows = ['|specify|1|pass|60 s|1,200|', '|implement|2|pass|300 s|5,400|', '|verify|3|pass|120 s|2,300|', '|land|4|pass|20 s|none recorded|', 'Input tokens in all: 8,900, from 3 of 4 attempts.'];
+      const rows = ['|specify|1|pass|60 s|1,200|', '|implement|2|pass|300 s|5,400|', '|verify|3|pass|120 s|2,300|', '|land|4|pass|20 s|none recorded|', 'Input tokens in all: 8,900, from 3 of 4 attempts.', "AutoWorker's overhead, the run's time to clean less the agent's turn time: 90 s."];
       const missingRows = rows.filter(row => !sent.includes(row));
       checks.push(fake.posted.length === 1 && fake.posted[0]?.path === `/rest/api/2/issue/${ticket}/comment` ? pass('the report is posted once as a comment on the ticket', fake.posted[0].path) : fail('the report is posted once as a comment on the ticket', JSON.stringify(fake.posted.map(entry => entry.path))));
       checks.push(missingRows.length === 0 ? pass('the report holds each step with its duration and input tokens', rows.join(' ')) : fail('the report holds each step with its duration and input tokens', `missing ${missingRows.join(' ')}`));
       const missingLinks = [{ label: 'ticket', url: jira.browse(ticket) }, ...reportLinks].filter(entry => !sent.includes(`[${entry.label}|${entry.url}]`)).map(entry => entry.label);
       checks.push(missingLinks.length === 0 && !sent.includes('Missing:') ? pass('the report links the ticket, the pull request, the merge commit, and both CI runs', ['ticket', ...reportLinks.map(entry => entry.label)].join(', ')) : fail('the report links the ticket, the pull request, the merge commit, and both CI runs', `missing ${missingLinks.join(', ')}`));
       checks.push(link.startsWith(`${fake.url}/browse/${ticket}?focusedCommentId=`) ? pass('the report comment has a link', link) : fail('the report comment has a link', link));
-      const partial = renderReport({ branch: 'e2e/run-clean', driver: 'none', entry: 'titleCase', furthest: 'ticket filed', stop: 'timed out', timeline: [], steps: [], links: linksFrom(jira.browse(ticket), []), overheadMs: 0 });
+      const partial = renderReport({ branch: 'e2e/run-clean', driver: 'none', entry: 'titleCase', furthest: 'ticket filed', stop: 'timed out', timeline: [], steps: [], links: linksFrom(jira.browse(ticket), []), overheadMs: 0, autoworkerOverheadMs: undefined });
       checks.push(partial.includes('Missing: pull request, merge commit, pull request CI run, run branch CI run') ? pass('a report without the later links says which are missing', 'pull request, merge commit, pull request CI run, run branch CI run') : fail('a report without the later links says which are missing', partial));
     } finally {
       await fake.close();

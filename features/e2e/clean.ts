@@ -3,7 +3,7 @@ import type { Database } from '../../shared/db/client.ts';
 import type { Verdict } from '../../shared/db/types.ts';
 import { reduce } from '../../shared/items.ts';
 import { fail, pass, type Check } from '../../tools/verify/check.ts';
-import { taskFor } from './record.ts';
+import { attemptBranches, pullRequestBranches, taskFor } from './record.ts';
 
 export const places = ['task', 'outbox', 'events', 'fragments', 'replay', 'cluster', 'environments', 'github'] as const;
 
@@ -125,7 +125,11 @@ const probes: Readonly<Record<Exclude<Place, 'task'>, (scope: Scope) => Promise<
       .execute();
     return rows.map(row => leftover('environments', `Verify environment ${row.id} (${row.provider})`, `of attempt ${row.attempt_id} was never stopped`));
   },
-  github: async ({ sources, ticket }) => (await sources.branchesStartingWith(`autoworker/${ticket}-`)).map(branch => leftover('github', `branch ${branch}`, `is still on GitHub for ${ticket}`)),
+  github: async ({ sources, ticket, task }) => {
+    const recorded = [...new Set([...(await attemptBranches(sources.database, task)).map(found => found.branch), ...(await pullRequestBranches(sources.database, task))])];
+    const listed = new Set((await Promise.all(recorded.map(branch => sources.branchesStartingWith(branch)))).flat());
+    return recorded.filter(branch => listed.has(branch)).map(branch => leftover('github', `branch ${branch}`, `is still on GitHub for ${ticket}`));
+  },
 };
 
 export async function leftovers(sources: CleanSources, ticket: string): Promise<readonly Leftover[]> {
