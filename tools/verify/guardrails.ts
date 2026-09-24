@@ -399,7 +399,7 @@ const violations: readonly Violation[] = [
   },
   {
     name: 'dependency-cruiser rejects a Job reaching the database through a helper',
-    file: 'services/job/main.ts',
+    file: 'services/job/through-helper.ts',
     source: "import { helper } from '../../shared/helper.ts';\nexport const job = helper;\n",
     tool: 'depcruise',
     expect: ['job-has-no-database'],

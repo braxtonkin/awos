@@ -3,7 +3,8 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { z } from 'zod';
-import { codexLogin, refreshable, type Check, type Checked } from './kinds.ts';
+import { codexLogin } from '../../shared/codex-login.ts';
+import { refreshable, type Check, type Checked } from './kinds.ts';
 
 export type CodexCheckSettings = { readonly timeoutMs: number };
 

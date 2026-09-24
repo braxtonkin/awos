@@ -10,6 +10,9 @@ import { writeBack } from '../../features/credentials/store.ts';
 import { providerProblems, reconcile } from '../../features/environments/lifecycle.ts';
 import { providersByName } from '../../features/environments/provider.ts';
 import { enqueue } from '../../features/outbox/enqueue.ts';
+import { connectCluster } from '../../features/jobs/launch.ts';
+import { jobSettings } from '../../features/jobs/settings.ts';
+import { sweep } from '../../features/jobs/sweep.ts';
 import { outboxLoops, registryOf } from '../../features/outbox/perform.ts';
 import { scheduleSource } from '../../features/routines/schedule-source.ts';
 import { postgresNow, scheduler } from '../../features/routines/scheduler.ts';
@@ -45,6 +48,7 @@ const settings = z.object({
   ENVIRONMENTS_EVERY_MS: milliseconds.default(30_000),
   ENVIRONMENT_START_DEADLINE_MS: milliseconds.default(600_000),
   LAND_EVERY_MS: milliseconds.default(10_000),
+  ...jobSettings,
 });
 
 type Settings = z.infer<typeof settings>;
@@ -73,6 +77,7 @@ const loopsFor = (given: Settings, key: SealingKey | undefined): readonly Loop[]
     enqueue,
     tasks: { claim, renew, handOff, approveFromOutside, finish: (db, attempt, report, now, then) => advance(db, workflows, attempt, report, now, then) },
   }),
+  ...(given.JOB_IMAGE === undefined ? [] : [sweep({ everyMs: given.SWEEP_EVERY_MS, cluster: connectCluster(given.JOB_NAMESPACE) })]),
   ...outboxLoops({ everyMs: given.OUTBOX_EVERY_MS, leaseMs: given.OUTBOX_LEASE_MS, marginMs: given.OUTBOX_MARGIN_MS, maxTries: given.OUTBOX_MAX_TRIES, clock: realClock, registry: actions }),
   ...(key === undefined
     ? []
@@ -116,6 +121,7 @@ async function run(given: Settings, key: SealingKey | undefined): Promise<void> 
     }
     const loops = loopsFor(given, key);
     if (key === undefined) say('The engine has no CREDENTIAL_KEY, so it opens and checks no credentials.');
+    if (given.JOB_IMAGE === undefined) say('The engine has no JOB_IMAGE, so it launches no Jobs and sweeps none.');
     say(`The engine runs the workflows ${[...workflows.keys()].join(', ')}, the Verify providers ${[...providers.keys()].join(', ')}, and the loops ${loops.map(loop => `${loop.name} every ${String(loop.everyMs)} ms`).join(', ')}.`);
     await Promise.all(loops.map(loop => runLoop(loop, db, realClock, stop.signal, say)));
     say('The engine stopped.');
