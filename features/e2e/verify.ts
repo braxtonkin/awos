@@ -30,16 +30,20 @@ const schemas: Readonly<Record<string, z.ZodType>> = {
   catalog: Catalog,
 };
 
-const openWorld = (name: WorldName, repository: string): Promise<World> => {
+const agentNames = ['stand-in', 'real'] as const;
+
+type AgentName = (typeof agentNames)[number];
+
+const openWorld = (name: WorldName, repository: string, agent: AgentName): Promise<World> => {
   switch (name) {
     case 'sandbox':
       return Promise.resolve(sandboxWorld(repository, accessCopy));
     case 'local':
-      return localWorld(repository);
+      return localWorld(repository, agent);
   }
 };
 
-async function localWorld(repository: string): Promise<World> {
+async function localWorld(repository: string, agent: AgentName): Promise<World> {
   const broken = (checksOf(await kind.run(['up']))).find(check => !check.passed);
   if (broken !== undefined) throw new Error(`kind did not come up: ${broken.name}, ${broken.detail}`);
   const local = await startLocalWorld(await kindAddress(), repository);
@@ -50,8 +54,8 @@ async function localWorld(repository: string): Promise<World> {
     engine: {
       settings: { ...local.engine.settings },
       secrets: { github: local.engine.secrets.GITHUB_TOKEN, jiraLogin: local.engine.secrets.AUTOWORKER_JIRA_LOGIN },
-      codexLogin: () => Promise.resolve(fakeCodexLogin()),
-      image: standInImage,
+      codexLogin: agent === 'real' ? accessCopy : () => Promise.resolve(fakeCodexLogin()),
+      image: agent === 'real' ? attemptImage => Promise.resolve(attemptImage) : standInImage,
       trustLogins: true,
     },
     stop: local.stop,
@@ -66,6 +70,7 @@ const shuffled = <T>(items: readonly T[]): readonly T[] =>
 
 type Series = {
   readonly world: WorldName;
+  readonly agent: AgentName;
   readonly repository: string;
   readonly driver: DriverName;
   readonly entries: readonly Entry[];
@@ -87,7 +92,7 @@ const tokensLine = (result: RunResult): string =>
   result.steps.map(step => `${step.step} ${step.inputTokens === undefined ? 'none' : String(step.inputTokens)}`).join(', ') || 'no attempts';
 
 async function runSeries(series: Series): Promise<readonly Line[]> {
-  const world = await openWorld(series.world, series.repository);
+  const world = await openWorld(series.world, series.repository, series.agent);
   const checks: Line[] = [];
   const results: RunResult[] = [];
   try {
@@ -114,6 +119,7 @@ async function runSeries(series: Series): Promise<readonly Line[]> {
 const seriesOptions = {
   driver: { type: 'string', default: 'autoworker' },
   world: { type: 'string', default: 'sandbox' },
+  agent: { type: 'string', default: 'stand-in' },
   runs: { type: 'string', default: '1' },
   fault: { type: 'string' },
   'run-as': { type: 'string', default: 'assignee' },
@@ -133,6 +139,8 @@ function seriesFrom(values: Parsed, inspect: Inspect | undefined): Series | Chec
   if (driver === undefined) return fail('driver named', `--driver must be one of ${driverNames.join(', ')}`);
   const world = worldNames.find(name => name === values.world);
   if (world === undefined) return fail('world named', `--world must be one of ${worldNames.join(', ')}`);
+  const agent = agentNames.find(name => name === values.agent);
+  if (agent === undefined) return fail('agent named', `--agent must be one of ${agentNames.join(', ')}`);
   const fault = values.fault === undefined ? undefined : faultNames.find(name => name === values.fault);
   if (values.fault !== undefined && fault === undefined) return fail('fault named', `--fault must be one of ${faultNames.join(', ')}`);
   if (fault !== undefined && driver !== 'autoworker') return fail('fault needs AutoWorker', '--fault works only with --driver autoworker');
@@ -148,6 +156,7 @@ function seriesFrom(values: Parsed, inspect: Inspect | undefined): Series | Chec
   if (values.entry !== undefined && named === undefined) return fail('entry named', `--entry must be one of ${catalog.map(candidate => candidate.name).join(', ')}`);
   return {
     world,
+    agent: world === 'sandbox' ? 'real' : agent,
     repository: values.repository,
     driver,
     entries: named === undefined ? shuffled(catalog).slice(0, runs) : [named],

@@ -5,6 +5,7 @@ import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { connectCluster } from '../../shared/cluster.ts';
 import { connect, type Database } from '../../shared/db/client.ts';
+import { review } from '../../shared/review.ts';
 import { fail, info, pass, type Check, type Line } from '../../tools/verify/check.ts';
 import { withPostgres } from '../../tools/verify/postgres.ts';
 import { endStatus, teamAccount, type Fault, type RunAs } from './autoworker.ts';
@@ -159,6 +160,21 @@ function reportReadBack(posted: Comment | undefined, runs: readonly StepRun[], r
   return missing.length === 0 && !posted.body.includes('Missing:') ? pass(name, `comment ${posted.id}, ${String(posted.body.length)} characters`) : fail(name, `missing ${missing.join(', ')}${posted.body.includes('Missing:') ? ', and it lists missing links' : ''}`);
 }
 
+const shapeOf = (value: unknown): string => {
+  if (value === null || typeof value !== 'object') return typeof value;
+  if (Array.isArray(value)) return 'array';
+  return `object with ${Object.keys(value).join(', ') || 'no keys'}`;
+};
+
+async function reviewLines(database: Database, ticket: string): Promise<readonly string[]> {
+  const rows = await database.selectFrom('attempt').innerJoin('task', 'task.id', 'attempt.task_id').select(['attempt.id', 'attempt.step', 'attempt.verdict', 'attempt.output']).where('task.key', '=', ticket).orderBy('attempt.id').execute();
+  return rows.map(row => {
+    const parsed = review.safeParse(row.output);
+    const said = parsed.success ? `review ${parsed.data.outcome}: ${parsed.data.summary.slice(0, 160)}` : `reply did not parse as a review, its shape is ${shapeOf(row.output)}`;
+    return `attempt ${row.id} ${row.step} ${row.verdict ?? 'live'}, ${said}`;
+  });
+}
+
 export async function runEndToEnd(world: World, options: Options, out: (line: string) => void): Promise<RunResult> {
   const started = Date.now();
   const deadline = started + options.timeoutMs;
@@ -241,6 +257,7 @@ export async function runEndToEnd(world: World, options: Options, out: (line: st
       await Promise.race([driving, new Promise(resolve => setTimeout(resolve, driverStopWaitMs))]);
       out(`furthest step: ${result.reached.at(-1)?.name ?? 'none'}`);
       const runs = await stepRuns(database, ticket);
+      for (const line of await reviewLines(database, ticket)) out(line);
       const { mainAfter, reportLink, posted, sideChecks } = await timed(async () => {
         const sideChecks = [duplicateComments(await jira.comments(ticket)), await pullRequestCheck(github, branch, ticket)];
         const comment = await jira.comment(
