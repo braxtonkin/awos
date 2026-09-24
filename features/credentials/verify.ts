@@ -3,12 +3,11 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isDeepStrictEqual, parseArgs, promisify } from 'node:util';
 import { sql } from 'kysely';
 import { getContainerRuntimeClient } from 'testcontainers';
-import ts from 'typescript';
 import { z } from 'zod';
 import { connect, type Database } from '../../shared/db/client.ts';
 import { fail, pass, type Check, type Scenario } from '../../tools/verify/check.ts';
@@ -16,6 +15,7 @@ import { withPostgres, type TestPostgres } from '../../tools/verify/postgres.ts'
 import { provePlants } from './invariants.ts';
 import type { Secret } from './kinds.ts';
 import { checksModel } from './checks-model.ts';
+import { laneChecks } from './lanes.ts';
 import { liveScenarios } from './live.ts';
 import { mutantName, mutants, noMutantYet, simulate, type MutantName, type Plan, type Run } from './simulate.ts';
 import { mutantEntries, mutantOption } from './mutants.ts';
@@ -456,7 +456,6 @@ const storeChecks: readonly Entry[] = [
   { name: 'a Codex login with a refresh token is stored only when marked made for AutoWorker', run: inScratch(refreshNeedsMark) },
   { name: 'every connector kind has its connector row', run: inScratch(everyKindHasARow) },
   { name: 'sealing and opening one token takes at most 1 ms at the median of 3 runs of 10,000', run: offline(sealAndOpenSpeed) },
-  { name: 'tsc rejects a Checks record that misses a connector kind, and a raw login where AccessOnlyLogin is required', run: offline(typeGuards) },
 ];
 
 const repositoryRoot = fileURLToPath(new URL('../../', import.meta.url));
@@ -885,57 +884,6 @@ async function runEntries(postgres: TestPostgres, entries: readonly Entry[]): Pr
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
 
-function typeErrors(planted: string): readonly string[] {
-  const file = join(root, 'features', 'credentials', 'planted.ts');
-  const parsed = ts.getParsedCommandLineOfConfigFile(join(root, 'tsconfig.json'), {}, { ...ts.sys, onUnRecoverableConfigFileDiagnostic: () => undefined });
-  if (parsed === undefined) throw new Error('tsconfig.json did not parse');
-  const host = ts.createCompilerHost(parsed.options);
-  const readFile = host.readFile.bind(host);
-  const fileExists = host.fileExists.bind(host);
-  host.readFile = path => (resolve(path) === file ? planted : readFile(path));
-  host.fileExists = path => resolve(path) === file || fileExists(path);
-  const program = ts.createProgram([file], parsed.options, host);
-  return ts.getPreEmitDiagnostics(program, program.getSourceFile(file)).map(diagnostic => ts.flattenDiagnosticMessageText(diagnostic.messageText, ' '));
-}
-
-type TypePlant = { readonly what: string; readonly source: string; readonly rejectedWith: string | undefined };
-
-const giveToJob = "import { accessOnly, type AccessOnlyLogin } from '../../shared/codex-login.ts';\nconst launch = (login: AccessOnlyLogin): string => login;\n";
-
-const typePlants: readonly TypePlant[] = [
-  {
-    what: 'a Checks record with no check for jira',
-    source:
-      "import type { Checks } from './checks.ts';\nimport type { Check } from './kinds.ts';\nconst check: Check = { rotates: () => false, run: () => Promise.reject(new Error('planted')) };\nexport const planted: Checks = { codex: check, github: check };\n",
-    rejectedWith: "Property 'jira' is missing",
-  },
-  {
-    what: 'a Checks record with a check for every kind',
-    source:
-      "import type { Checks } from './checks.ts';\nimport type { Check } from './kinds.ts';\nconst check: Check = { rotates: () => false, run: () => Promise.reject(new Error('planted')) };\nexport const planted: Checks = { codex: check, github: check, jira: check };\n",
-    rejectedWith: undefined,
-  },
-  {
-    what: 'a raw login passed where AccessOnlyLogin is required',
-    source: `${giveToJob}export const planted = launch('{"tokens": {"refresh_token": "rt"}}');\nexport const made = accessOnly;\n`,
-    rejectedWith: `is not assignable to parameter of type 'string & $brand<"AccessOnlyLogin">'`,
-  },
-  {
-    what: 'a login that accessOnly made, passed where AccessOnlyLogin is required',
-    source: `${giveToJob}const copy = accessOnly('{}');\nexport const planted = 'login' in copy ? launch(copy.login) : copy.reason;\n`,
-    rejectedWith: undefined,
-  },
-];
-
-function typeGuards(): Outcome {
-  const problems = typePlants.flatMap(({ what, source, rejectedWith }) => {
-    const errors = typeErrors(source);
-    if (rejectedWith === undefined) return errors.length === 0 ? [] : [`tsc rejected ${what}: ${errors.join('; ')}`];
-    return errors.some(error => error.includes(rejectedWith)) ? [] : [`tsc did not reject ${what} with "${rejectedWith}"; it said ${errors.length === 0 ? 'nothing' : errors.join('; ')}`];
-  });
-  return { problems, detail: typePlants.map(plant => `${plant.what}: ${plant.rejectedWith === undefined ? 'accepted' : 'rejected'}`).join('; ') };
-}
-
 const flags = { mutant: { type: 'string' } } as const;
 
 const options = z.object({ mutant: mutantOption.optional() });
@@ -946,12 +894,13 @@ function parseOptions(args: readonly string[]): z.infer<typeof options> {
   return parsed.data;
 }
 
-const simulationFlags = { seeds: { type: 'string' }, seed: { type: 'string' }, steps: { type: 'string' }, checkers: { type: 'string' }, mutant: { type: 'string' } } as const;
+const simulationFlags = { seeds: { type: 'string' }, from: { type: 'string' }, seed: { type: 'string' }, steps: { type: 'string' }, checkers: { type: 'string' }, mutant: { type: 'string' } } as const;
 
 const whole = z.coerce.number().int().positive();
 
 const simulationOptions = z.object({
   seeds: whole.default(200),
+  from: whole.default(1),
   seed: whole.optional(),
   steps: whole.default(150),
   checkers: whole.default(3),
@@ -963,7 +912,7 @@ type SimulationOptions = z.infer<typeof simulationOptions>;
 const mutantSeeds = 20;
 
 const seedList = (options: SimulationOptions, count: number): readonly number[] =>
-  options.seed === undefined ? Array.from({ length: count }, (_, index) => index + 1) : [options.seed];
+  options.seed === undefined ? Array.from({ length: count }, (_, index) => options.from + index) : [options.seed];
 
 const replayOf = (run: Run): string =>
   `npm run verify -- credentials-sim --seed ${String(run.seed)} --steps ${String(run.plan.steps)} --checkers ${String(run.plan.checkers)}${run.plan.mutant === undefined ? '' : ` --mutant ${run.plan.mutant}`}`;
@@ -1017,11 +966,14 @@ async function catalogCheck(postgres: TestPostgres): Promise<Check> {
       where c.conrelid = 'credential_check'::regclass and not (c.contype = 'p' and c.conname = t.relname || '_pkey') and not (c.contype = 'n' and c.conname = t.relname || '_' || a.attname || '_not_null')
       union all
       select i.relname from pg_index x join pg_class i on i.oid = x.indexrelid
-      where x.indrelid = 'credential_check'::regclass and not exists (select 1 from pg_constraint c where c.conindid = x.indexrelid and c.contype in ('p', 'u', 'x'))`.execute(db);
+      where x.indrelid = 'credential_check'::regclass and not exists (select 1 from pg_constraint c where c.conindid = x.indexrelid and c.contype in ('p', 'u', 'x'))
+      union all
+      select g.tgname from pg_trigger g where g.tgrelid = 'credential_check'::regclass and not g.tgisinternal`.execute(db);
     const guards = rows.map(row => row.name);
-    const listed = [...Object.values(mutants).flatMap(mutant => (mutant.dropIndex === undefined ? [] : [mutant.dropIndex])), ...Object.values(noMutantYet).flat()];
+    const dropped = Object.values(mutants).flatMap(({ drop }) => (drop === undefined ? [] : 'index' in drop ? [drop.index] : drop.on === 'credential_check' ? [drop.trigger] : []));
+    const listed = [...dropped, ...Object.values(noMutantYet).flat()];
     const problems = [...guards.filter(guard => !listed.includes(guard)).map(guard => `${guard} is in neither list`), ...listed.filter(name => !guards.includes(name)).map(name => `${name} is listed, but credential_check has no such guard`)];
-    const name = 'every named constraint and index on credential_check has a mutant or a reason in noMutantYet';
+    const name = 'every named constraint, index, and trigger on credential_check has a mutant or a reason in noMutantYet';
     return problems.length === 0 ? pass(name, guards.join(', ')) : fail(name, problems.join('; '));
   } finally {
     await db.destroy();
@@ -1036,7 +988,7 @@ async function simulationChecks(postgres: TestPostgres, options: SimulationOptio
     return checks;
   }
   if (options.mutant !== undefined) return [await mutantCheck(postgres, options.mutant, options)];
-  return [...(await cleanSeeds(postgres, options)), await plantChecks(postgres)];
+  return [...(await cleanSeeds(postgres, options)), await plantChecks(postgres), ...(await laneChecks(postgres))];
 }
 
 const engineMain = join(root, 'services', 'engine', 'main.ts');

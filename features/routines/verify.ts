@@ -8,7 +8,7 @@ import { parseArgs } from 'node:util';
 import { sql } from 'kysely';
 import { z } from 'zod';
 import { connect, type Database } from '../../shared/db/client.ts';
-import { runLoop, type Clock } from '../../shared/loop.ts';
+import { neverStops, runLoop, type Clock } from '../../shared/loop.ts';
 import type { Workflow } from '../../shared/workflow.ts';
 import { fail, pass, type Check, type Scenario } from '../../tools/verify/check.ts';
 import { defineModel, type Shape } from '../../tools/verify/models.ts';
@@ -434,7 +434,7 @@ async function timedPass(postgres: TestPostgres, routines: number): Promise<numb
     for (let made = 0; made < routines; made += 1) await seedRoutine(db, world, `Routine ${String(made)}`, 'schedule', post);
     const clock = steppedClock(Date.parse('2026-01-01T00:00:05.000Z'));
     const started = performance.now();
-    await perfScheduler(clock).pass(db, { now: clock.now(), late: () => false });
+    await perfScheduler(clock).pass(db, { now: clock.now(), late: () => false, stop: neverStops });
     return performance.now() - started;
   } finally {
     await db.destroy();

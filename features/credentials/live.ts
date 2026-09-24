@@ -69,7 +69,7 @@ async function codexScenario(args: readonly string[]): Promise<readonly Check[]>
     const detail = `run ${String(index + 1)}: ${describe(probe.checked)}; ${(probe.wallMs / 1000).toFixed(1)} s; ${probe.inputTokens === null ? 'no usage reported' : `${String(probe.inputTokens)} input tokens`}`;
     return probe.checked.verdict === expected ? pass(`verdict is ${expected}`, detail) : fail(`verdict is ${expected}`, detail);
   });
-  const unchanged = probes.every(probe => probe.checked.rotated === undefined);
+  const unchanged = probes.every(probe => probe.checked.refresh.kind !== 'rotated');
   const checks = [
     pass('login is access-only', `${values.login} holds no refresh token`),
     ...perRun,

@@ -4,7 +4,7 @@ import { sql, type RawBuilder } from 'kysely';
 import { z } from 'zod';
 import { performer, type ActionSpec, type Limits, type Lookup, type Outcome, type Owed, type Owe } from '../../shared/actions.ts';
 import { connect, refusal, type Database } from '../../shared/db/client.ts';
-import { realClock, runLoop, type Clock } from '../../shared/loop.ts';
+import { neverStops, realClock, runLoop, type Clock } from '../../shared/loop.ts';
 import { inTransaction } from '../../shared/transaction.ts';
 import type { TestPostgres } from '../../tools/verify/postgres.ts';
 import { enqueue } from './enqueue.ts';
@@ -587,7 +587,7 @@ async function drain(sim: Sim): Promise<void> {
     sim.time += lease.leaseMs + lease.marginMs;
     let rounds = 0;
     await runExpire(sim, db);
-    await loop.pass(db, { now: new Date(sim.time), late: () => (rounds += 1) > 200 });
+    await loop.pass(db, { now: new Date(sim.time), late: () => (rounds += 1) > 200, stop: neverStops });
   }
 }
 
@@ -753,7 +753,7 @@ export async function probeRollback(postgres: TestPostgres): Promise<{ readonly 
       if (!(error instanceof RolledBack)) throw error;
     });
     const clock = realClock;
-    await outbox({ everyMs: 1_000, clock, registry: registryFor(instantTarget(db), undefined, false), ...lease }).pass(db, { now: clock.now(), late: () => false });
+    await outbox({ everyMs: 1_000, clock, registry: registryFor(instantTarget(db), undefined, false), ...lease }).pass(db, { now: clock.now(), late: () => false, stop: neverStops });
     return {
       rows: await scalar(db, sql<{ value: string }>`select count(*) as value from outbox`),
       effects: await scalar(db, sql<{ value: string }>`select count(*) as value from sim_effect`),

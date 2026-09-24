@@ -4,6 +4,7 @@ import { setTimeout as wait } from 'node:timers/promises';
 import { parseArgs } from 'node:util';
 import { z } from 'zod';
 import { connect, type Database } from '../../shared/db/client.ts';
+import { neverStops } from '../../shared/loop.ts';
 import { fail, pass, type Check, type Scenario } from '../../tools/verify/check.ts';
 import { withPostgres, type TestPostgres } from '../../tools/verify/postgres.ts';
 import { openAttempt, provePlants, world, type PlantProof } from './invariants.ts';
@@ -143,7 +144,7 @@ async function liveChecks(postgres: TestPostgres): Promise<readonly Check[]> {
     const said = started.kind === 'started' ? describe(started.environment) : JSON.stringify(started);
     process.stdout.write(`${said}\n`);
     await endAttempt(db, attempt);
-    const lines = await reconcile({ providers, everyMs: 30_000, startDeadlineMs: liveStart.startDeadlineMs }).pass(db, { now: new Date(), late: () => false });
+    const lines = await reconcile({ providers, everyMs: 30_000, startDeadlineMs: liveStart.startDeadlineMs }).pass(db, { now: new Date(), late: () => false, stop: neverStops });
     const stopped = await stoppedCount(db);
     process.stdout.write(`stopped ${String(stopped)}\n`);
     await db.updateTable('repository').set({ fast_test_command: null }).execute();

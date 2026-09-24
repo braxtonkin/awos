@@ -5,7 +5,7 @@ import { z } from 'zod';
 import { agentSteps } from '../../features/code-change/stage-output.ts';
 import { workflow as codeChange } from '../../features/code-change/workflow.ts';
 import { bridgeListener, rules } from '../../features/bridge/engine.ts';
-import { checkLoop, type CheckLoopSettings } from '../../features/credentials/check-loop.ts';
+import { checkLeaseMarginMs, checkLoop, type CheckLoopSettings } from '../../features/credentials/check-loop.ts';
 import { landLoops } from '../../features/code-change/land-loop.ts';
 import { coreReview } from '../../features/code-change/land.ts';
 import { checksFor } from '../../features/credentials/checks.ts';
@@ -74,6 +74,9 @@ const settings = z.object({
   BRIDGE_POLL_MS: milliseconds.default(250),
   BRIDGE_KEEPALIVE_MS: milliseconds.default(5_000),
   BRIDGE_BODY_LIMIT_BYTES: z.coerce.number().int().positive().default(64 * 1024 * 1024),
+}).refine(given => given.CHECK_LEASE_MS > given.CHECK_TIMEOUT_MS + checkLeaseMarginMs, {
+  path: ['CHECK_LEASE_MS'],
+  message: `must be more than CHECK_TIMEOUT_MS plus ${String(checkLeaseMarginMs)} ms, so a check that runs until its timeout still holds its lease when it finishes`,
 });
 
 type Settings = z.infer<typeof settings>;

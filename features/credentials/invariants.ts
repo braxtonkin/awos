@@ -2,6 +2,7 @@ import { sql, type RawBuilder } from 'kysely';
 import { z } from 'zod';
 import { connect, type Database } from '../../shared/db/client.ts';
 import type { TestPostgres } from '../../tools/verify/postgres.ts';
+import { refreshWindowMs } from './check-loop.ts';
 
 type Statement = RawBuilder<unknown>;
 
@@ -19,6 +20,16 @@ export const simulatorSchema: readonly Statement[] = [
       end
       $$`,
   sql`create trigger sim_remember after insert or update of ciphertext, action_id, expires_at on credential for each row execute function sim_remember()`,
+  sql`create table sim_final_change (id bigint generated always as identity primary key, check_id bigint not null, before jsonb not null, after jsonb not null)`,
+  sql`create function sim_watch_finished() returns trigger language plpgsql as $$
+      begin
+        if old.finished_at is not null and to_jsonb(old) is distinct from to_jsonb(new) then
+          insert into sim_final_change (check_id, before, after) values (old.id, to_jsonb(old), to_jsonb(new));
+        end if;
+        return new;
+      end
+      $$`,
+  sql`create trigger sim_watch_finished after update on credential_check for each row execute function sim_watch_finished()`,
 ];
 
 const world: readonly Statement[] = [
@@ -27,6 +38,9 @@ const world: readonly Statement[] = [
   sql`insert into credential (connector, scope, person_id, ciphertext, key_version, expires_at, action_id)
       values ('codex', 'personal', 1, decode(repeat('ab', 44), 'hex'), 1, timestamptz '2026-01-01T01:00:00Z', '00000000-0000-4000-8000-000000000001')`,
 ];
+
+const finishedCheck = sql`insert into credential_check (credential_id, replacement, opened_expires_at, refreshes, checker, claimed_at, lease_until, finished_at, outcome)
+  values (1, '00000000-0000-4000-8000-000000000001', timestamptz '2026-01-01T01:00:00Z', false, 'planted', timestamptz '2026-01-01T00:00:00Z', timestamptz '2026-01-01T00:05:00Z', timestamptz '2026-01-01T00:01:00Z', 'valid')`;
 
 const liveCheck = sql`insert into credential_check (credential_id, replacement, opened_expires_at, refreshes, checker, claimed_at, lease_until)
   values (1, '00000000-0000-4000-8000-000000000001', timestamptz '2026-01-01T01:00:00Z', false, 'planted', timestamptz '2026-01-01T00:00:00Z', timestamptz '2026-01-01T00:05:00Z')`;
@@ -62,10 +76,20 @@ export const properties = {
       where newer.expires_at > c.expires_at`,
     plants: [
       {
-        setup: [sql`update credential set expires_at = timestamptz '2026-01-01T02:00:00Z' where id = 1`],
+        setup: [sql`drop trigger stored_login_is_newest on credential`, sql`update credential set expires_at = timestamptz '2026-01-01T02:00:00Z' where id = 1`],
         violation: sql`update credential set expires_at = timestamptz '2026-01-01T01:30:00Z' where id = 1`,
       },
     ],
+  },
+  OneCheckPerLogin: {
+    breaks: sql`select c.credential_id, c.replacement, c.opened_expires_at, c.claimed_at >= c.opened_expires_at - make_interval(secs => ${refreshWindowMs / 1000}) as in_window, count(*) as done
+      from credential_check c where c.outcome in ('valid', 'invalid')
+      group by c.credential_id, c.replacement, c.opened_expires_at, in_window having count(*) > 1`,
+    plants: [{ setup: [finishedCheck], violation: finishedCheck }],
+  },
+  FinishedCheckIsFinal: {
+    breaks: sql`select f.check_id, f.before, f.after from sim_final_change f`,
+    plants: [{ setup: [sql`drop trigger finished_check_is_final on credential_check`, finishedCheck], violation: sql`update credential_check set outcome = 'invalid' where checker = 'planted'` }],
   },
   JobsNeverRefresh: {
     breaks: sql`select r.token, r.by_actor from sim_refresh r where r.by_actor like 'job%'`,

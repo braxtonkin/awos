@@ -82,13 +82,13 @@ export function attempts(settings: AttemptSettings): Loop {
     ready: async (db, runAs): Promise<Ready> => {
       const state = await db.selectFrom('credential').select('credential.state').where('credential.connector', '=', 'codex').where('credential.person_id', '=', runAs).executeTakeFirst();
       if (state !== undefined && state.state === null) return { later: 'its Codex login has not been checked yet' };
-      const login = await loginForJob(db, settings.checks, runAs);
+      const login = await loginForJob(db, settings.checks, runAs, settings.jobs.deadlineSeconds * 1000);
       if ('refused' in login) return { refused: sentence(login.reason) };
       const token = await githubToken(settings, runAs);
       return 'refused' in token ? token : { ready: true };
     },
     launch: async (db, request): Promise<Launched> => {
-      const login = await loginForJob(db, settings.checks, request.runAs.id);
+      const login = await loginForJob(db, settings.checks, request.runAs.id, settings.jobs.deadlineSeconds * 1000);
       if ('refused' in login) return { refused: sentence(login.reason) };
       const token = await githubToken(settings, request.runAs.id);
       if ('refused' in token) return token;

@@ -6,7 +6,7 @@ export type Clock = {
   readonly sleep: (ms: number, stop: AbortSignal) => Promise<void>;
 };
 
-export type Pass = { readonly now: Date; readonly late: () => boolean };
+export type Pass = { readonly now: Date; readonly late: () => boolean; readonly stop: AbortSignal };
 
 export type Loop = {
   readonly name: string;
@@ -14,6 +14,8 @@ export type Loop = {
   readonly resume?: (db: Database, now: Date) => Promise<readonly string[]>;
   readonly pass: (db: Database, pass: Pass) => Promise<readonly string[]>;
 };
+
+export const neverStops: AbortSignal = new AbortController().signal;
 
 export const realClock: Clock = {
   now: () => new Date(),
@@ -45,7 +47,7 @@ export async function runLoop(loop: Loop, db: Database, clock: Clock, stop: Abor
         now = clock.now();
       }
       resuming = false;
-      (await loop.pass(db, { now, late: () => elapsed() > loop.everyMs })).forEach(say);
+      (await loop.pass(db, { now, late: () => elapsed() > loop.everyMs, stop })).forEach(say);
     } catch (error) {
       failed += 1;
       resuming = true;

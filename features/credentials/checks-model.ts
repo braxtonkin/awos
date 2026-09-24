@@ -34,6 +34,9 @@ const mutants: readonly Mutant[] = [
   invariant('RefreshIsClaimedOnce', 'a checker can claim a login whose refresh an earlier check already claimed', 'NoRefreshTokenReused'),
   action('WriteBackNeedsOpenedLogin', 'a checker writes its fresh pair back over a login it did not open', 'StoredLoginIsNewest'),
   invariant('JobCopyIsAccessOnly', "a Job's copy keeps the refresh token", 'JobsNeverRefresh'),
+  invariant('DeathKeepsRefreshClaim', 'a check that presented the refresh token and then died releases its refresh claim', 'NoRefreshTokenReused'),
+  invariant('ClaimNeedsDueLogin', 'a checker claims a login it read before another check finished it or someone replaced it', 'OneCheckPerLogin'),
+  action('FinishNeedsClaim', 'a checker finishes a check after its claim was reaped', 'FinishedCheckIsFinal'),
 ];
 
 const readConfig = (file: string): string => readFileSync(new URL(file, import.meta.url), 'utf8');

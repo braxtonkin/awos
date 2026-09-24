@@ -19,6 +19,8 @@ const refusal = z.object({ status: z.int(), message: z.string() });
 
 const thrown = z.object({ message: z.string() });
 
+const unused = { kind: 'unused' } as const;
+
 function expiryOf(header: unknown): Pick<Checked, 'expiresAt' | 'cause'> {
   if (header === undefined) return { expiresAt: null, cause: 'GitHub answered 200 for GET /user and sent no expiry, so the token does not expire.' };
   const parsed = expiration.safeParse(header);
@@ -28,9 +30,9 @@ function expiryOf(header: unknown): Pick<Checked, 'expiresAt' | 'cause'> {
 
 function failureOf(error: unknown): Checked {
   const refused = refusal.safeParse(error);
-  if (refused.success && refused.data.status === 401) return { verdict: 'invalid', cause: `GitHub answered 401 for GET /user: ${refused.data.message}`, expiresAt: null };
-  if (refused.success) return { verdict: 'unknown', cause: `GitHub answered ${String(refused.data.status)} for GET /user: ${refused.data.message}`, expiresAt: null };
-  return { verdict: 'unknown', cause: `GET /user failed before GitHub answered: ${thrown.safeParse(error).data?.message ?? 'an error with no message'}`, expiresAt: null };
+  if (refused.success && refused.data.status === 401) return { verdict: 'invalid', cause: `GitHub answered 401 for GET /user: ${refused.data.message}`, expiresAt: null, refresh: unused };
+  if (refused.success) return { verdict: 'unknown', cause: `GitHub answered ${String(refused.data.status)} for GET /user: ${refused.data.message}`, expiresAt: null, refresh: unused };
+  return { verdict: 'unknown', cause: `GET /user failed before GitHub answered: ${thrown.safeParse(error).data?.message ?? 'an error with no message'}`, expiresAt: null, refresh: unused };
 }
 
 export const githubCheck = (settings: GithubCheckSettings): Check => ({
@@ -39,7 +41,7 @@ export const githubCheck = (settings: GithubCheckSettings): Check => ({
     const octokit = new Octokit({ auth: token, baseUrl: settings.baseUrl });
     try {
       const response = await octokit.request('GET /user', { request: { signal: AbortSignal.timeout(settings.timeoutMs) } });
-      return { verdict: 'valid', ...expiryOf(response.headers[expirationHeader]) };
+      return { verdict: 'valid', ...expiryOf(response.headers[expirationHeader]), refresh: unused };
     } catch (error) {
       return failureOf(error);
     }
