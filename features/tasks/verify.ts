@@ -20,6 +20,7 @@ import {
   badEnd,
   engineMutantName,
   engineMutants,
+  laterReviews,
   mutantName,
   parks,
   probeReaper,
@@ -27,6 +28,7 @@ import {
   profiles,
   simulate,
   mutants as storeMutants,
+  unfiredFaults,
   workflows,
   type EngineMutantName,
   type MutantName,
@@ -516,14 +518,28 @@ async function profileChecks(postgres: TestPostgres, profile: ProfileName, optio
   return [
     first === undefined ? pass(name, detail) : fail(name, violation(first)),
     everySeedFinishesATask(profile, runs),
+    everyWeightedFaultFired(profile, runs),
     badVersionsPark(profile, runs),
     ...(profile === 'races' ? [everyBurstHasOneWinner(runs)] : []),
     ...(profile === 'hangs' ? [everyHungAttemptLost(runs)] : []),
+    ...(profile === 'reviews' ? [laterReviewsReached(runs)] : []),
     ...(engineProfiles.has(profile) ? [releasesWithinOneInterval(profile, runs), everyReleaseLoggedOnce(profile, runs)] : []),
     ...(profile === 'db-pause' ? [outagesLoggedAndResumed(runs)] : []),
     ...(profile === 'behavior' ? [checksParkAtTheirCap(runs, parks.rounds, 'every task that reached Verify waits after 3 rounds with the instruction for that wait, unless its attempts were lost first')] : []),
     ...(profile === 'environment' ? [checksParkAtTheirCap(runs, parks.reruns, 'every task that reached Verify parked at the rerun cap, unless its attempts were lost first, and no round was charged')] : []),
   ];
+}
+
+function laterReviewsReached(runs: readonly Run[]): Check {
+  const name = 'reviews: a review past the cap asked for changes at Land, so LaterReviewWaitsForAPerson had a case to check';
+  const reached = laterReviews(runs);
+  return reached > 0 ? pass(name, `${String(reached)} later reviews across ${String(runs.length)} seeds`) : fail(name, `none across ${String(runs.length)} seeds`);
+}
+
+function everyWeightedFaultFired(profile: ProfileName, runs: readonly Run[]): Check {
+  const name = `${profile}: every fault the profile weights above 0 fired at least once`;
+  const unfired = unfiredFaults(profile, runs);
+  return unfired.length === 0 ? pass(name, `across ${String(runs.length)} seeds`) : fail(name, `never fired: ${unfired.join(', ')}`);
 }
 
 function badVersionsPark(profile: ProfileName, runs: readonly Run[]): Check {
