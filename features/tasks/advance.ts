@@ -220,19 +220,18 @@ export async function approveFromOutside(db: Database, task: string): Promise<bo
   return numUpdatedRows === 1n;
 }
 
-
 export type Addressed = { readonly task: string; readonly person: string; readonly review: string | null };
 
 export async function address(db: Database, key: string, email: string, step: string | null): Promise<Addressed | string> {
   const task = await db
     .selectFrom('task')
     .leftJoin('attempt as review', 'review.id', 'task.review_attempt')
-    .select(['task.id', 'task.review_attempt', 'review.step'])
+    .select(['task.id', 'task.review_attempt', 'review.step as reviewed'])
     .where('task.key', '=', key)
     .executeTakeFirst();
   if (task === undefined) return `No task has the key ${key}.`;
   const person = await db.selectFrom('person').select('person.id').where('person.email', '=', email.toLowerCase()).executeTakeFirst();
   if (person === undefined) return `No person has the email ${email}.`;
-  if (step !== null && task.step !== step) return `Task ${key} waits on no review of ${step}.`;
+  if (step !== null && task.reviewed !== step) return `Task ${key} waits on no review of ${step}.`;
   return { task: task.id, person: person.id, review: task.review_attempt };
 }

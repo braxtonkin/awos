@@ -2,6 +2,13 @@
 alter type verdict add value 'handed_off';
 
 -- migrate:down
+do $$
+begin
+  if exists (select 1 from attempt where verdict = 'handed_off') then
+    raise exception 'Land has handed off attempts, and a finished attempt is final, so this migration cannot roll back.';
+  end if;
+end
+$$;
 create temporary table enum_checks on commit drop as
   select c.conrelid::regclass::text as relation, c.conname as name, pg_get_constraintdef(c.oid) as definition
   from pg_constraint c

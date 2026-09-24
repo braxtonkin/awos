@@ -10,6 +10,7 @@ const settings = z.object({ DATABASE_URL: z.url({ protocol: /^postgres(ql)?$/ })
 
 const usage = [
   'Usage: node services/engine/act.ts <action> <task key> --as <email> [options], with DATABASE_URL set.',
+  '  Pass --id <uuid> to make a rerun record nothing new.',
   '  approve <key> --step <step> --as <email>',
   '  send-back <key> --step <step> --note <text> --as <email>',
   '  answer <key> --step <step> --answer <json> --as <email>',
@@ -21,11 +22,23 @@ const command = z.object({
   positionals: z.tuple([z.enum(['approve', 'send-back', 'answer', 'stop', 'retry']), z.string().min(1)]),
   values: z.object({
     as: z.email(),
+    id: z.uuid().optional(),
     step: z.string().min(1).optional(),
     note: note.optional(),
-    answer: z.string().optional(),
+    answer: z
+      .string()
+      .transform((text, context) => {
+        try {
+          return JSON.parse(text) as unknown;
+        } catch {
+          context.addIssue({ code: 'custom', message: '--answer must be JSON' });
+          return z.NEVER;
+        }
+      })
+      .pipe(answer)
+      .optional(),
   }),
-});
+}).refine(({ positionals: [kind], values }) => kind === 'stop' || kind === 'retry' || values.step !== undefined, { message: 'approve, send-back, and answer need --step, so an action never lands on a review its person did not name.' });
 
 type Command = z.infer<typeof command>;
 
@@ -35,8 +48,7 @@ function actionOf({ positionals: [kind], values }: Command, review: string | nul
   if (review === null) return 'The task waits on no review, so there is nothing to approve, send back, or answer.';
   if (kind === 'approve') return { kind: 'approve', review };
   if (kind === 'send-back') return values.note === undefined ? 'send-back needs --note.' : { kind: 'send_back', review, note: values.note };
-  const given = answer.safeParse(JSON.parse(values.answer ?? 'null'));
-  return given.success ? { kind: 'answer', review, answer: given.data } : `--answer must be one answer as JSON. ${z.prettifyError(given.error)}`;
+  return values.answer === undefined ? 'answer needs --answer.' : { kind: 'answer', review, answer: values.answer };
 }
 
 async function run(given: Command): Promise<string> {
@@ -49,7 +61,8 @@ async function run(given: Command): Promise<string> {
     if (typeof found === 'string') throw new Error(found);
     const action = actionOf(given, found.review);
     if (typeof action === 'string') throw new Error(action);
-    const acted = await act(db, workflows, found.task, { id: randomUUID(), person: found.person, at: new Date() }, action);
+    const id = given.values.id ?? randomUUID();
+    const acted = await act(db, workflows, found.task, { id, person: found.person, at: new Date() }, action);
     if ('refused' in acted) throw new Error(`AutoWorker refused ${kind} on task ${key}: ${acted.refused}.`);
     return `Recorded ${kind} on task ${key} as action ${acted.recorded}.`;
   } finally {
@@ -57,11 +70,20 @@ async function run(given: Command): Promise<string> {
   }
 }
 
-const parsed = command.safeParse(
-  parseArgs({ args: process.argv.slice(2), options: { as: { type: 'string' }, step: { type: 'string' }, note: { type: 'string' }, answer: { type: 'string' } }, allowPositionals: true, strict: false }),
-);
+const options = { as: { type: 'string' }, id: { type: 'string' }, step: { type: 'string' }, note: { type: 'string' }, answer: { type: 'string' } } as const;
+
+function argsOf(args: readonly string[]): unknown {
+  try {
+    return parseArgs({ args: [...args], options, allowPositionals: true, strict: true });
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
+}
+
+const given = argsOf(process.argv.slice(2));
+const parsed = command.safeParse(given);
 if (!parsed.success) {
-  process.stderr.write(`${usage}\n${z.prettifyError(parsed.error)}\n`);
+  process.stderr.write(`${usage}\n${typeof given === 'string' ? given : z.prettifyError(parsed.error)}\n`);
   process.exitCode = 2;
 } else {
   await run(parsed.data).then(

@@ -1,7 +1,7 @@
 import { hostname } from 'node:os';
 import { z } from 'zod';
 import { landLoops } from '../../features/code-change/land-loop.ts';
-import { coreReview, type ReadPullRequest } from '../../features/code-change/land.ts';
+import { coreReview, type ReadMergeState } from '../../features/code-change/land.ts';
 import { checkLoop } from '../../features/credentials/check-loop.ts';
 import { checksFor } from '../../features/credentials/checks.ts';
 import { githubApi } from '../../features/credentials/github-check.ts';
@@ -48,6 +48,7 @@ const settings = z.object({
   ENVIRONMENTS_EVERY_MS: milliseconds.default(30_000),
   ENVIRONMENT_START_DEADLINE_MS: milliseconds.default(600_000),
   LAND_EVERY_MS: milliseconds.default(10_000),
+  LAND_READ_TIMEOUT_MS: milliseconds.default(20_000),
   ...jobSettings,
 });
 
@@ -63,7 +64,7 @@ const performers = {} satisfies Performers<ActionKind>;
 
 const actions = registryOf(performers);
 
-const readPullRequest: ReadPullRequest | null = null;
+const readMergeState: ReadMergeState | null = null;
 
 const loopsFor = (given: Settings, key: SealingKey | undefined): readonly Loop[] => [
   reaper({ everyMs: given.REAPER_EVERY_MS, leaseMs: given.LEASE_MS }),
@@ -72,9 +73,11 @@ const loopsFor = (given: Settings, key: SealingKey | undefined): readonly Loop[]
   ...landLoops({
     everyMs: given.LAND_EVERY_MS,
     leaseMs: given.LEASE_MS,
-    read: readPullRequest,
+    read: readMergeState,
+    readTimeoutMs: given.LAND_READ_TIMEOUT_MS,
     review: coreReview,
     enqueue,
+    clock: realClock,
     tasks: { claim, renew, handOff, approveFromOutside, finish: (db, attempt, report, now, then) => advance(db, workflows, attempt, report, now, then) },
   }),
   ...(given.JOB_IMAGE === undefined ? [] : [sweep({ everyMs: given.SWEEP_EVERY_MS, cluster: connectCluster(given.JOB_NAMESPACE) })]),

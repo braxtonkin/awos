@@ -3,7 +3,7 @@ import type { Owe } from '../../shared/actions.ts';
 import type { MergeState } from '../../shared/merge-state.ts';
 import type { Unasked } from '../../shared/workflow.ts';
 import { violationsOf, type LandRead, type Observed, type PropertyName, type TaskView, type Violation } from './invariants.ts';
-import { coreReview, guarded, landPass, type DraftSetting, type Follow, type Guards, type LandOutput, type LandStore, type Reading } from './land.ts';
+import { coreReview, guarded, landPass, type Answer, type Answered, type DraftSetting, type Follow, type Guards, type LandOutput, type LandStore, type MergeRead, type PullRequestRef } from './land.ts';
 import { workflow } from './workflow.ts';
 
 export type WorldGuards = { readonly ActionCarriesHead: boolean; readonly FailedMergeKeepsClaim: boolean; readonly MergeClaimChecksTask: boolean; readonly LandPollIsFair: boolean };
@@ -94,7 +94,7 @@ type Task = {
   retries: number;
   counts: Record<string, number>;
   attempt: string | null;
-  answered: string[];
+  answered: Answer[];
   rows: Row[];
   inflight: Inflight[];
   judged: number[];
@@ -141,7 +141,9 @@ function weighted<T>(random: Random, choices: readonly (readonly [T, number])[])
   return undefined;
 }
 
-const viewOf = (task: Task): TaskView => ({ step: task.step, state: task.state, waitingOn: task.waitingOn, retries: task.retries, answered: [...task.answered] });
+const viewOf = (task: Task): TaskView => ({ step: task.step, state: task.state, waitingOn: task.waitingOn, retries: task.retries, answered: task.answered.map(entry => entry.id) });
+
+const hasAnswered = (task: Task, id: string): boolean => task.answered.some(entry => entry.id === id);
 
 const standing = (task: Task): boolean => task.step === 'land' && task.state === 'ready';
 
@@ -156,17 +158,17 @@ const countedGreen = (pull: Pull): boolean => counted.every(check => pull.checks
 
 const newChangesRequest = (task: Task): boolean => {
   const latest = latestReview(task.pull);
-  return latest?.kind === 'changes' && !task.answered.includes(latest.id);
+  return latest?.kind === 'changes' && !hasAnswered(task, latest.id);
 };
 
-function valueOf(task: Task, queuedFirst: boolean): MergeState['value'] {
+function valueOf(task: Task, queuedFirst: boolean, answered: Answered): MergeState['value'] {
   const { pull } = task;
   const red = counted.filter(check => pull.checks.get(check) === 'red');
   const latest = latestReview(pull);
   const queued: readonly MergeState['value'][] = pull.queue === 'queued' ? [{ kind: 'queued' }] : [];
-  const ejected: readonly MergeState['value'][] = pull.queue === 'ejected' && pull.ejection !== null ? [{ kind: 'ejected', ejection: pull.ejection, reason: 'a required check failed in the queue' }] : [];
+  const ejected: readonly MergeState['value'][] = pull.queue === 'ejected' && pull.ejection !== null && pull.ejection !== answered.ejection ? [{ kind: 'ejected', ejection: pull.ejection, reason: 'a required check failed in the queue' }] : [];
   const [first, ...rest] = red;
-  const changes: readonly MergeState['value'][] = latest?.kind === 'changes' ? [{ kind: 'changes-requested', review: { id: latest.id, reviewer: 'reviewer', body: 'Please change this.', comments: [] } }] : [];
+  const changes: readonly MergeState['value'][] = latest?.kind === 'changes' && latest.id !== answered.review ? [{ kind: 'changes-requested', review: { id: latest.id, reviewer: 'reviewer', body: 'Please change this.', comments: [] } }] : [];
   const failing: readonly MergeState['value'][] = first === undefined ? [] : [{ kind: 'red', failing: [first, ...rest] }];
   const ranked: readonly MergeState['value'][] = [
     ...(pull.mergedAt === null ? [] : [{ kind: 'merged' } as const]),
@@ -186,7 +188,7 @@ function valueOf(task: Task, queuedFirst: boolean): MergeState['value'] {
 function mergeAt(world: World, task: Task, commit: number, how: 'perform' | 'arrive'): 'merged' | 'queued' | 'already' | 'refused' {
   const { pull } = task;
   const head = world.world.ActionCarriesHead ? commit : pull.head;
-  const unanswered = pull.queue === 'ejected' && pull.ejection !== null && !task.answered.includes(pull.ejection);
+  const unanswered = pull.queue === 'ejected' && pull.ejection !== null && !hasAnswered(task, pull.ejection);
   if (pull.mergedAt !== null || pull.queue === 'queued' || unanswered) return 'already';
   if (!allows(task, head)) return 'refused';
   const merge = { task: task.index, how, before: viewOf(task), sentBeforeStop: task.sentBeforeStop, fromEjection: pull.queue === 'ejected' ? pull.ejection : null } as const;
@@ -268,25 +270,27 @@ function storeOf(world: World, reads: Map<number, LandRead>): LandStore {
     const read = reads.get(task.index);
     if (read !== undefined) reads.set(task.index, { ...read, after: viewOf(task) });
   };
-  return {
+  const store: LandStore = {
+    reread: async id => (await store.atLand()).find(entry => entry.task === id),
     atLand: () =>
       Promise.resolve(
         world.tasks
           .filter(task => task.step === 'land' && (task.state === 'ready' || (task.state === 'waiting' && task.waitingOn === 'outside_approval')))
           .map(task => {
-            const merges = task.rows.filter(row => row.kind === 'pr.merge');
-            const last = merges.at(-1);
+            const last = task.rows.filter(row => row.kind === 'pr.merge').at(-1);
             return {
               task: task.key,
               key: task.key,
-              pull: { repository: 'owner/repository', branch: `autoworker/${task.key}`, number: task.index + 1 },
+              pull: { repository: 'owner/repository', repositoryId: task.key, branch: `autoworker/${task.key}`, number: task.index + 1, actsAs: 'sim-person' },
               awaiting: task.state === 'waiting',
               owes: task.rows.some(row => row.state === 'owed' || row.state === 'claimed'),
               attempt: task.attempt,
               record: {
+                draftLeaves: task.repo.draft,
                 answered: [...task.answered],
                 markedReady: task.rows.some(row => row.kind === 'pr.mark-ready' && row.state !== 'dropped'),
-                refusedAt: last?.state === 'refused' && last.refusedAt !== null ? shaOf(last.refusedAt) : null,
+                refused: last?.state === 'refused' ? { row: `row-${String(last.id)}`, head: last.refusedAt === null ? null : shaOf(last.refusedAt) } : null,
+                updatedAt: null,
                 gatesApproved: true,
                 evidence: 'The reproduction failed before the change and passed after it.',
               },
@@ -330,19 +334,21 @@ function storeOf(world: World, reads: Map<number, LandRead>): LandStore {
       return Promise.resolve(true);
     },
   };
+  return store;
 }
 
-async function runLand(world: World): Promise<string> {
+async function runLand(world: World, quiet: boolean): Promise<string> {
   const reads = new Map<number, LandRead>();
   const queuedFirst = world.land.LandWaitsWhileQueued;
-  const read = (pull: { readonly branch: string }): Promise<Reading> => {
-    const task = world.tasks.find(candidate => `autoworker/${candidate.key}` === pull.branch);
-    if (task === undefined) return Promise.reject(new Error(`no pull request for ${pull.branch}`));
-    const value = valueOf(task, queuedFirst);
+  const read = (pull: PullRequestRef, answered: Answered): Promise<MergeRead> => {
+    const task = world.tasks.find(candidate => candidate.key === pull.repositoryId);
+    if (task === undefined) return Promise.resolve({ failed: `no pull request ${String(pull.number)}` });
+    if (!quiet && world.random() < 0.03) return Promise.resolve({ failed: 'GitHub answered 502' });
+    const value = valueOf(task, queuedFirst, answered);
     if (standing(task)) reads.set(task.index, { task: task.index, value, draft: task.repo.draft, countedGreen: countedGreen(task.pull), before: viewOf(task), after: viewOf(task), owed: [] });
-    return Promise.resolve({ state: { head: shaOf(task.pull.head), value }, draft: task.repo.draft });
+    return Promise.resolve({ state: { head: shaOf(task.pull.head), value } });
   };
-  const lines = await landPass({ store: storeOf(world, reads), read, review: coreReview, guards: world.land });
+  const lines = await landPass({ store: storeOf(world, reads), read, review: coreReview, guards: world.land, readTimeoutMs: 1_000 });
   world.observed.push({ kind: 'pass', reads: [...reads.values()] });
   return lines.join('; ');
 }
@@ -464,7 +470,7 @@ const moves: readonly Move[] = [
         checks.filter(name => task.pull.checks.get(name) === 'pending'),
       );
       if (check === undefined) return 'no check pending';
-      const result = world.random() < 0.9 ? 'green' : 'red';
+      const result = world.random() < (ignorable.has(check) ? 0.7 : 0.9) ? 'green' : 'red';
       task.pull.checks.set(check, result);
       return `check ${check} of task ${task.key} turned ${result}`;
     },
@@ -540,7 +546,7 @@ function settings(random: Random): Repo {
     queue: random() < 0.5,
     reviews: random() < 0.5,
     draft: random() < 0.5 ? 'when-green' : 'at-once',
-    required: [pick(random, checks) ?? 'c1'],
+    required: [random() < 0.7 ? 'c2' : 'c1'],
     ignoreLaterReviews: random() < 0.5,
   };
 }
@@ -594,7 +600,7 @@ async function step(world: World, quiet: boolean): Promise<string> {
   const landWeight = world.world.LandPollIsFair ? 3 : 0;
   const chosen = weighted<readonly [Move, Task] | 'land'>(world.random, [...options, ['land', landWeight]]);
   if (chosen === undefined) return 'nothing can move';
-  if (chosen === 'land') return `land pass: ${await runLand(world)}`;
+  if (chosen === 'land') return `land pass: ${await runLand(world, quiet)}`;
   const [move, task] = chosen;
   return `${move.name}: ${move.apply(world, task, quiet)}`;
 }

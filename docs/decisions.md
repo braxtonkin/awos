@@ -329,6 +329,10 @@ Decided 24 Sep 2026 while building Land (L1), to fit `features/code-change/Land.
 - Land keeps its memory in the store it already has. An attempt that answered a review or a queue ejection records the id in its output as `answers`, and the head of a refused merge is the refused row's result.
 - Merged ends the attempt with a pass, and the same transaction owes a comment on the ticket and `branch.delete`. A required approval ends it with `review_required`, and the same transaction writes the review step's note and owes what the step returns. The core's step returns nothing, because approval comes from the repository's rules and a fork's plug-in (G).
 - A conflict returns the task to Implement with the verdict `red_check`, counted in `landRounds`, because Code change declares no other route back from Land.
+- Land reads its record again after the claim, because a second engine can finish an attempt between the pass's list and the claim. While the attempt is live the store holds no owed row for the task, so that record stays true until the decision commits.
+- Land renews an attempt only after a good read. A read that keeps failing lets the lease lapse, and the reaper's cap on lost attempts parks the task, so a closed pull request or a revoked token reaches a person.
+- Land answers each refused merge once, as `Land.tla` clears `refusedAt` when an attempt fails, so a refusal a second try can clear costs one retry. A draft that stays a draft after AutoWorker marked it ready, and a branch still behind after an update at the same head, fail the attempt, so neither action is owed without end.
+- Land passes the reader the last ejection and review it answered, and the reader reports what lies beneath them, so an answered ejection never hides a red check. The draft setting comes from the repository row, `repository.draft_leaves`.
 - The model moved from `features/github/` to `features/code-change/`, beside the loop it covers (A4). The folder's `invariants.ts` names its seven properties, and `land-sim` checks each one by name.
 
 Rejected options:
