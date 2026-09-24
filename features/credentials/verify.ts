@@ -490,18 +490,26 @@ const sandboxRoutine = {
   name: 'Sandbox tickets',
   goal: 'Take each sandbox ticket to a merged pull request.',
   workflow: 'code-change',
-  source: { kind: 'jira-search' },
+  source: { kind: 'jira-search', jql: 'project = SANDBOX AND status = "To Do"', pageSize: 25 },
+  jiraStartStatus: 'In Progress',
+  jiraEndStatus: 'Done',
+  ignoreLaterReviews: true,
+  everyMinutes: 10,
   repository: sandboxRepository,
   creator: 'ada@example.com',
   gates: ['specify'],
   steps: { implement: { instructions: 'Keep the change small.', skills: ['typescript'] } },
 };
 
-const setupFile = { admin: 'ada@example.com', people: [ada], repositories: [sandboxRepository], routines: [sandboxRoutine] };
+const sandboxImage = `registry.example.com/sandbox-job@sha256:${'a'.repeat(64)}`;
 
-const firstRun = ['people 1 added, 0 changed', 'team accounts 0 added, 0 changed', 'logins 2 sealed', 'repositories 1 added', 'routines 1 added, 0 changed', ''].join('\n');
+const sandboxSettings = { ...sandboxRepository, image: sandboxImage, fastTestCommand: 'npm test', verifyProvider: 'tests-only' };
 
-const repeatRun = ['people 0 added, 0 changed', 'team accounts 0 added, 0 changed', 'logins 0 sealed', 'repositories 0 added', 'routines 0 added, 0 changed', ''].join('\n');
+const setupFile = { admin: 'ada@example.com', people: [ada], repositories: [sandboxSettings], routines: [sandboxRoutine] };
+
+const firstRun = ['people 1 added, 0 changed', 'team accounts 0 added, 0 changed', 'logins 2 sealed', 'repositories 1 added, 0 changed', 'routines 1 added, 0 changed', ''].join('\n');
+
+const repeatRun = ['people 0 added, 0 changed', 'team accounts 0 added, 0 changed', 'logins 0 sealed', 'repositories 0 added, 0 changed', 'routines 0 added, 0 changed', ''].join('\n');
 
 const describeRun = (run: SetupRun): string => `exit ${String(run.code)}, stdout ${JSON.stringify(run.stdout)}, stderr ${JSON.stringify(run.stderr)}`;
 
@@ -565,15 +573,39 @@ async function appliesOnce(world: SetupWorld): Promise<Outcome> {
     .execute();
   const version = await world.engine
     .selectFrom('routine_version')
-    .select(['workflow', 'source', 'needs_repository', sql<string[]>`gates::text[]`.as('gates'), 'last_step', 'version'])
+    .select([
+      'workflow',
+      'source',
+      'jira_start_status',
+      'jira_end_status',
+      'ignore_later_reviews',
+      sql<number>`(extract(epoch from every) / 60)::float8`.as('every_minutes'),
+      'needs_repository',
+      sql<string[]>`gates::text[]`.as('gates'),
+      'last_step',
+      'version',
+    ])
     .executeTakeFirst();
+  const repository = await world.engine.selectFrom('repository').select(['github', 'branch', 'job_image', 'fast_test_command', 'verify_provider']).execute();
+  const expectedRepository = [{ github: 'example/sandbox', branch: 'main', job_image: sandboxImage, fast_test_command: 'npm test', verify_provider: 'tests-only' }];
   const steps = await world.engine.selectFrom('routine_step').select(['step', 'instructions', sql<string[]>`skills::text[]`.as('skills')]).execute();
   const person = await world.engine.selectFrom('person').select(['id', 'email', 'jira_account_id', 'kind']).executeTakeFirst();
   const key = sealingKey(world.env);
   const owner = person?.id ?? '0';
   const opened = [await open(world.engine, key, { connector: 'github', owner }), await open(world.engine, key, { connector: 'codex', owner })];
   const openedTexts = opened.map(item => ('secret' in item ? item.secret : item.reason));
-  const expectedVersion = { workflow: 'code-change', source: { kind: 'jira-search' }, needs_repository: true, gates: ['specify'], last_step: null, version: 1 };
+  const expectedVersion = {
+    workflow: 'code-change',
+    source: { kind: 'jira-search', jql: 'project = SANDBOX AND status = "To Do"', pageSize: 25 },
+    jira_start_status: 'In Progress',
+    jira_end_status: 'Done',
+    ignore_later_reviews: true,
+    every_minutes: 10,
+    needs_repository: true,
+    gates: ['specify'],
+    last_step: null,
+    version: 1,
+  };
   return {
     problems: [
       ...(first.code === 0 && first.stdout === firstRun ? [] : [`the first run gave ${describeRun(first)}`]),
@@ -581,12 +613,13 @@ async function appliesOnce(world: SetupWorld): Promise<Outcome> {
       ...(isDeepStrictEqual(afterFirst, afterSecond) ? [] : [`the second run changed row counts from ${JSON.stringify(afterFirst)} to ${JSON.stringify(afterSecond)}`]),
       ...unsaved.map(row => `repository ${row.github} does not name an add_repository action in saved_by`),
       ...(isDeepStrictEqual(version, expectedVersion) ? [] : [`the routine version is ${JSON.stringify(version)}, not ${JSON.stringify(expectedVersion)}`]),
+      ...(isDeepStrictEqual(repository, expectedRepository) ? [] : [`the repositories are ${JSON.stringify(repository)}, not ${JSON.stringify(expectedRepository)}`]),
       ...(isDeepStrictEqual(steps, [{ step: 'implement', instructions: 'Keep the change small.', skills: ['typescript'] }]) ? [] : [`the routine steps are ${JSON.stringify(steps)}`]),
       ...(isDeepStrictEqual(person, { id: owner, email: 'ada@example.com', jira_account_id: 'jira-ada', kind: 'person' }) ? [] : [`the person is ${JSON.stringify(person)}`]),
       ...(isDeepStrictEqual(openedTexts, [world.env['ADA_GITHUB_TOKEN'], world.secrets[0]]) ? [] : ['the engine did not open both logins to the made-up values the file named']),
       ...leaks(world.secrets, [first, second]),
     ],
-    detail: `first run printed ${JSON.stringify(first.stdout)}; second printed ${JSON.stringify(second.stdout)}; row counts ${JSON.stringify(afterSecond)} after both; the repository's saved_by names its add_repository action; the engine opened both logins byte for byte`,
+    detail: `first run printed ${JSON.stringify(first.stdout)}; second printed ${JSON.stringify(second.stdout)}; row counts ${JSON.stringify(afterSecond)} after both; the repository's saved_by names its add_repository action; the version holds the Jira search, statuses, later-reviews setting, and interval, and the repository its image, fast test command, and Verify provider; the engine opened both logins byte for byte`,
   };
 }
 
@@ -671,23 +704,67 @@ async function replacementRecorded(world: SetupWorld): Promise<Outcome> {
 
 async function convergesOnChanges(world: SetupWorld): Promise<Outcome> {
   await world.apply(setupFile);
-  const run = await world.apply({ ...setupFile, people: [{ ...ada, name: 'Ada Lovelace' }], routines: [{ ...sandboxRoutine, gates: [], lastStep: 'implement' }] });
-  const versions = await world.engine.selectFrom('routine_version').select(['version', sql<string[]>`gates::text[]`.as('gates'), 'last_step']).orderBy('version').execute();
+  const changed = {
+    ...setupFile,
+    people: [{ ...ada, name: 'Ada Lovelace' }],
+    repositories: [{ ...sandboxRepository, fastTestCommand: 'npm run test:fast', verifyProvider: 'preview-env' }],
+    routines: [{ ...sandboxRoutine, gates: [], lastStep: 'implement', ignoreLaterReviews: false }],
+  };
+  const run = await world.apply(changed);
+  const again = await world.apply(changed);
+  const versions = await world.engine.selectFrom('routine_version').select(['version', sql<string[]>`gates::text[]`.as('gates'), 'last_step', 'ignore_later_reviews']).orderBy('version').execute();
   const actions = await world.engine.selectFrom('human_action').select('id').where('kind', '=', 'edit_routine').execute();
   const names = await world.engine.selectFrom('person').select('name').execute();
+  const repository = await world.engine
+    .selectFrom('repository')
+    .innerJoin('human_action', 'human_action.id', 'repository.saved_by')
+    .innerJoin('person', 'person.id', 'human_action.person_id')
+    .select(['repository.job_image', 'repository.fast_test_command', 'repository.verify_provider', 'human_action.kind', 'person.email'])
+    .execute();
+  const repositoryActions = await world.engine.selectFrom('human_action').select('kind').where('repository_id', 'is not', null).orderBy('at').execute();
   const expected = [
-    { version: 1, gates: ['specify'], last_step: null },
-    { version: 2, gates: [], last_step: 'implement' },
+    { version: 1, gates: ['specify'], last_step: null, ignore_later_reviews: true },
+    { version: 2, gates: [], last_step: 'implement', ignore_later_reviews: false },
   ];
+  const expectedRepository = [{ job_image: null, fast_test_command: 'npm run test:fast', verify_provider: 'preview-env', kind: 'edit_repository', email: 'ada@example.com' }];
+  const changedRun = ['people 0 added, 1 changed', 'team accounts 0 added, 0 changed', 'logins 0 sealed', 'repositories 0 added, 1 changed', 'routines 0 added, 1 changed', ''].join('\n');
   return {
     problems: [
-      ...(run.code === 0 && run.stdout.includes('people 0 added, 1 changed') && run.stdout.includes('routines 0 added, 1 changed') ? [] : [`the changed file gave ${describeRun(run)}`]),
+      ...(run.code === 0 && run.stdout === changedRun ? [] : [`the changed file gave ${describeRun(run)}`]),
+      ...(again.code === 0 && again.stdout === repeatRun ? [] : [`the changed file applied again gave ${describeRun(again)}`]),
       ...(isDeepStrictEqual(versions, expected) ? [] : [`the routine versions are ${JSON.stringify(versions)}`]),
       ...(actions.length === 2 ? [] : [`${String(actions.length)} edit_routine actions are recorded, not 2`]),
       ...(isDeepStrictEqual(names, [{ name: 'Ada Lovelace' }]) ? [] : [`the people are ${JSON.stringify(names)}`]),
+      ...(isDeepStrictEqual(repository, expectedRepository) ? [] : [`the repository is ${JSON.stringify(repository)}, not ${JSON.stringify(expectedRepository)}`]),
+      ...(isDeepStrictEqual(repositoryActions, [{ kind: 'add_repository' }, { kind: 'edit_repository' }]) ? [] : [`the repository actions are ${JSON.stringify(repositoryActions)}`]),
     ],
-    detail: `a renamed person and a routine with other gates and last step printed ${JSON.stringify(run.stdout)}, and the routine kept version 1 and gained version 2 under a second edit_routine action`,
+    detail: `a renamed person, a repository with no image and another fast test command and Verify provider, and a routine with other gates, last step, and later-reviews setting printed ${JSON.stringify(run.stdout)}; the repository now cites Ada's edit_repository action, the routine kept version 1 and gained version 2 under a second edit_routine action, and the same file again changed nothing`,
   };
+}
+
+async function refusesBadSettings(world: SetupWorld): Promise<Outcome> {
+  const { jql, ...noJql } = sandboxRoutine.source;
+  const scheduled = { ...sandboxRoutine, source: { kind: 'schedule' }, jiraStartStatus: undefined, jiraEndStatus: undefined };
+  const plants = [
+    { field: 'routines[0].source.jql', says: 'must hold the JQL query', routine: { ...sandboxRoutine, source: noJql } },
+    { field: 'routines[0].source.jql', says: 'belongs only to a jira-search source', routine: { ...scheduled, source: { kind: 'schedule', jql } } },
+    { field: 'routines[0].source.pageSize', says: 'Too big', routine: { ...sandboxRoutine, source: { ...sandboxRoutine.source, pageSize: 101 } } },
+    { field: 'routines[0].source.kind', says: 'only a jira-search source finds', routine: { ...scheduled, jiraEndStatus: 'Done' } },
+    { field: 'routines[0].jiraStartStatus', says: 'must not be blank', routine: { ...sandboxRoutine, jiraStartStatus: ' ' } },
+    { field: 'repositories[0].image', says: 'sha256 digest', repository: { ...sandboxSettings, image: 'registry.example.com/sandbox-job:latest' } },
+    { field: 'repositories[0].fastTestCommand', says: 'must not be blank', repository: { ...sandboxSettings, fastTestCommand: '' } },
+    { field: 'repositories[0].verifyProvider', says: 'lowercase letters', repository: { ...sandboxSettings, verifyProvider: 'Tests Only' } },
+    { field: 'repositories[0]', says: 'Unrecognized key: "ignoredReviewers"', repository: { ...sandboxSettings, ignoredReviewers: ['bot'] } },
+  ];
+  const problems: string[] = [];
+  const said: string[] = [];
+  for (const plant of plants) {
+    const run = await world.apply({ ...setupFile, repositories: ['repository' in plant ? plant.repository : sandboxSettings], routines: ['routine' in plant ? plant.routine : sandboxRoutine] });
+    if (run.code !== 1 || !run.stderr.includes(`at ${plant.field}\n`) || !run.stderr.includes(plant.says)) problems.push(`the plant at ${plant.field} gave ${describeRun(run)}`);
+    problems.push(...nothingWritten(await world.rows()));
+    said.push(`${lineWith(run.stderr, plant.says)} ${lineWith(run.stderr, `at ${plant.field}`)}`);
+  }
+  return { problems, detail: `each of ${String(plants.length)} planted routine and repository settings was refused by field name and wrote nothing: ${said.join(' | ')}` };
 }
 
 async function refusesUnknownRunAs(world: SetupWorld): Promise<Outcome> {
@@ -777,7 +854,8 @@ const setupChecks: readonly Entry[] = [
   { name: 'a token written inline is refused by field name, and nothing is written', run: inSetup(refusesInline) },
   { name: 'a Codex login with a refresh token is refused unless the file marks it made for AutoWorker', run: inSetup(refreshNeedsSetupMark) },
   { name: 'a changed login is sealed again, and its replace_credential action records who and when', run: inSetup(replacementRecorded) },
-  { name: 'a changed person is updated, and a changed routine saves a new version beside the old one', run: inSetup(convergesOnChanges) },
+  { name: 'a changed person and repository are updated, a changed routine saves a new version beside the old one, and a repeat changes nothing', run: inSetup(convergesOnChanges) },
+  { name: 'a Jira search without JQL, a tagged image, a blank command or status, and an unknown repository field are refused by field name, and nothing is written', run: inSetup(refusesBadSettings) },
   { name: 'a run-as person the file does not list is refused by name, and nothing is written', run: inSetup(refusesUnknownRunAs) },
   { name: 'two people with one Jira account id are refused by Postgres, and the people section rolls back', run: inSetup(duplicateAccountRollsBack) },
   { name: 'after setup, the dashboard role cannot select a sealed column', run: inSetup(dashboardCannotReadSetupLogins) },

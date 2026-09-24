@@ -38,7 +38,7 @@ const setupFile = (codexLogin: string) => ({
       name: 'Round trip',
       goal: 'Take each made-up task through Specify and Implement.',
       workflow: 'code-change',
-      source: { kind: 'jira-search' },
+      source: { kind: 'jira-search', jql: 'project = LANE' },
       everyMinutes: 1440,
       repository: { github: repository, branch: 'main' },
       creator: owner,
