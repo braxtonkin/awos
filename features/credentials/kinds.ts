@@ -1,10 +1,12 @@
 import { z } from 'zod';
 import { codexLogin } from '../../shared/codex-login.ts';
 import type { ConnectorKind, CredentialState, JsonObject } from '../../shared/db/types.ts';
+import { jiraLogin } from '../../shared/jira-login.ts';
 
 type Inputs = {
   readonly codex: { readonly login: string; readonly madeForAutoWorker: boolean };
   readonly github: { readonly token: string };
+  readonly jira: { readonly login: string };
 };
 
 export type Secret = { readonly [K in ConnectorKind]: { readonly connector: K } & Inputs[K] }[ConnectorKind];
@@ -52,6 +54,14 @@ function readGithub({ token }: Inputs['github']): Read {
   return { text: parsed.data, expiresAt: null, audit: {} };
 }
 
+function readJira({ login }: Inputs['jira']): Read {
+  const parsed = jiraLogin.safeParse(login);
+  if (!parsed.success) {
+    return { refused: 'malformed', reason: `This is not a Jira login. Join the email of the Jira account and its API token with a colon, as email:token. ${z.prettifyError(parsed.error)}` };
+  }
+  return { text: `${parsed.data.email}:${parsed.data.token}`, expiresAt: null, audit: {} };
+}
+
 export function refreshable(login: string): boolean {
   const parsed = codexLogin.safeParse(login);
   return parsed.success && parsed.data.tokens.refresh_token.trim() !== '';
@@ -63,5 +73,7 @@ export function read(secret: Secret): Read {
       return readCodex(secret);
     case 'github':
       return readGithub(secret);
+    case 'jira':
+      return readJira(secret);
   }
 }
