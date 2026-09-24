@@ -1,18 +1,21 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { availableParallelism } from 'node:os';
+import { setImmediate, setTimeout as wait } from 'node:timers/promises';
 import { sql } from 'kysely';
 import { z } from 'zod';
 import { connect, refusal, type Database } from '../../shared/db/client.ts';
 import type { TaskState } from '../../shared/db/types.ts';
+import { runLoop, type Clock, type Loop } from '../../shared/loop.ts';
 import { outcomes, review as reviewSchema, type Answer } from '../../shared/review.ts';
 import { step, type Failure as StepFailure, type StepKind, type StepVerdict, type Workflow } from '../../shared/workflow.ts';
 import type { TestPostgres } from '../../tools/verify/postgres.ts';
 import { act, advance, approveFromOutside, note, type PersonAction, type Report } from './advance.ts';
-import { claim, claimable, reap, renew } from './claim.ts';
+import { claim, claimable, renew } from './claim.ts';
 import { watch, type PropertyName, type Violation } from './invariants.ts';
+import { reaper } from './reaper.ts';
 import { workflowsByName } from './start.ts';
 
-export const profileName = z.enum(['default', 'races', 'hangs', 'verdicts', 'people', 'needs-input', 'mixed', 'behavior', 'environment']);
+export const profileName = z.enum(['default', 'races', 'hangs', 'verdicts', 'people', 'needs-input', 'mixed', 'behavior', 'environment', 'crashes', 'db-pause', 'two-engines']);
 
 export type ProfileName = z.infer<typeof profileName>;
 
@@ -42,6 +45,19 @@ export const mutants: Readonly<Record<MutantName, readonly [PropertyName, ...Pro
   send_back_has_a_note: ['SendBackCarriesItsNote'],
   one_target: ['ActionHasOneTarget'],
   target_fits_kind: ['ActionTargetFitsItsKind'],
+};
+
+export const engineMutantName = z.enum(['no-reaper', 'early-reap', 'no-grace', 'no-fence']);
+
+export type EngineMutantName = z.infer<typeof engineMutantName>;
+
+type EngineMutant = { readonly profile: ProfileName; readonly breaks: readonly [PropertyName, ...PropertyName[]]; readonly loop: (loop: Loop) => Loop | undefined };
+
+export const engineMutants: Readonly<Record<EngineMutantName, EngineMutant>> = {
+  'no-reaper': { profile: 'crashes', breaks: ['EveryTaskSettles'], loop: () => undefined },
+  'early-reap': { profile: 'crashes', breaks: ['ReleasedOnlyAfterItsLease'], loop: loop => ({ ...loop, pass: (db, pass) => loop.pass(db, { ...pass, now: new Date(pass.now.getTime() + loop.everyMs) }) }) },
+  'no-grace': { profile: 'db-pause', breaks: ['ReleasedWithinOneInterval'], loop: ({ name, everyMs, pass }) => ({ name, everyMs, pass }) },
+  'no-fence': { profile: 'db-pause', breaks: ['ReleasedWithinOneInterval'], loop: loop => ({ ...loop, pass: (db, { now }) => loop.pass(db, { now, late: () => false }) }) },
 };
 
 const failedToVerify = 'Verify found the behavior still wrong in 3 rounds. Read its evidence on this page, fix the ticket or the plan, then press Retry to run Verify again.';
@@ -149,9 +165,11 @@ const moves = [
   'strayTarget',
   'race',
   'badName',
+  'restart',
+  'pause',
 ] as const;
 
-const faults: ReadonlySet<Move> = new Set<Move>(['hang', 'wake', 'crash', 'burst', 'late', 'reassign', 'doubleDecision', 'doneWrite', 'bareIntake', 'noteless', 'strayTarget', 'race', 'badName']);
+const faults: ReadonlySet<Move> = new Set<Move>(['hang', 'wake', 'crash', 'burst', 'late', 'reassign', 'doubleDecision', 'doneWrite', 'bareIntake', 'noteless', 'strayTarget', 'race', 'badName', 'restart', 'pause']);
 
 const people: ReadonlySet<Move> = new Set<Move>(['stop', 'retry', 'approve', 'sendBack', 'answer', 'stale', 'outside']);
 
@@ -164,13 +182,16 @@ type Profile = {
   readonly workers: number;
   readonly nobodyEvery: number;
   readonly leaseMs: number;
+  readonly reapEveryMs: number;
+  readonly engines: number;
+  readonly outage: { readonly realMs: number; readonly virtualMs: number };
   readonly stepMs: number;
   readonly burst: number;
   readonly odds: Readonly<Record<Move, number>>;
   readonly effects: Readonly<Record<Effect, number>>;
 };
 
-const quietFaults = { hang: 0, wake: 0, crash: 0, burst: 0, late: 0, reassign: 0, doubleDecision: 0, doneWrite: 0, bareIntake: 0, noteless: 0, strayTarget: 0, race: 0, badName: 0 } as const;
+const quietFaults = { hang: 0, wake: 0, crash: 0, burst: 0, late: 0, reassign: 0, doubleDecision: 0, doneWrite: 0, bareIntake: 0, noteless: 0, strayTarget: 0, race: 0, badName: 0, restart: 0, pause: 0 } as const;
 
 const noPeople = { stop: 0, retry: 0, approve: 0, sendBack: 0, answer: 0, stale: 0, outside: 0 } as const;
 
@@ -180,7 +201,21 @@ const mostlyPass = { pass: 10, fail: 1, ask: 0.3, return: 0.6, rerun: 0.6, revie
 
 const everyEffect = { pass: 5, fail: 2, ask: 1, return: 2, rerun: 2, review: 1, await: 1 } as const;
 
-const t2Faults = { hang: 1, wake: 1, crash: 1, burst: 1, late: 2, reassign: 1, doubleDecision: 0.2, doneWrite: 0.2, bareIntake: 0.2, noteless: 0.2, strayTarget: 0.3, race: 0.5, badName: 0.2 } as const;
+const t2Faults = { hang: 1, wake: 1, crash: 1, burst: 1, late: 2, reassign: 1, doubleDecision: 0.2, doneWrite: 0.2, bareIntake: 0.2, noteless: 0.2, strayTarget: 0.3, race: 0.5, badName: 0.2, restart: 0, pause: 0 } as const;
+
+const oneEngine = { engines: 1, outage: { realMs: 0, virtualMs: 0 } } as const;
+
+const crashing = { ...quietFaults, hang: 1, wake: 1, crash: 3, late: 1, restart: 0.3 } as const;
+
+const engineProfile = { stepsPerTask: 20, workers: 4, nobodyEvery: 0, leaseMs: 2_000, reapEveryMs: 1_000, stepMs: 400, burst: 5, effects: mostlyPass } as const;
+
+const engineOdds = { claim: 6, renew: 3, finish: 3, ...crashing, ...noPeople, approve: 1, outside: 1 } as const;
+
+const engineProfiles = {
+  crashes: { ...engineProfile, ...oneEngine, odds: engineOdds },
+  'db-pause': { ...engineProfile, engines: 1, outage: { realMs: 10_000, virtualMs: 10_000 }, odds: { ...engineOdds, pause: 0.5 } },
+  'two-engines': { ...engineProfile, ...oneEngine, engines: 2, odds: engineOdds },
+} as const;
 
 export const profiles: Readonly<Record<ProfileName, Profile>> = {
   default: {
@@ -188,6 +223,8 @@ export const profiles: Readonly<Record<ProfileName, Profile>> = {
     workers: 4,
     nobodyEvery: 4,
     leaseMs: 30_000,
+    reapEveryMs: 15_000,
+    ...oneEngine,
     stepMs: 6_000,
     burst: 5,
     odds: { claim: 6, renew: 6, finish: 4, ...t2Faults, ...somePeople },
@@ -198,6 +235,8 @@ export const profiles: Readonly<Record<ProfileName, Profile>> = {
     workers: 4,
     nobodyEvery: 0,
     leaseMs: 30_000,
+    reapEveryMs: 15_000,
+    ...oneEngine,
     stepMs: 6_000,
     burst: 20,
     odds: { claim: 2, renew: 4, finish: 4, ...quietFaults, burst: 4, race: 2, ...noPeople, approve: 1, outside: 1 },
@@ -208,6 +247,8 @@ export const profiles: Readonly<Record<ProfileName, Profile>> = {
     workers: 4,
     nobodyEvery: 0,
     leaseMs: 2_000,
+    reapEveryMs: 1_000,
+    ...oneEngine,
     stepMs: 400,
     burst: 5,
     odds: { claim: 6, renew: 3, finish: 3, ...quietFaults, hang: 3, crash: 1, late: 2, ...noPeople, approve: 1, outside: 1 },
@@ -218,6 +259,8 @@ export const profiles: Readonly<Record<ProfileName, Profile>> = {
     workers: 4,
     nobodyEvery: 0,
     leaseMs: 30_000,
+    reapEveryMs: 15_000,
+    ...oneEngine,
     stepMs: 6_000,
     burst: 5,
     odds: { claim: 6, renew: 4, finish: 6, ...quietFaults, ...noPeople, approve: 1.5, retry: 0.5, outside: 1 },
@@ -228,6 +271,8 @@ export const profiles: Readonly<Record<ProfileName, Profile>> = {
     workers: 4,
     nobodyEvery: 6,
     leaseMs: 30_000,
+    reapEveryMs: 15_000,
+    ...oneEngine,
     stepMs: 6_000,
     burst: 5,
     odds: { claim: 6, renew: 4, finish: 5, ...quietFaults, stop: 1, retry: 2, approve: 3, sendBack: 2, answer: 2, stale: 2, outside: 1, doubleDecision: 0.5 },
@@ -238,6 +283,8 @@ export const profiles: Readonly<Record<ProfileName, Profile>> = {
     workers: 4,
     nobodyEvery: 0,
     leaseMs: 30_000,
+    reapEveryMs: 15_000,
+    ...oneEngine,
     stepMs: 6_000,
     burst: 5,
     odds: { claim: 6, renew: 4, finish: 5, ...quietFaults, ...noPeople, approve: 3, answer: 2, sendBack: 0.5, outside: 1 },
@@ -248,6 +295,8 @@ export const profiles: Readonly<Record<ProfileName, Profile>> = {
     workers: 4,
     nobodyEvery: 5,
     leaseMs: 30_000,
+    reapEveryMs: 15_000,
+    ...oneEngine,
     stepMs: 6_000,
     burst: 5,
     odds: { claim: 6, renew: 5, finish: 5, ...t2Faults, ...somePeople, approve: 2, sendBack: 1, answer: 1, stale: 1 },
@@ -258,6 +307,8 @@ export const profiles: Readonly<Record<ProfileName, Profile>> = {
     workers: 4,
     nobodyEvery: 0,
     leaseMs: 30_000,
+    reapEveryMs: 15_000,
+    ...oneEngine,
     stepMs: 6_000,
     burst: 5,
     odds: { claim: 6, renew: 4, finish: 6, ...quietFaults, ...noPeople, approve: 3 },
@@ -268,11 +319,14 @@ export const profiles: Readonly<Record<ProfileName, Profile>> = {
     workers: 4,
     nobodyEvery: 0,
     leaseMs: 30_000,
+    reapEveryMs: 15_000,
+    ...oneEngine,
     stepMs: 6_000,
     burst: 5,
     odds: { claim: 6, renew: 4, finish: 6, ...quietFaults, ...noPeople, approve: 3 },
     effects: { pass: 1, fail: 0, ask: 0, return: 0, rerun: 0, review: 0, await: 0 },
   },
+  ...engineProfiles,
 };
 
 const forcedAtChecks: Partial<Readonly<Record<ProfileName, StepVerdict>>> = { behavior: 'behavior_fail', environment: 'environment_fail' };
@@ -284,6 +338,7 @@ export type Plan = {
   readonly seeds: readonly number[];
   readonly steps: number;
   readonly mutant?: MutantName;
+  readonly engine?: EngineMutantName;
 };
 
 export type Entry = { readonly step: number; readonly at: number; readonly move: string; readonly detail: string };
@@ -291,6 +346,8 @@ export type Entry = { readonly step: number; readonly at: number; readonly move:
 export type Failure = { readonly step: number; readonly move: string; readonly broken: readonly Violation[] };
 
 export type Burst = { readonly winners: number; readonly ms: number };
+
+export type Release = { readonly attempt: string; readonly key: string; readonly delayMs: number };
 
 export type Settled = { readonly key: string; readonly workflow: string; readonly step: string; readonly state: TaskState; readonly reason: string | null; readonly counts: unknown; readonly lastStep: string | null };
 
@@ -305,6 +362,9 @@ export type Run = {
   readonly tally: Readonly<Record<string, number>>;
   readonly done: number;
   readonly tasks: readonly Settled[];
+  readonly releases: readonly Release[];
+  readonly passMs: readonly number[];
+  readonly engineLog: readonly string[];
   readonly trace: readonly Entry[];
 };
 
@@ -314,23 +374,55 @@ type Worker = { readonly state: 'idle' } | { readonly state: 'busy' | 'hung'; re
 
 type Held = { readonly index: number; readonly attempt: string };
 
+type Timer = { readonly at: number; readonly wake: () => void };
+
+type VirtualClock = {
+  readonly clock: Clock;
+  readonly start: (run: () => Promise<void>) => Promise<void>;
+  readonly nextDue: () => number | undefined;
+  readonly advance: (to: number) => void;
+  readonly fire: () => Promise<void>;
+  readonly idle: () => Promise<void>;
+};
+
+type Engine = { readonly stop: AbortController; readonly done: Promise<void> };
+
+type Engines = {
+  readonly virtual: VirtualClock;
+  readonly loop: Loop | undefined;
+  readonly dbs: readonly Database[];
+  readonly running: (Engine | undefined)[];
+  readonly log: string[];
+  readonly passMs: number[];
+};
+
 type World = {
   readonly tasks: readonly string[];
   readonly workers: Worker[];
-  readonly lost: string[];
+  readonly engines: Engines;
+  lost: readonly string[];
+  pausedOnce: boolean;
   readonly hung: Set<string>;
   readonly bursts: Burst[];
   readonly tally: Map<string, number>;
   readonly people: readonly string[];
   readonly routines: readonly Seeded[];
   clock: number;
-  nextReap: number;
   nextKey: number;
 };
 
 type Seeded = { readonly routine: string; readonly workflow: Workflow; readonly repository: string | null };
 
-type Turn = { readonly db: Database; readonly world: World; readonly profile: Profile; readonly plan: Plan; readonly random: Random; readonly quiet: boolean; readonly now: Date };
+type Turn = {
+  readonly db: Database;
+  readonly postgres: TestPostgres;
+  readonly world: World;
+  readonly profile: Profile;
+  readonly plan: Plan;
+  readonly random: Random;
+  readonly quiet: boolean;
+  readonly now: Date;
+};
 
 type Rule = { readonly allowed: (world: World, quiet: boolean) => boolean; readonly perform: (turn: Turn) => Promise<string> | string };
 
@@ -350,6 +442,87 @@ function seeded(seed: number): Random {
     mixed ^= mixed + Math.imul(mixed ^ (mixed >>> 7), mixed | 61);
     return ((mixed ^ (mixed >>> 14)) >>> 0) / 4294967296;
   };
+}
+
+function virtualClock(startAt: number): VirtualClock {
+  let now = startAt;
+  let active = 0;
+  let timers: readonly Timer[] = [];
+  let waiting: (() => void)[] = [];
+  const settle = (): void => {
+    if (active > 0) return;
+    const woken = waiting;
+    waiting = [];
+    for (const resolve of woken) resolve();
+  };
+  const idle = (): Promise<void> =>
+    active === 0
+      ? Promise.resolve()
+      : new Promise(resolve => {
+          waiting.push(resolve);
+        });
+  const nextDue = (): number | undefined => timers.reduce<number | undefined>((soonest, timer) => (soonest === undefined || timer.at < soonest ? timer.at : soonest), undefined);
+  const clock: Clock = {
+    now: () => new Date(now),
+    sleep: (ms, stop) =>
+      new Promise(resolve => {
+        if (stop.aborted) {
+          resolve();
+          return;
+        }
+        const wake = (): void => {
+          stop.removeEventListener('abort', wake);
+          timers = timers.filter(timer => timer.wake !== wake);
+          active += 1;
+          resolve();
+        };
+        timers = [...timers, { at: now + Math.max(0, ms), wake }];
+        stop.addEventListener('abort', wake, { once: true });
+        active -= 1;
+        settle();
+      }),
+  };
+  return {
+    clock,
+    start: run => {
+      active += 1;
+      return run().finally(() => {
+        active -= 1;
+        settle();
+      });
+    },
+    nextDue,
+    advance: to => {
+      now = Math.max(now, to);
+    },
+    fire: async () => {
+      const due = nextDue();
+      if (due === undefined) return;
+      now = Math.max(now, due);
+      for (const timer of timers.filter(candidate => candidate.at === due)) timer.wake();
+      await idle();
+    },
+    idle,
+  };
+}
+
+function startEngine(engines: Engines, index: number): void {
+  const { loop, virtual } = engines;
+  const db = engines.dbs[index];
+  if (loop === undefined || db === undefined) return;
+  const stop = new AbortController();
+  const done = virtual.start(() =>
+    runLoop(loop, db, virtual.clock, stop.signal, line => {
+      engines.log.push(`engine ${String(index + 1)} ${line}`);
+    }),
+  );
+  engines.running[index] = { stop, done };
+}
+
+async function stopEngines(engines: Engines): Promise<void> {
+  const running = engines.running.flatMap(engine => (engine === undefined ? [] : [engine]));
+  for (const engine of running) engine.stop.abort();
+  await Promise.all(running.map(engine => engine.done));
 }
 
 const pick = <T>(random: Random, items: readonly T[]): T | undefined => items[Math.floor(random() * items.length)];
@@ -814,6 +987,46 @@ const rules: Readonly<Record<Move, Rule>> = {
       return `${bad.what} was ${outcome}`;
     },
   },
+  restart: {
+    allowed: (world, quiet) => !quiet && world.engines.running.some(engine => engine !== undefined),
+    perform: async ({ db, world, random }) => {
+      const index = Math.floor(random() * world.engines.running.length);
+      const engine = world.engines.running[index];
+      if (engine === undefined) return 'no engine runs';
+      const from = world.engines.log.length;
+      engine.stop.abort();
+      await engine.done;
+      startEngine(world.engines, index);
+      await world.engines.virtual.idle();
+      count(world, 'engine restart');
+      return `engine ${String(index + 1)} stopped and started again: ${await noteReleases(db, world, from)}`;
+    },
+  },
+  pause: {
+    allowed: (world, quiet) => !quiet && !world.pausedOnce,
+    perform: async ({ db, postgres, world, profile }) => {
+      const { virtual, log } = world.engines;
+      const due = virtual.nextDue();
+      if (due === undefined) return 'no engine pass to hold up';
+      world.pausedOnce = true;
+      const from = log.length;
+      const release = await postgres.pause();
+      try {
+        const held = virtual.fire();
+        await setImmediate();
+        virtual.advance(due + profile.outage.virtualMs);
+        await wait(profile.outage.realMs);
+        await release();
+        await held;
+      } finally {
+        await release();
+      }
+      const now = (): number => virtual.clock.now().getTime();
+      for (let next = virtual.nextDue(); next !== undefined && next <= now(); next = virtual.nextDue()) await virtual.fire();
+      count(world, 'postgres paused');
+      return `Postgres paused for ${String(profile.outage.realMs)} ms while the engine's pass at ${String(due - epoch)} ms waited, and ${String(profile.outage.virtualMs)} simulated ms passed: ${await noteReleases(db, world, from)}`;
+    },
+  },
   strayTarget: {
     allowed: (_world, quiet) => !quiet,
     perform: async ({ db, world, random, now }) => {
@@ -839,23 +1052,29 @@ const rules: Readonly<Record<Move, Rule>> = {
   },
 };
 
-async function reapStep({ db, world, profile, now }: Turn): Promise<string> {
-  world.nextReap += profile.leaseMs / 2;
-  const reaped = await reap(db, now);
-  const ended = new Set(reaped.map(entry => entry.attempt));
+async function noteReleases(db: Database, world: World, from: number): Promise<string> {
+  const said = world.engines.log.slice(from);
+  const released = said.filter(line => line.includes(': released attempt '));
+  count(world, 'released by the engine', released.length);
+  count(world, 'parked by the engine', released.filter(line => line.includes(', and parked the task')).length);
+  const lost = await db.selectFrom('attempt').select('id').where('verdict', '=', 'lost').orderBy('id').execute();
+  world.lost = lost.map(row => row.id);
+  const ended = new Set(world.lost);
   world.workers.forEach((worker, index) => {
     if (worker.state !== 'idle' && ended.has(worker.attempt)) world.workers[index] = idle;
   });
-  world.lost.push(...reaped.map(entry => entry.attempt));
-  count(world, 'reaped', reaped.length);
-  count(world, 'parked by the reap', reaped.filter(entry => entry.parked).length);
-  return reaped
-    .map(entry => `attempt ${entry.attempt} of task ${entry.task} (${entry.key}), lease expired ${String(entry.expiredForMs)} ms before the reap${entry.parked ? ', parked the task' : ''}`)
-    .join('; ');
+  return said.length === 0 ? 'the engine had nothing to say' : said.join('; ');
+}
+
+async function engineStep({ db, world }: Turn): Promise<string> {
+  const from = world.engines.log.length;
+  const started = performance.now();
+  await world.engines.virtual.fire();
+  world.engines.passMs.push(performance.now() - started);
+  return noteReleases(db, world, from);
 }
 
 async function perform(turn: Turn): Promise<{ readonly move: string; readonly detail: string }> {
-  if (turn.world.clock >= turn.world.nextReap) return { move: 'reap', detail: await reapStep(turn) };
   const quietly = (move: Move): boolean => !turn.quiet || (!faults.has(move) && !people.has(move));
   const move = weighted(
     turn.random,
@@ -896,7 +1115,7 @@ const routinePlans: readonly RoutinePlan[] = [
   ...(post === undefined ? [] : [{ workflow: post, runAsTeam: true, gates: [], lastStep: null, ignoreLaterReviews: false }]),
 ];
 
-async function setUp(db: Database, profile: Profile, steps: number): Promise<World> {
+async function setUp(db: Database, profile: Profile, steps: number, engines: Engines): Promise<World> {
   const at = new Date(epoch);
   const ada = await db.insertInto('person').values({ email: 'ada@example.com', name: 'Ada', jira_account_id: 'jira-ada' }).returning('id').executeTakeFirstOrThrow();
   const bo = await db.insertInto('person').values({ email: 'bo@example.com', name: 'Bo', jira_account_id: 'jira-bo' }).returning('id').executeTakeFirstOrThrow();
@@ -965,14 +1184,15 @@ async function setUp(db: Database, profile: Profile, steps: number): Promise<Wor
   return {
     tasks: tasks.map(task => task.id),
     workers: Array.from({ length: profile.workers }, () => idle),
+    engines,
     lost: [],
+    pausedOnce: false,
     hung: new Set(),
     bursts: [],
     tally: new Map(),
     people: [ada.id, bo.id],
     routines,
     clock: epoch,
-    nextReap: epoch + profile.leaseMs / 2,
     nextKey: 0,
   };
 }
@@ -1002,16 +1222,44 @@ async function settledTasks(db: Database): Promise<readonly Settled[]> {
   return rows.map(row => ({ key: row.key, workflow: row.workflow, step: row.step, state: row.state, reason: row.waiting_reason, counts: row.counts, lastStep: row.last_step }));
 }
 
+const engineLoop = (profile: Profile, mutant: EngineMutantName | undefined): Loop | undefined => {
+  const loop = reaper({ everyMs: profile.reapEveryMs, leaseMs: profile.leaseMs });
+  return mutant === undefined ? loop : engineMutants[mutant].loop(loop);
+};
+
+async function releases(db: Database): Promise<readonly Release[]> {
+  const rows = await db
+    .selectFrom('attempt')
+    .innerJoin('task', 'task.id', 'attempt.task_id')
+    .select(['attempt.id', 'task.key', sql<number>`(extract(epoch from attempt.finished_at - attempt.lease_until) * 1000)::float8`.as('delay')])
+    .where('attempt.verdict', '=', 'lost')
+    .orderBy('attempt.id')
+    .execute();
+  return rows.map(row => ({ attempt: row.id, key: row.key, delayMs: row.delay }));
+}
+
 async function runSeed(postgres: TestPostgres, plan: Plan, seed: number): Promise<Run> {
   const profile = profiles[plan.profile];
   const random = seeded(seed);
   const trace: Entry[] = [];
   const scratch = await postgres.scratch();
   const db = connect(scratch.url, profile.burst + 2);
+  const engines: Engines = {
+    virtual: virtualClock(epoch),
+    loop: engineLoop(profile, plan.engine),
+    dbs: Array.from({ length: profile.engines }, () => connect(scratch.url, 2)),
+    running: [],
+    log: [],
+    passMs: [],
+  };
   try {
     if (plan.mutant !== undefined) await dropGuard(db, plan.mutant);
-    const world = await setUp(db, profile, plan.steps);
-    const watched = await watch(db, workflows);
+    const world = await setUp(db, profile, plan.steps, engines);
+    engines.dbs.forEach((_db, index) => {
+      startEngine(engines, index);
+    });
+    await engines.virtual.idle();
+    const watched = await watch(db, workflows, profile.reapEveryMs, new Date(epoch));
     const ended = async (steps: number, failure: Failure | undefined): Promise<Run> => ({
       plan,
       seed,
@@ -1023,6 +1271,9 @@ async function runSeed(postgres: TestPostgres, plan: Plan, seed: number): Promis
       tally: Object.fromEntries(world.tally),
       done: await tasksIn(db, 'done'),
       tasks: await settledTasks(db),
+      releases: await releases(db),
+      passMs: engines.passMs,
+      engineLog: engines.log,
       trace: failure === undefined ? trace.slice(-traceTail) : trace,
     });
     if (watched.atStart.length > 0) return await ended(0, { step: 0, move: 'setup', broken: watched.atStart });
@@ -1032,19 +1283,62 @@ async function runSeed(postgres: TestPostgres, plan: Plan, seed: number): Promis
       step += 1;
       const quiet = step > plan.steps;
       if (quiet && (await tasksIn(db, 'ready')) === 0) break;
-      const made = await perform({ db, world, profile, plan, random, quiet, now: new Date(world.clock) });
-      trace.push({ step, at: world.clock - epoch, ...made });
-      const broken = await watched.step();
+      const due = engines.virtual.nextDue();
+      const engineDue = due !== undefined && due <= world.clock;
+      if (!engineDue) engines.virtual.advance(world.clock);
+      const turn: Turn = { db, postgres, world, profile, plan, random, quiet, now: new Date(world.clock) };
+      const made = engineDue ? { move: 'engine', detail: await engineStep(turn) } : await perform(turn);
+      const at = engines.virtual.clock.now().getTime();
+      trace.push({ step, at: at - epoch, ...made });
+      const broken = await watched.step(new Date(at));
       if (broken.length > 0) return await ended(step, { step, move: made.move, broken });
-      world.clock += 1 + Math.floor(random() * profile.stepMs);
+      world.clock = Math.max(world.clock, at) + (engineDue ? 0 : 1 + Math.floor(random() * profile.stepMs));
     }
     const unsettled = await watched.settled();
     return await ended(step, unsettled.length > 0 ? { step, move: 'the quiet phase ended', broken: unsettled } : undefined);
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
-    const where = `${plan.profile} seed ${String(seed)}${plan.mutant === undefined ? '' : ` without ${plan.mutant}`}`;
+    const without = plan.mutant ?? plan.engine;
+    const where = `${plan.profile} seed ${String(seed)}${without === undefined ? '' : ` without ${without}`}`;
     throw new Error(`${where} threw after step ${String(trace.at(-1)?.step ?? 0)}: ${reason}`, { cause: error });
   } finally {
+    await stopEngines(engines);
+    await Promise.all(engines.dbs.map(engineDb => engineDb.destroy()));
+    await db.destroy();
+    await scratch.drop();
+  }
+}
+
+export type Probe = { readonly expired: number; readonly released: number; readonly passMs: number; readonly slowestDelayMs: number; readonly everyMs: number };
+
+export async function probeReaper(postgres: TestPostgres, expiring: number): Promise<Probe> {
+  const profile = profiles.crashes;
+  const scratch = await postgres.scratch();
+  const db = connect(scratch.url, 2);
+  const engines: Engines = { virtual: virtualClock(epoch), loop: engineLoop(profile, undefined), dbs: [connect(scratch.url, 2)], running: [], log: [], passMs: [] };
+  try {
+    const world = await setUp(db, profile, expiring * profile.stepsPerTask, engines);
+    for (const task of world.tasks.slice(0, expiring)) {
+      const outcome = await claim(db, task, new Date(epoch), profile.leaseMs);
+      if ('refused' in outcome) throw new Error(`the probe could not claim task ${task}: ${outcome.refused}`);
+    }
+    startEngine(engines, 0);
+    await engines.virtual.idle();
+    let released = 0;
+    while (released < expiring && engines.virtual.clock.now().getTime() < epoch + profile.leaseMs * 4) {
+      const started = performance.now();
+      await engines.virtual.fire();
+      const passMs = performance.now() - started;
+      const found = await releases(db);
+      if (found.length > released) {
+        return { expired: expiring, released: found.length, passMs, slowestDelayMs: Math.max(...found.map(entry => entry.delayMs)), everyMs: profile.reapEveryMs };
+      }
+      released = found.length;
+    }
+    throw new Error(`the engine released none of ${String(expiring)} expired attempts within ${String(profile.leaseMs * 4)} simulated ms`);
+  } finally {
+    await stopEngines(engines);
+    await Promise.all(engines.dbs.map(engineDb => engineDb.destroy()));
     await db.destroy();
     await scratch.drop();
   }

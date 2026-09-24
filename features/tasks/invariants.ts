@@ -11,11 +11,17 @@ type Moment = 'each-step' | 'after-quiet-phase';
 
 type Statement = RawBuilder<unknown>;
 
-type Plant = { readonly setup: readonly Statement[]; readonly violation: Statement };
+type Plant = { readonly setup: readonly Statement[]; readonly violation: Statement; readonly checkedAtSeconds?: number };
 
 type Property = { readonly moment: Moment; readonly breaks: Statement; readonly plants: readonly [Plant, ...Plant[]] };
 
 const t0 = sql`timestamptz '2026-01-01T00:00:00Z'`;
+
+const plantedAt = Date.parse('2026-01-01T00:00:00.000Z');
+
+const plantedEveryMs = 15_000;
+
+const plantCheckedAtSeconds = 60;
 
 const firstAction = sql.lit('00000000-0000-4000-8000-000000000001');
 
@@ -467,6 +473,20 @@ export const properties = {
       },
     ],
   },
+  ReleasedWithinOneInterval: {
+    moment: 'each-step',
+    breaks: sql`select a.id as attempt, a.task_id, a.lease_until, checked_at as released_by
+      from attempt a, prior p, engine e
+      where a.id = any(p.live) and a.verdict = 'lost' and checked_at - a.lease_until > make_interval(secs => e.every_ms / 1000.0)`,
+    plants: [{ setup: [liveAttempt], violation: sql`update attempt set finished_at = ${t0} + interval '60 seconds', verdict = 'lost' where id = 1` }],
+  },
+  ReleasedOnlyAfterItsLease: {
+    moment: 'each-step',
+    breaks: sql`select a.id as attempt, a.task_id, a.lease_until, checked_at as released_by
+      from attempt a, prior p
+      where a.id = any(p.live) and a.verdict = 'lost' and a.lease_until >= checked_at`,
+    plants: [{ setup: [liveAttempt], violation: sql`update attempt set finished_at = ${t0} + interval '20 seconds', verdict = 'lost' where id = 1`, checkedAtSeconds: 20 }],
+  },
   EveryTaskSettles: {
     moment: 'after-quiet-phase',
     breaks: sql`select id, step, state from task where state = 'ready'`,
@@ -485,7 +505,7 @@ export type Violation = { readonly property: PropertyName; readonly row: unknown
 
 export type Watch = {
   readonly atStart: readonly Violation[];
-  readonly step: () => Promise<readonly Violation[]>;
+  readonly step: (checkedAt: Date) => Promise<readonly Violation[]>;
   readonly settled: () => Promise<readonly Violation[]>;
 };
 
@@ -530,8 +550,9 @@ function workflowFacts(workflows: readonly Workflow[]): Statement {
     charges (workflow, step, kind, counter, cap, to_step) as (${chargeRows}),`;
 }
 
-const helpers = (workflows: readonly Workflow[]) => sql`
+const helpers = (workflows: readonly Workflow[], everyMs: number) => sql`
   ${workflowFacts(workflows)}
+  engine (every_ms) as (values (${sql.lit(everyMs)}::int)),
   prior as (
     select (before->>'xid')::xid as xid, (before->>'maxAttempt')::bigint as max_attempt,
            array(select jsonb_array_elements_text(before->'live')::bigint) as live
@@ -567,8 +588,8 @@ const helpers = (workflows: readonly Workflow[]) => sql`
            r.runs_as
     from record r join was w on w.id = r.id)`;
 
-const install = (workflows: readonly Workflow[]) => sql`
-  create function check_step(before jsonb) returns jsonb language plpgsql as $check$
+const install = (workflows: readonly Workflow[], everyMs: number) => sql`
+  create function check_step(before jsonb, checked_at timestamptz) returns jsonb language plpgsql as $check$
   declare
     own constant xid := pg_current_xact_id()::xid;
     deadline constant timestamptz := clock_timestamp() + interval '1 second';
@@ -583,7 +604,7 @@ const install = (workflows: readonly Workflow[]) => sql`
       perform pg_sleep(0.001);
     end loop;
     return (
-      with ${helpers(workflows)}
+      with ${helpers(workflows, everyMs)}
       select jsonb_build_object(
         'violations', coalesce((select jsonb_agg(v) from (${branches('each-step')}) v), '[]'::jsonb),
         'state', jsonb_build_object(
@@ -600,8 +621,8 @@ const violations = z.array(z.object({ property: z.custom<PropertyName>(isPropert
 
 const answer = z.object({ violations, state: z.json() });
 
-export async function watch(db: Database, workflows: readonly Workflow[]): Promise<Watch> {
-  const compiled = install(workflows).compile(db);
+export async function watch(db: Database, workflows: readonly Workflow[], everyMs: number, startedAt: Date): Promise<Watch> {
+  const compiled = install(workflows, everyMs).compile(db);
   if (compiled.parameters.length > 0) {
     throw new Error(
       'check_step must compile without parameters, because a function body takes no bind parameters. Write each constant in a predicate or a run-as rule with sql.lit, since eb.lit refuses strings.',
@@ -609,13 +630,13 @@ export async function watch(db: Database, workflows: readonly Workflow[]): Promi
   }
   await db.executeQuery(compiled);
   let before: z.infer<typeof answer>['state'] = null;
-  const step = async (): Promise<readonly Violation[]> => {
-    const { rows } = await sql<{ result: unknown }>`select check_step(${before === null ? null : JSON.stringify(before)}::jsonb) as result`.execute(db);
+  const step = async (checkedAt: Date): Promise<readonly Violation[]> => {
+    const { rows } = await sql<{ result: unknown }>`select check_step(${before === null ? null : JSON.stringify(before)}::jsonb, ${checkedAt}::timestamptz) as result`.execute(db);
     const checked = answer.parse(rows[0]?.result);
     before = checked.state;
     return checked.violations;
   };
-  const atStart = await step();
+  const atStart = await step(startedAt);
   return {
     atStart,
     step,
@@ -625,8 +646,8 @@ export async function watch(db: Database, workflows: readonly Workflow[]): Promi
 
 const namesOf = (found: readonly Violation[]): readonly PropertyName[] => [...new Set(found.map(violation => violation.property))];
 
-const checksAt: Readonly<Record<Moment, (watched: Watch) => Promise<readonly Violation[]>>> = {
-  'each-step': watched => watched.step(),
+const checksAt: Readonly<Record<Moment, (watched: Watch, checkedAt: Date) => Promise<readonly Violation[]>>> = {
+  'each-step': (watched, checkedAt) => watched.step(checkedAt),
   'after-quiet-phase': watched => watched.settled(),
 };
 
@@ -635,10 +656,11 @@ async function provePlant(postgres: TestPostgres, workflows: readonly Workflow[]
   const db = connect(scratch.url, 1);
   try {
     for (const statement of [...world, ...plant.setup]) await statement.execute(db);
-    const watched = await watch(db, workflows);
-    const atStart = await checksAt[moment](watched);
+    const checkedAt = new Date(plantedAt + (plant.checkedAtSeconds ?? plantCheckedAtSeconds) * 1000);
+    const watched = await watch(db, workflows, plantedEveryMs, checkedAt);
+    const atStart = await checksAt[moment](watched, checkedAt);
     await plant.violation.execute(db);
-    const reported = await checksAt[moment](watched);
+    const reported = await checksAt[moment](watched, checkedAt);
     return { atStart: namesOf(atStart), reported: namesOf(reported) };
   } finally {
     await db.destroy();

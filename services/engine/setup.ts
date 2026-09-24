@@ -1,8 +1,11 @@
+import { z } from 'zod';
 import { sealingKey } from '../../features/credentials/seal.ts';
 import { applyLogins, logins } from '../../features/credentials/setup.ts';
 import { applyPeople, applyRepositories, applyRoutines, readSetupFile } from '../../features/tasks/setup.ts';
-import { connect, databaseUrl } from '../../shared/db/client.ts';
+import { connect } from '../../shared/db/client.ts';
 import { workflows } from './workflows.ts';
+
+const settings = z.object({ DATABASE_URL: z.url({ protocol: /^postgres(ql)?$/ }) });
 
 const say = (line: string): void => {
   process.stdout.write(`${line}\n`);
@@ -10,9 +13,10 @@ const say = (line: string): void => {
 
 async function setup(path: string): Promise<void> {
   const key = sealingKey(process.env);
-  const url = databaseUrl(process.env);
+  const given = settings.safeParse(process.env);
+  if (!given.success) throw new Error(`DATABASE_URL must be a postgres:// URL. ${z.prettifyError(given.error)}`);
   const file = await readSetupFile(path, folder => logins(process.env, folder), workflows);
-  const db = connect(url, 1);
+  const db = connect(given.data.DATABASE_URL, 1);
   try {
     const { people, teamAccounts } = await applyPeople(db, file);
     say(`people ${String(people.added)} added, ${String(people.changed)} changed`);
