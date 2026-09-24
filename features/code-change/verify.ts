@@ -59,6 +59,7 @@ function builtCheck(): Check {
 const run = (command: string, exitCode: number, wrap = true): Ran => ({ command: wrap ? `/bin/bash -lc '${command}'` : command, cwd: '/workspace', exitCode, output: `ran ${command}` });
 
 const script = run(reproduction.show, 0);
+const shownAgain = { ...script, output: 'a script swapped in after the runs' };
 
 const settleCases: readonly (readonly [string, readonly Ran[], 'fixed' | 'still_wrong' | null])[] = [
   ['a failing base run then a passing change run, each wrapped by the shell', [script, run(reproduction.before, 1), run(reproduction.after, 0)], 'fixed'],
@@ -68,7 +69,16 @@ const settleCases: readonly (readonly [string, readonly Ran[], 'fixed' | 'still_
   ['a change run that hides its exit with || true', [script, run(reproduction.before, 1), run(`${reproduction.after} || true`, 0)], null],
   ['the change run before the base run', [script, run(reproduction.after, 0), run(reproduction.before, 1)], null],
   ['no script shown before the runs', [run(reproduction.before, 1), run(reproduction.after, 0), script], null],
+  ['the script shown again after both runs', [script, run(reproduction.before, 1), run(reproduction.after, 0), shownAgain], 'fixed'],
 ];
+
+
+function evidenceCheck(): Check {
+  const name = "Verify's evidence keeps the script shown before the base run, when the script is shown again after both runs";
+  const settled = agentSteps.settle({ step: 'verify', output: { outcome: 'done', summary: 'Ran both.', blocks: [], behavior: 'fixed' }, commands: [script, run(reproduction.before, 1), run(reproduction.after, 0), shownAgain], change: { pushed: 'a'.repeat(40), carried: null } });
+  const kept = settled.evidence?.['script'];
+  return kept === script.output ? pass(name, kept) : fail(name, `the evidence holds ${JSON.stringify(kept ?? null)}, not ${script.output}`);
+}
 
 function settleChecks(): readonly Check[] {
   return settleCases.map(([what, commands, expected]) => {
@@ -424,7 +434,7 @@ export const scenarios: readonly Scenario[] = [
   {
     name: 'code-change',
     summary: "checks the Code change declaration against the task model's shape and runs each step's judge on reviews of every outcome",
-    run: () => Promise.resolve([shapeCheck(), builtCheck(), ...judgeChecks(), ...settleChecks(), ...implementChecks(), promptCheck()]),
+    run: () => Promise.resolve([shapeCheck(), builtCheck(), ...judgeChecks(), ...settleChecks(), evidenceCheck(), ...implementChecks(), promptCheck()]),
   },
   landModel,
   {

@@ -92,9 +92,11 @@ const behaviorOf = (before: Ran, after: Ran): 'fixed' | 'still_wrong' | null => 
 type Runs = { readonly script: Ran; readonly before: Ran; readonly after: Ran };
 
 function runsOf(commands: readonly Ran[]): Runs | undefined {
-  const at = { script: lastRun(commands, reproduction.show), before: lastRun(commands, reproduction.before), after: lastRun(commands, reproduction.after) };
-  const [script, before, after] = [commands[at.script], commands[at.before], commands[at.after]];
-  if (script === undefined || before === undefined || after === undefined || !(at.script < at.before && at.before < at.after)) return undefined;
+  const at = lastRun(commands, reproduction.before);
+  const after = commands.slice(at + 1)[lastRun(commands.slice(at + 1), reproduction.after)];
+  const script = commands.slice(0, at)[lastRun(commands.slice(0, at), reproduction.show)];
+  const before = commands[at];
+  if (at < 0 || script === undefined || before === undefined || after === undefined) return undefined;
   return { script, before, after };
 }
 
