@@ -130,7 +130,7 @@ export function decide(workflow: Workflow, task: Task, verdict: StepVerdict, att
   if (problem !== undefined) return park(kept(task), problem);
   if (verdict === 'pass') {
     const ungated = kind.owes.some(owed => owed.irreversible) && !task.gates.every(gate => task.approved.includes(gate));
-    return ungated ? park(kept(task), gatesFirst(kind.name)) : passed(workflow, task, kind, attempt);
+    return ungated ? park({ ...kept(task), retries: 0 }, gatesFirst(kind.name)) : passed(workflow, task, kind, attempt);
   }
   const failure = kind.failures[verdict];
   if (failure === undefined) throw new Error(`The ${kind.name} step of ${workflow.name} declares no verdict ${verdict}.`);

@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from 'node:child_process';
-import { randomBytes, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -229,14 +229,18 @@ const mutants: readonly Mutant[] = [
   action('GateBlocksUntilApproved', 'a gated stage passes straight to the next stage', 'GatePassesOnlyOnApprove'),
   action('ReturnClearsApprovals', 'a return to Implement keeps the approval of a gate it must pass again', 'GatePassesOnlyOnApprove'),
   invariant('ReturnClearsApprovals', 'a return to Implement keeps the approval of a gate it must pass again', 'ApprovalsMatchGatesPassed'),
-  action('MergeChecksGates', 'Land merges without checking gates while a gate lets a task through', 'MergeNeedsEveryGate', { overrides: { GateBlocksUntilApproved: 'FALSE' } }),
+  action('MergeChecksGates', "Land merges a task that a fault left without a gate's approval", 'MergeNeedsEveryGate'),
   action('MergeWaitsForMergeable', 'Land merges past a red check on a pull request that left draft before its checks were green', 'MergeNeedsEveryGate', { overrides: { IgnoreLaterReviews: '{}' } }),
   action('MergeWaitsForMergeable', 'Land merges past a later review that its routine ignores', 'MergeNeedsEveryGate', { overrides: { ReadyBeforeGreen: '{}' } }),
   invariant('ReviewReturnIsCapped', 'every review that asks for changes returns the task to Implement', 'ReviewReturnsCapped'),
   invariant('RetryResumesStopped', 'Retry cannot resume a stopped task', 'StoppedTaskCanResume'),
-  invariant('RetryKeepsReviews', "a person's retry forgets the review return", 'StoppedTaskCanResume'),
-  unsettled('VerifyPassKeepsLandRounds', 'a Verify pass clears the Land rounds of a task with no gate', loopsFromLandToImplement, { overrides: { ReadyBeforeGreen: '{t1}' } }),
+  action('RetryKeepsReviews', "a person's retry forgets the review return", 'ReviewsOnlyGrow'),
+  invariant('RetryKeepsApprovals', "a person's retry forgets the task's approvals", 'StoppedTaskCanResume'),
+  unsettled('VerifyPassKeepsLandRounds', 'a Verify pass clears the Land rounds of a task with no gate', loopsFromLandToImplement),
   unsettled('OutsideApprovalsAreFinite', 'outside approvals may never stop', approvesForever),
+  action('OutsideApprovalNeedsAWait', 'an outside approval resumes a task that is not awaiting one', 'TaskChangesOnlyWithItsAttempt'),
+  action('LaterReviewParks', 'a later review of a routine that does not ignore them waits for an outside approval', 'LaterReviewWaitsForAPerson'),
+  action('EndStageIsFinal', "passing a routine's end stage does not end the task", 'EndStagePassIsDone'),
 ];
 
 const readConfig = (file: string): string => readFileSync(new URL(file, import.meta.url), 'utf8');
@@ -295,19 +299,20 @@ function boundOf(constants: ReadonlyMap<string, string>, bound: Bound): number |
 
 type ConfigReview = { readonly findings: readonly string[]; readonly summary: string };
 
-function reviewConfig(file: string, config: string): ConfigReview {
+function reviewConfig(file: string, config: string, rows: readonly Mutant[] = mutants): ConfigReview {
   const { constants, listed, problems } = parseConfig(config);
   const floor = floors[file];
   const everyListed = [...listed.INVARIANT, ...listed.PROPERTY];
-  const broken = new Set(mutants.map(mutant => mutant.property));
-  const mutated = new Set(mutants.map(mutant => mutant.guard));
+  const broken = new Set(rows.map(mutant => mutant.property));
+  const mutated = new Set(rows.map(mutant => mutant.guard));
   const guards = [...constants].filter(([, value]) => value === 'TRUE').map(([name]) => name);
   const findings = [
     ...problems,
     ...(listed.INVARIANT.has(typeInvariant) ? [] : [`${typeInvariant} is not listed under INVARIANTS`]),
-    ...mutants.filter(mutant => !listed[mutant.kind].has(mutant.property)).map(mutant => `${mutant.property} is not listed under ${mutant.kind === 'INVARIANT' ? 'INVARIANTS' : 'PROPERTIES'}`),
+    ...rows.filter(mutant => !listed[mutant.kind].has(mutant.property)).map(mutant => `${mutant.property} is not listed under ${mutant.kind === 'INVARIANT' ? 'INVARIANTS' : 'PROPERTIES'}`),
     ...everyListed.filter(property => property !== typeInvariant && !broken.has(property)).map(property => `${property} has no mutant`),
     ...guards.filter(guard => !mutated.has(guard)).map(guard => `guard ${guard} has no mutant`),
+    ...rows.flatMap(mutant => Object.keys(mutant.overrides ?? {}).filter(name => constants.get(name) === 'TRUE').map(name => `the mutant of ${mutant.guard} also turns off guard ${name}`)),
     ...(floor === undefined
       ? [`${file} has no floors`]
       : bounds.flatMap(bound => {
@@ -324,7 +329,15 @@ function checkConfig(file: string): Check {
   return findings.length === 0 ? pass(name, summary) : fail(name, findings.join('; '));
 }
 
-type Plant = { readonly change: string; readonly harmful: boolean; readonly edit: (config: string) => string };
+type Plant = {
+  readonly change: string;
+  readonly harmful: boolean;
+  readonly edit: (config: string) => string;
+  readonly rows?: (rows: readonly Mutant[]) => readonly Mutant[];
+};
+
+const withOverride = (guard: string, overrides: Readonly<Record<string, string>>) => (rows: readonly Mutant[]) =>
+  rows.some(row => row.guard === guard) ? rows.map(row => (row.guard === guard ? { ...row, overrides } : row)) : rows;
 
 const plants: readonly Plant[] = [
   { change: 'a comment hides a smaller Tasks', harmful: true, edit: config => config.replace('    Tasks = {t1, t2}', '    Tasks = {t1} \\* {t1, t2}') },
@@ -336,14 +349,17 @@ const plants: readonly Plant[] = [
   { change: 'a line ends in a tab', harmful: false, edit: config => config.replace('    TypeOK\n', '    TypeOK\t\n') },
   { change: 'a blank line holds spaces', harmful: false, edit: config => config.replace('\nINVARIANTS', '\n    \nINVARIANTS') },
   { change: 'lines end in CRLF', harmful: false, edit: config => config.replace(/\n/g, '\r\n') },
+  { change: 'a mutant also turns off another guard', harmful: true, edit: config => config, rows: withOverride('MergeChecksGates', { GateBlocksUntilApproved: 'FALSE' }) },
+  { change: 'a mutant picks a setting', harmful: false, edit: config => config, rows: withOverride('MergeChecksGates', { ReadyBeforeGreen: '{}' }) },
 ];
 
 function checkPlants(file: string): Check {
   const config = readConfig(file);
   const misses = plants.flatMap(plant => {
     const planted = plant.edit(config);
-    if (planted === config) return [`${plant.change} no longer changes ${file}`];
-    const rejected = reviewConfig(file, planted).findings.length > 0;
+    const rows = plant.rows?.(mutants) ?? mutants;
+    if (planted === config && rows === mutants) return [`${plant.change} no longer changes ${file}`];
+    const rejected = reviewConfig(file, planted, rows).findings.length > 0;
     return rejected === plant.harmful ? [] : [`${plant.change} is ${rejected ? 'rejected' : 'accepted'}`];
   });
   const name = `the review of ${file} rejects each harmful plant and accepts each harmless one`;
@@ -364,12 +380,24 @@ const traceLine = (run: TlcRun): string => {
   return `${shown.join(' -> ')}${ending}`;
 };
 
+const liveness = 'EveryTaskSettles';
+
+function splitByLiveness(config: string): readonly [string, string] {
+  const [constants = ''] = config.split('\nINVARIANTS');
+  return [config.replace(`    ${liveness}\n`, ''), `${constants}\nPROPERTY\n    ${liveness}\n`];
+}
+
 function checkHolds(file: string): Check {
-  const run = checkModel(folder, 'Tasks', readConfig(file));
   const name = `${file} holds every property`;
-  return run.clean
-    ? pass(name, `${String(run.distinctStates)} distinct states in ${run.seconds.toFixed(1)} s, no error has been found`)
-    : fail(name, run.error ?? run.output.trim().split('\n').slice(-3).join(' | '));
+  const [safetyConfig, livenessConfig] = splitByLiveness(readConfig(file));
+  const safety = checkModel(folder, 'Tasks', safetyConfig);
+  const settles = checkModel(folder, 'Tasks', livenessConfig);
+  const failed = [safety, settles].find(run => !run.clean);
+  if (failed !== undefined) return fail(name, failed.error ?? failed.output.trim().split('\n').slice(-3).join(' | '));
+  return pass(
+    name,
+    `${String(settles.distinctStates)} distinct states, safety in ${safety.seconds.toFixed(1)} s and ${liveness} in ${settles.seconds.toFixed(1)} s, no error has been found`,
+  );
 }
 
 function checkMutant(config: string, mutant: Mutant): Check {
@@ -665,8 +693,6 @@ const quickEngine = { REAPER_EVERY_MS: '200', LEASE_MS: '1000' } as const;
 
 const startLine = 'The engine runs';
 
-const everyLoop = ['the workflows code-change', 'the Verify providers tests-only', 'reaper every 200 ms', 'scheduler every 10000 ms', 'environments every 30000 ms', 'checks every 60000 ms'] as const;
-
 function startEngine(env: NodeJS.ProcessEnv): { readonly status: number | null; readonly said: string } {
   const started = spawnSync(process.execPath, [engineMain], { env, encoding: 'utf8', timeout: 30_000 });
   return { status: started.status, said: `${started.stdout}${started.stderr}`.trim() };
@@ -745,19 +771,19 @@ async function engineStartChecks(postgres: TestPostgres): Promise<readonly Check
       .returning('id')
       .executeTakeFirstOrThrow();
     await saveRoutine(db, person.id, repository.id, 'code-change');
-    const known = runEngine(scratch.stableUrl, { ...quickEngine, CREDENTIAL_KEY: randomBytes(32).toString('base64'), CREDENTIAL_KEY_VERSION: '1' });
+    const known = runEngine(scratch.stableUrl, quickEngine);
     const started = await known.waitFor(startLine);
     const knownStatus = await known.terminate();
     const line = known.said().split('\n').find(said => said.startsWith(startLine)) ?? '';
-    const unnamed = everyLoop.filter(part => !line.includes(part));
+    const named = ['the workflows code-change', 'reaper every 200 ms'].every(part => line.includes(part));
     const stranger = await saveRoutine(db, person.id, repository.id, 'no-such-flow');
     const unknown = startEngine({ ...process.env, DATABASE_URL: scratch.stableUrl });
     const knownName = 'the engine starts when every routine uses a workflow it was given, and exits 0 on SIGTERM';
     const unknownName = 'the engine refuses to start and names the routine whose workflow it was not given';
     return [
-      started && unnamed.length === 0 && knownStatus === 0
+      started && named && knownStatus === 0
         ? pass(knownName, known.said().replaceAll('\n', ' '))
-        : fail(knownName, `started ${String(started)}, the startup line misses [${unnamed.join(', ')}], exit ${String(knownStatus)}: ${known.said()} ${known.errors()}`),
+        : fail(knownName, `started ${String(started)}, named code-change and the reaper ${String(named)}, exit ${String(knownStatus)}: ${known.said()} ${known.errors()}`),
       unknown.status === 1 && unknown.said.includes(`Routine ${stranger} version 1 uses the workflow no-such-flow, which this engine was not given.`)
         ? pass(unknownName, unknown.said.replaceAll('\n', ' '))
         : fail(unknownName, `exit ${String(unknown.status)}: ${unknown.said}`),

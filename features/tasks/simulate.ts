@@ -167,9 +167,10 @@ const moves = [
   'badName',
   'restart',
   'pause',
+  'loseApproval',
 ] as const;
 
-const faults: ReadonlySet<Move> = new Set<Move>(['hang', 'wake', 'crash', 'burst', 'late', 'reassign', 'doubleDecision', 'doneWrite', 'bareIntake', 'noteless', 'strayTarget', 'race', 'badName', 'restart', 'pause']);
+const faults: ReadonlySet<Move> = new Set<Move>(['hang', 'wake', 'crash', 'burst', 'late', 'reassign', 'doubleDecision', 'doneWrite', 'bareIntake', 'noteless', 'strayTarget', 'race', 'badName', 'restart', 'pause', 'loseApproval']);
 
 const people: ReadonlySet<Move> = new Set<Move>(['stop', 'retry', 'approve', 'sendBack', 'answer', 'stale', 'outside']);
 
@@ -191,7 +192,7 @@ type Profile = {
   readonly effects: Readonly<Record<Effect, number>>;
 };
 
-const quietFaults = { hang: 0, wake: 0, crash: 0, burst: 0, late: 0, reassign: 0, doubleDecision: 0, doneWrite: 0, bareIntake: 0, noteless: 0, strayTarget: 0, race: 0, badName: 0, restart: 0, pause: 0 } as const;
+const quietFaults = { hang: 0, wake: 0, crash: 0, burst: 0, late: 0, reassign: 0, doubleDecision: 0, doneWrite: 0, bareIntake: 0, noteless: 0, strayTarget: 0, race: 0, badName: 0, restart: 0, pause: 0, loseApproval: 0 } as const;
 
 const noPeople = { stop: 0, retry: 0, approve: 0, sendBack: 0, answer: 0, stale: 0, outside: 0 } as const;
 
@@ -201,7 +202,7 @@ const mostlyPass = { pass: 10, fail: 1, ask: 0.3, return: 0.6, rerun: 0.6, revie
 
 const everyEffect = { pass: 5, fail: 2, ask: 1, return: 2, rerun: 2, review: 1, await: 1 } as const;
 
-const t2Faults = { hang: 1, wake: 1, crash: 1, burst: 1, late: 2, reassign: 1, doubleDecision: 0.2, doneWrite: 0.2, bareIntake: 0.2, noteless: 0.2, strayTarget: 0.3, race: 0.5, badName: 0.2, restart: 0, pause: 0 } as const;
+const t2Faults = { hang: 1, wake: 1, crash: 1, burst: 1, late: 2, reassign: 1, doubleDecision: 0.2, doneWrite: 0.2, bareIntake: 0.2, noteless: 0.2, strayTarget: 0.3, race: 0.5, badName: 0.2, restart: 0, pause: 0, loseApproval: 0.5 } as const;
 
 const oneEngine = { engines: 1, outage: { realMs: 0, virtualMs: 0 } } as const;
 
@@ -263,7 +264,7 @@ export const profiles: Readonly<Record<ProfileName, Profile>> = {
     ...oneEngine,
     stepMs: 6_000,
     burst: 5,
-    odds: { claim: 6, renew: 4, finish: 6, ...quietFaults, ...noPeople, approve: 1.5, retry: 0.5, outside: 1 },
+    odds: { claim: 6, renew: 4, finish: 6, ...quietFaults, ...noPeople, approve: 1.5, retry: 0.5, outside: 1, loseApproval: 1 },
     effects: everyEffect,
   },
   people: {
@@ -1027,6 +1028,16 @@ const rules: Readonly<Record<Move, Rule>> = {
       return `Postgres paused for ${String(profile.outage.realMs)} ms while the engine's pass at ${String(due - epoch)} ms waited, and ${String(profile.outage.virtualMs)} simulated ms passed: ${await noteReleases(db, world, from)}`;
     },
   },
+  loseApproval: {
+    allowed: (_world, quiet) => !quiet,
+    perform: async ({ db, world, random }) => {
+      const task = pick(random, await approvalsToLose(db));
+      if (task === undefined) return 'no ready task at an irreversible step holds an approval that Tasks.tla lets it lose';
+      await db.updateTable('task').set({ approved: [] }).where('id', '=', task).execute();
+      count(world, 'approval lost');
+      return `task ${task}: its approvals went missing`;
+    },
+  },
   strayTarget: {
     allowed: (_world, quiet) => !quiet,
     perform: async ({ db, world, random, now }) => {
@@ -1051,6 +1062,26 @@ const rules: Readonly<Record<Move, Rule>> = {
     },
   },
 };
+
+function losesApprovalWithinItsModel(workflow: Workflow | undefined, step: string, approved: readonly string[]): boolean {
+  const kind = workflow?.steps.find(candidate => candidate.name === step);
+  if (workflow === undefined || kind?.owes.some(owed => owed.irreversible) !== true) return false;
+  const at = (name: string): number => workflow.steps.findIndex(candidate => candidate.name === name);
+  const targets = Object.values(kind.failures).flatMap(failure => ('to' in failure ? [failure.to] : []));
+  return approved.every(gate => targets.every(target => at(gate) >= at(target)));
+}
+
+async function approvalsToLose(db: Database): Promise<readonly string[]> {
+  const ready = await db
+    .selectFrom('task')
+    .select(['task.id', 'task.workflow', 'task.step', sql<string[]>`task.approved::text[]`.as('approved')])
+    .where('task.state', '=', 'ready')
+    .where(sql<boolean>`cardinality(task.approved) > 0`)
+    .where(eb => eb.not(eb.exists(eb.selectFrom('attempt').select('attempt.id').whereRef('attempt.task_id', '=', 'task.id').where('attempt.finished_at', 'is', null))))
+    .orderBy('task.id')
+    .execute();
+  return ready.filter(task => losesApprovalWithinItsModel(byName.get(task.workflow), task.step, task.approved)).map(task => task.id);
+}
 
 async function noteReleases(db: Database, world: World, from: number): Promise<string> {
   const said = world.engines.log.slice(from);
