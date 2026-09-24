@@ -158,12 +158,14 @@ async function claimed(db: Database, run: string): Promise<Claimed> {
   };
 }
 
-async function claimNext(db: Database, routine: string, now: Date, leaseMs: number): Promise<Claim> {
-  const closed = await closeCollapsed(db, routine, now);
+async function claimNext(db: Database, routine: string, unfinished: boolean, now: Date, leaseMs: number): Promise<Claim> {
+  const closed = unfinished ? await closeCollapsed(db, routine, now) : 0;
   const claim = randomUUID();
   try {
     const run =
-      (await retryExpired(db, routine, now, leaseMs, claim)) ?? (await claimSlot(db, routine, now, leaseMs, claim)) ?? (await claimPress(db, routine, now, leaseMs, claim));
+      (unfinished ? await retryExpired(db, routine, now, leaseMs, claim) : undefined) ??
+      (await claimSlot(db, routine, now, leaseMs, claim)) ??
+      (unfinished ? await claimPress(db, routine, now, leaseMs, claim) : undefined);
     return { run: run === undefined ? undefined : await claimed(db, run), closed };
   } catch (error) {
     if (isPauseRefusal(error)) return { run: undefined, closed };
@@ -209,9 +211,13 @@ export function scheduler(settings: SchedulerSettings): Loop {
     everyMs: settings.everyMs,
     pass: async db => {
       const lines: string[] = [];
-      const routines = await db.selectFrom('routine').select('id').orderBy('id').execute();
-      for (const { id } of routines) {
-        const claim = await claimNext(db, id, await settings.now(db), settings.leaseMs);
+      const routines = await db
+        .selectFrom('routine')
+        .select(eb => ['routine.id', eb.exists(eb.selectFrom('routine_run as run').select('run.id').whereRef('run.routine_id', '=', 'routine.id').where('run.finished_at', 'is', null)).$castTo<boolean>().as('unfinished')])
+        .orderBy('routine.id')
+        .execute();
+      for (const { id, unfinished } of routines) {
+        const claim = await claimNext(db, id, unfinished, await settings.now(db), settings.leaseMs);
         if (claim.closed > 0) lines.push(`routine ${id} closed ${String(claim.closed)} expired runs of slots a newer slot replaced, as lost`);
         if (claim.run !== undefined) lines.push(await runClaimed(db, claim.run, settings));
       }

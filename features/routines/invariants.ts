@@ -115,7 +115,7 @@ export const properties = {
   },
   PausedRoutineStartsNoRun: {
     moment: 'each-step',
-    breaks: sql`select s.id, s.routine_id from started s join routine on routine.id = s.routine_id where routine.paused_by is not null`,
+    breaks: sql`select s.id, s.routine_id, pause.at as paused_at, s.claimed_at from started s join routine on routine.id = s.routine_id join human_action pause on pause.id = routine.paused_by where pause.at <= s.claimed_at`,
     plants: [
       {
         setup: [
@@ -131,7 +131,7 @@ export const properties = {
     moment: 'each-step',
     breaks: sql`select s.id, s.routine_id, s.slot from started s
       join routine_version v on v.routine_id = s.routine_id and v.version = s.version, checked
-      where s.slot < date_bin(v.every, checked.at, ${since})`,
+      where s.slot < date_bin(v.every, checked.before, ${since})`,
     plants: [{ setup: [], violation: liveRun(-60) }],
   },
   DueSlotsRun: {
@@ -163,14 +163,14 @@ const propertyNames = Object.keys(properties).filter(isPropertyName);
 
 const violations = z.array(z.object({ property: z.custom<PropertyName>(isPropertyName), row: z.unknown() }));
 
-const snapshot = z.object({ runs: z.array(z.object({ id: z.string(), claim: z.string() })), tasks: z.array(z.object({ id: z.string(), routine_id: z.string() })) });
+const snapshot = z.object({ runs: z.array(z.object({ id: z.string(), claim: z.string() })), tasks: z.array(z.object({ id: z.string(), routine_id: z.string() })), checkedAt: z.iso.datetime().nullable() });
 
 type Snapshot = z.infer<typeof snapshot>;
 
-const empty: Snapshot = { runs: [], tasks: [] };
+const empty: Snapshot = { runs: [], tasks: [], checkedAt: null };
 
 const helpers = (before: Snapshot, checkedAt: Date, slackMs: number) => sql`
-  checked (at, slack) as (select ${checkedAt}::timestamptz, make_interval(secs => ${slackMs / 1000})),
+  checked (at, slack, before) as (select ${checkedAt}::timestamptz, make_interval(secs => ${slackMs / 1000}), coalesce(${before.checkedAt}::timestamptz, '-infinity')),
   prior_runs as (select * from jsonb_to_recordset(${JSON.stringify(before.runs)}::jsonb) as p(id bigint, claim uuid)),
   prior_tasks as (select * from jsonb_to_recordset(${JSON.stringify(before.tasks)}::jsonb) as p(id bigint, routine_id bigint)),
   started as (
@@ -188,18 +188,18 @@ async function check(db: Database, moment: Moment, before: Snapshot, checkedAt: 
   return violations.parse(rows);
 }
 
-async function snapshotOf(db: Database): Promise<Snapshot> {
+async function snapshotOf(db: Database): Promise<Omit<Snapshot, 'checkedAt'>> {
   const { rows } = await sql<{ state: unknown }>`select jsonb_build_object(
       'runs', coalesce((select jsonb_agg(jsonb_build_object('id', id::text, 'claim', claim)) from routine_run where claim is not null), '[]'),
       'tasks', coalesce((select jsonb_agg(jsonb_build_object('id', id::text, 'routine_id', routine_id::text)) from task), '[]')) as state`.execute(db);
-  return snapshot.parse(rows[0]?.state);
+  return snapshot.omit({ checkedAt: true }).parse(rows[0]?.state);
 }
 
 export async function watch(db: Database, startedAt: Date, slackMs: number): Promise<Watch> {
   let before = empty;
   const step = async (checkedAt: Date): Promise<readonly Violation[]> => {
     const found = await check(db, 'each-step', before, checkedAt, slackMs);
-    before = await snapshotOf(db);
+    before = { ...(await snapshotOf(db)), checkedAt: checkedAt.toISOString() };
     return found;
   };
   const atStart = await step(startedAt);
