@@ -8,7 +8,7 @@ export type Generated<T> = T extends ColumnType<infer S, infer I, infer U>
   ? ColumnType<S, I | undefined, U>
   : ColumnType<T, T | undefined, T>;
 
-export type HumanActionKind = "edit_routine" | "pause_routine" | "replace_credential" | "resume_routine" | "retry_task" | "stop_task";
+export type HumanActionKind = "add_repository" | "approve" | "edit_draft" | "edit_repository" | "edit_routine" | "pause_routine" | "pick_choice" | "replace_credential" | "resume_routine" | "retry_task" | "send_back" | "stop_task" | "untick_items";
 
 export type Int8 = ColumnType<string, bigint | number | string, bigint | number | string>;
 
@@ -26,15 +26,16 @@ export type JsonValue = JsonArray | JsonObject | JsonPrimitive;
 
 export type PersonKind = "person" | "shared";
 
-export type Stage = "implement" | "land" | "specify" | "verify";
-
 export type TaskState = "done" | "ready" | "stopped" | "waiting";
 
 export type Timestamp = ColumnType<Date, Date | string, Date | string>;
 
-export type Verdict = "behavior_fail" | "environment_fail" | "fail" | "lost" | "pass" | "stopped";
+export type Verdict = "behavior_fail" | "changes_requested" | "environment_fail" | "fail" | "lost" | "needs_input" | "pass" | "red_check" | "review_required" | "stopped";
+
+export type WaitingOn = "answer" | "approval" | "outside_approval" | "retry";
 
 export interface Attempt {
+  epoch: number;
   finished_at: Timestamp | null;
   id: Generated<Int8>;
   lease_until: Timestamp;
@@ -43,8 +44,8 @@ export interface Attempt {
   routine_id: Int8;
   routine_version: number;
   run_as_id: Int8;
-  stage: Stage;
   started_at: Timestamp;
+  step: string;
   task_id: Int8;
   verdict: Verdict | null;
 }
@@ -67,11 +68,13 @@ export interface Credential {
 
 export interface HumanAction {
   at: Timestamp;
+  attempt_id: Int8 | null;
   connector: ConnectorKind | null;
   detail: Generated<Json>;
   id: string;
   kind: HumanActionKind;
   person_id: Int8;
+  repository_id: Int8 | null;
   routine_id: Int8 | null;
   task_id: Int8 | null;
 }
@@ -88,6 +91,7 @@ export interface Repository {
   branch: string;
   github: string;
   id: Generated<Int8>;
+  saved_by: string;
 }
 
 export interface Routine {
@@ -97,34 +101,54 @@ export interface Routine {
   run_as_id: Int8 | null;
 }
 
-export interface RoutineVersion {
-  action_id: string;
-  goal: string;
-  name: string;
-  repository_id: Int8;
+export interface RoutineStep {
+  instructions: Generated<string>;
   routine_id: Int8;
-  schedule: string;
+  skills: Generated<string[]>;
+  step: string;
   version: number;
 }
 
+export interface RoutineVersion {
+  action_id: string;
+  gates: Generated<string[]>;
+  goal: string;
+  ignore_later_reviews: Generated<boolean>;
+  last_step: string | null;
+  name: string;
+  needs_repository: boolean;
+  repository_id: Int8 | null;
+  routine_id: Int8;
+  schedule: string;
+  source: Json;
+  version: number;
+  workflow: string;
+}
+
 export interface Task {
+  approved: Generated<string[]>;
   assignee_account_id: string | null;
+  counts: Generated<Json>;
+  epoch: Generated<number>;
   found_at: Timestamp;
   found_version: number;
   id: Generated<Int8>;
+  input_waits: Generated<number>;
   key: string;
   lost: Generated<number>;
+  needs_repository: boolean;
   ready: Generated<boolean | null>;
-  repository_id: Int8;
-  reruns: Generated<number>;
+  repository_id: Int8 | null;
   retries: Generated<number>;
-  rounds: Generated<number>;
+  review_attempt: Int8 | null;
   routine_id: Int8;
-  stage: Generated<Stage>;
   state: Generated<TaskState>;
+  step: string;
   stopped_by: string | null;
   title: string;
+  waiting_on: WaitingOn | null;
   waiting_reason: string | null;
+  workflow: string;
 }
 
 export interface DB {
@@ -135,6 +159,7 @@ export interface DB {
   person: Person;
   repository: Repository;
   routine: Routine;
+  routine_step: RoutineStep;
   routine_version: RoutineVersion;
   task: Task;
 }

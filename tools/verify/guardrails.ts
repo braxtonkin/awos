@@ -5,7 +5,7 @@ import { basename, dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { fail, pass, type Check, type Scenario } from './check.ts';
 
-type Tool = 'tsc' | 'node' | 'eslint' | 'depcruise' | 'check' | 'shape' | 'sql-comments' | 'model-names' | 'db-types' | 'models';
+type Tool = 'tsc' | 'node' | 'eslint' | 'depcruise' | 'check' | 'shape' | 'sql-comments' | 'model-names' | 'step-names' | 'db-types' | 'models';
 
 type Plant =
   | { readonly file: string; readonly source: string; readonly linkTo?: never }
@@ -76,6 +76,10 @@ const generatedTypes = 'shared/db/types.ts';
 const tableMigration = migration('create table planted (id int primary key);', 'drop table planted;');
 
 const staleTypes = `${generatedTypes} differs from a fresh generation`;
+
+const codeChange = 'code-change';
+
+const plantedStep = "name: 'planted', reads: [], prompt: 'Planted.', needsRepository: true, canEnd: true, owes: [], output: review, requires: ['text'], failures: { fail: { kind: 'fail' } }";
 
 const violations: readonly Violation[] = [
   {
@@ -886,6 +890,34 @@ const violations: readonly Violation[] = [
     companions: [{ file: plantedInvariants, source: holdsInvariants }],
   },
   {
+    name: "step-names rejects a step's name in the runner",
+    file: 'features/tasks/planted-step.ts',
+    source: "export const next = 'implement';\n",
+    tool: 'step-names',
+    expect: [`features/tasks/planted-step.ts:1 names the step of ${codeChange} "implement"`],
+  },
+  {
+    name: "step-names rejects a step's name quoted in a sql template in the engine",
+    file: 'services/engine/planted.ts',
+    source: "import { sql } from 'kysely';\n\nexport const query = sql`select id from task where step = 'verify'`;\n",
+    tool: 'step-names',
+    expect: [`services/engine/planted.ts:3 names the step of ${codeChange} "verify"`],
+  },
+  {
+    name: "step-names rejects a workflow's name as a property key",
+    file: 'features/tasks/planted-key.ts',
+    source: `export const caps = { '${codeChange}': 3 };\n`,
+    tool: 'step-names',
+    expect: [`features/tasks/planted-key.ts:1 names the workflow "${codeChange}"`],
+  },
+  {
+    name: 'npm run check runs the step-names check',
+    file: 'features/tasks/planted-check.ts',
+    source: "export const last = 'land';\n",
+    tool: 'check',
+    expect: [`names the step of ${codeChange} "land"`],
+  },
+  {
     name: 'db-types rejects the committed types when a planted migration adds a table',
     file: plantedMigration,
     source: tableMigration,
@@ -913,6 +945,27 @@ const violations: readonly Violation[] = [
     source: "import type { Secret } from './kinds.ts';\n\nexport const login: Secret = { connector: 'codex', login: '{}' };\n",
     tool: 'tsc',
     expect: ['TS2322', 'TS2741'],
+  },
+  {
+    name: 'tsc rejects a step kind built without step(), so every verdict comes from the declared output',
+    file: `features/${codeChange}/planted-kind.ts`,
+    source: `import { review } from '../../shared/review.ts';\nimport type { StepKind } from '../../shared/workflow.ts';\n\nexport const planted: StepKind = { ${plantedStep}, blocked: 'fail', judge: () => 'pass' };\n`,
+    tool: 'tsc',
+    expect: ['TS2322'],
+  },
+  {
+    name: 'tsc rejects a step whose blocked verdict its failures do not declare',
+    file: `features/${codeChange}/planted-blocked.ts`,
+    source: `import { review } from '../../shared/review.ts';\nimport { step } from '../../shared/workflow.ts';\n\nexport const planted = step({ ${plantedStep}, blocked: 'environment_fail', done: () => 'pass' });\n`,
+    tool: 'tsc',
+    expect: ['TS2322'],
+  },
+  {
+    name: 'tsc rejects a step whose output maps to a verdict its failures do not declare',
+    file: `features/${codeChange}/planted-done.ts`,
+    source: `import { review } from '../../shared/review.ts';\nimport { step } from '../../shared/workflow.ts';\n\nexport const planted = step({ ${plantedStep}, blocked: 'fail', done: () => 'behavior_fail' });\n`,
+    tool: 'tsc',
+    expect: ['TS2322'],
   },
 ];
 
@@ -1026,6 +1079,18 @@ const allowances: readonly Allowance[] = [
     companions: [{ file: plantedInvariants, source: "export const properties = { PlantedHolds: 1, 'PlantedStep': 2, SimulatorOnly: 3 } as const satisfies Record<string, number>;\n" }],
   },
   {
+    name: "step-names accepts a step's name in a test, which checks the runner rather than running it",
+    file: 'features/tasks/planted.test.ts',
+    source: "export const step = 'implement';\n",
+    tool: 'step-names',
+  },
+  {
+    name: "step-names accepts a step's name inside a sentence, which names no step",
+    file: 'features/tasks/planted-prose.ts',
+    source: "export const note = 'Implement the plan, then verify it on land and sea.';\n",
+    tool: 'step-names',
+  },
+  {
     name: 'model-names accepts a model that lands before its code, in a feature that holds only verify.ts',
     file: plantedConfig,
     source: holdsAndStepConfig,
@@ -1123,6 +1188,10 @@ const tools: Record<
     command: () => ['npm', 'run', '--silent', 'model-names'],
     caught: startsALine,
   },
+  'step-names': {
+    command: () => ['npm', 'run', '--silent', 'step-names'],
+    caught: startsALine,
+  },
   'db-types': {
     command: () => ['npm', 'run', '--silent', 'db-types'],
     caught: startsALine,
@@ -1194,7 +1263,7 @@ export const guardrails: Scenario = {
   summary: 'plants each violation a check must reject and each line it must accept, and proves both',
   run: async () => [
     ...(await withCopy(async copy => {
-      const checks: Check[] = (['tsc', 'eslint', 'depcruise', 'shape', 'sql-comments', 'model-names', 'db-types'] as const).map(tool => {
+      const checks: Check[] = (['tsc', 'eslint', 'depcruise', 'shape', 'sql-comments', 'model-names', 'step-names', 'db-types'] as const).map(tool => {
         const clean = run(tool, copy, '.');
         const name = `the unplanted copy passes ${tool}`;
         const problem = clean.status === 0 ? tools[tool].unclean?.(clean) : (tools[tool].summary ?? firstLines)(clean);

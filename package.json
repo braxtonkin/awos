@@ -8,13 +8,14 @@
     "node": ">=24"
   },
   "scripts": {
-    "check": "npm run shape && npm run sql-comments && npm run model-names && npm run typecheck && npm run lint -- . && npm run boundaries && npm run db-types",
+    "check": "npm run shape && npm run sql-comments && npm run model-names && npm run step-names && npm run typecheck && npm run lint -- . && npm run boundaries && npm run db-types",
     "boundaries": "depcruise --config .dependency-cruiser.json --output-type err .",
     "db-types": "node tools/db-types/main.ts",
     "db:types": "node tools/db-types/main.ts --write",
     "lint": "eslint --config eslint.config.ts --max-warnings 0",
     "model-names": "node tools/model-names/main.ts",
     "shape": "node tools/shape/main.ts",
+    "step-names": "node tools/step-names/main.ts",
     "sql-comments": "node tools/sql-comments/main.ts",
     "test": "vitest run --dir features",
     "typecheck": "tsc --noEmit",
