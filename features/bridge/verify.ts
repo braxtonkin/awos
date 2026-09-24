@@ -1,6 +1,8 @@
 import type { Scenario } from '../../tools/verify/check.ts';
 import { defineModel, type Shape } from '../../tools/verify/models.ts';
 import type { TlcRun, TraceState } from '../../tools/verify/tlc.ts';
+import { liveScenarios } from './live.ts';
+import { simScenarios } from './sim-scenarios.ts';
 
 const numbersIn = (state: TraceState | undefined, variable: string): readonly number[] => {
   const listed = new RegExp(`\\b${variable} = [<{]+([^>}]*)`).exec(state?.text ?? '')?.[1];
@@ -105,4 +107,6 @@ export const scenarios: readonly Scenario[] = [
       { guard: 'EngineIsFair', property: 'EveryCommandApplied' },
     ],
   }),
+  ...simScenarios,
+  ...liveScenarios,
 ];
