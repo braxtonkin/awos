@@ -8,9 +8,9 @@ const corePrompt = (name: string): string => readFileSync(new URL(`prompts/${nam
 
 const may = <K extends string>({ kind }: { readonly kind: K }): { readonly kind: K; readonly irreversible: false } => ({ kind, irreversible: false });
 
-const planned = reviewWith('text', 'choice');
+const said = reviewWith('text', 'choice');
 
-const verified = review.extend({ behavior: z.enum(['fixed', 'still_wrong']).nullable() });
+const verified = said.extend({ behavior: z.enum(['fixed', 'still_wrong']).nullable() });
 
 export const workflow = {
   name: 'code-change',
@@ -24,7 +24,7 @@ export const workflow = {
       needsRepository: true,
       canEnd: false,
       owes: [may(actionKinds.ticketComment), may(actionKinds.ticketTransition), may(actionKinds.branchDelete)],
-      output: planned,
+      output: said,
       requires: ['text'],
       failures: { fail: { kind: 'fail' }, needs_input: { kind: 'ask' } },
       blocked: 'fail',
@@ -39,7 +39,7 @@ export const workflow = {
       needsRepository: true,
       canEnd: true,
       owes: [may(actionKinds.branchAdvance), may(actionKinds.prOpenDraft), may(actionKinds.ticketComment), may(actionKinds.branchDelete)],
-      output: review,
+      output: said,
       requires: ['text'],
       failures: { fail: { kind: 'fail' }, needs_input: { kind: 'ask' } },
       blocked: 'fail',

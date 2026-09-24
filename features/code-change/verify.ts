@@ -99,13 +99,16 @@ function implementChecks(): readonly Check[] {
 
 const listPlan = { outcome: 'done', summary: 'Planned.', blocks: [{ kind: 'list', title: null, items: ['Add the function.', 'Add its tests.'] }] };
 
-function specifyShapeCheck(): Check {
-  const name = "Specify's output schema offers only the blocks Specify reads, text and choice, so a plan in a list block cannot be returned";
-  const found = workflow.steps.find(kind => kind.name === 'specify');
-  if (found === undefined) return fail(name, 'there is no specify step');
-  const offered = [...JSON.stringify(outputSchema(found)).matchAll(/"enum":\["([a-z]+)"\]/g)].map(([, kind]) => kind).sort();
-  const accepted = found.output.safeParse(listPlan).success;
-  return JSON.stringify(offered) === JSON.stringify(['choice', 'text']) && !accepted ? pass(name, `offers ${offered.join(', ')}`) : fail(name, `offers ${offered.join(', ')}; a list plan ${accepted ? 'parses' : 'is refused'}`);
+const blockKinds: readonly string[] = ['text', 'list', 'choice', 'checklist', 'draft'];
+
+function agentShapeChecks(): readonly Check[] {
+  return workflow.steps.flatMap(found => {
+    if (found.runBy !== 'agent') return [];
+    const name = `${found.name}'s output schema offers only text and choice blocks, so a reply that puts its text in a list block cannot be returned`;
+    const offered = [...JSON.stringify(outputSchema(found)).matchAll(/"enum":\["([a-z]+)"\]/g)].map(([, kind]) => kind ?? '').filter(kind => blockKinds.includes(kind)).sort();
+    const accepted = found.output.safeParse({ ...listPlan, ...(found.name === 'verify' ? { behavior: null } : {}) }).success;
+    return [JSON.stringify(offered) === JSON.stringify(['choice', 'text']) && !accepted ? pass(name, `offers ${offered.join(', ')}`) : fail(name, `offers ${offered.join(', ')}; a list reply ${accepted ? 'parses' : 'is refused'}`)];
+  });
 }
 
 function promptCheck(): Check {
@@ -435,7 +438,7 @@ export const scenarios: readonly Scenario[] = [
   {
     name: 'code-change',
     summary: "checks the Code change declaration against the task model's shape and runs each step's judge on reviews of every outcome",
-    run: () => Promise.resolve([shapeCheck(), builtCheck(), ...judgeChecks(), ...settleChecks(), ...implementChecks(), specifyShapeCheck(), promptCheck()]),
+    run: () => Promise.resolve([shapeCheck(), builtCheck(), ...judgeChecks(), ...settleChecks(), ...implementChecks(), ...agentShapeChecks(), promptCheck()]),
   },
   landModel,
   {
