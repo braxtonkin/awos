@@ -26,16 +26,26 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        profile: [default, races, hangs, verdicts, people, needs-input, mixed, behavior, environment]
+        include:
+          - { name: tasks-default, run: tasks-sim --profile default --trace traces }
+          - { name: tasks-races, run: tasks-sim --profile races --trace traces }
+          - { name: tasks-hangs, run: tasks-sim --profile hangs --trace traces }
+          - { name: tasks-verdicts, run: tasks-sim --profile verdicts --trace traces }
+          - { name: tasks-people, run: tasks-sim --profile people --trace traces }
+          - { name: tasks-needs-input, run: tasks-sim --profile needs-input --trace traces }
+          - { name: tasks-mixed, run: tasks-sim --profile mixed --trace traces }
+          - { name: tasks-behavior, run: tasks-sim --profile behavior --trace traces }
+          - { name: tasks-environment, run: tasks-sim --profile environment --trace traces }
+          - { name: credentials, run: credentials-sim }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
       - run: docker compose build verify
       - run: docker compose run --rm verify npm ci
-      - run: docker compose run --rm verify npm run verify -- tasks-sim --profile ${{ matrix.profile }} --seeds 1000 --steps 1000 --from $(( $(date -u +%s) / 86400 * 1000 )) --trace traces
+      - run: docker compose run --rm verify npm run verify -- ${{ matrix.run }} --seeds 1000 --steps 1000 --from $(( $(date -u +%s) / 86400 * 1000 ))
       - if: failure() || cancelled()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: tasks-sim-${{ matrix.profile }}-traces
+          name: ${{ matrix.name }}-traces
           path: traces/
