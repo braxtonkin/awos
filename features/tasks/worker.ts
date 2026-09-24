@@ -39,14 +39,14 @@ const noRepository: Instruction = 'This task has no repository, and its step run
 
 const reason = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
-async function startOf(db: Database, settings: WorkerSettings, task: string, runAs: string): Promise<Start | null> {
+export async function startOf(db: Database, branchHead: WorkerSettings['branchHead'], task: string, runAs: string): Promise<Start | null> {
   const found = await continuation(db, task);
   switch (found.from) {
     case 'lost':
     case 'task':
       return { commit: found.commit };
     case 'repository':
-      return { commit: await settings.branchHead(runAs, found.github, found.branch) };
+      return { commit: await branchHead(runAs, found.github, found.branch) };
     case 'nowhere':
       return null;
   }
@@ -95,7 +95,7 @@ async function take(db: Database, settings: WorkerSettings, task: string, now: D
   let start: Start | null;
   try {
     runAs = await settings.runAs(db, task);
-    start = runAs === null ? null : await startOf(db, settings, task, runAs);
+    start = runAs === null ? null : await startOf(db, settings.branchHead, task, runAs);
   } catch (error) {
     return `did not claim task ${task}, because who it runs as or where it starts could not be read: ${reason(error)}`;
   }

@@ -69,6 +69,14 @@ export const noMutantYet: Readonly<Record<string, readonly string[]>> = {
     'setting_of_version',
     'routine_step_is_final',
   ],
+  'the claim names the branch from the task key and the count of its attempts and takes the start from continuation, and the simulated Job pushes only 40-character commits to its own branch, so no paved write reaches a row these refuse': [
+    'attempt_branch_is_its_own',
+    'start_is_a_commit',
+    'push_is_a_commit',
+    'branch_starts_somewhere',
+    'push_needs_a_branch',
+    'one_attempt_per_branch',
+  ],
   'the routines simulator in features/routines records tasks and owns this guard, and its mutant drops it there': ['task_keeps_its_routine'],
   'the badName fault writes a bad skill, step, and workflow name and a waiting reason that is not a sentence, and its seed fails unless the domain refuses the write, but dropGuard drops only table constraints, indexes, and triggers, so a domain has no mutant yet': [
     'workflow_name_is_a_slug',
