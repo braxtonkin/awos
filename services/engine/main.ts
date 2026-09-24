@@ -5,10 +5,13 @@ import { checksFor } from '../../features/credentials/checks.ts';
 import { githubApi } from '../../features/credentials/github-check.ts';
 import { sealingKey, type SealingKey } from '../../features/credentials/seal.ts';
 import { writeBack } from '../../features/credentials/store.ts';
+import { outboxLoops, registryOf } from '../../features/outbox/perform.ts';
 import { reaper } from '../../features/tasks/reaper.ts';
 import { startProblems } from '../../features/tasks/start.ts';
+import type { OwedKinds, Performers } from '../../shared/actions.ts';
 import { connect } from '../../shared/db/client.ts';
 import { realClock, runLoop, type Loop } from '../../shared/loop.ts';
+import type { Workflow } from '../../shared/workflow.ts';
 import { workflows } from './workflows.ts';
 
 const milliseconds = z.coerce.number().int().positive();
@@ -23,12 +26,23 @@ const settings = z.object({
   CHECK_LEASE_MS: milliseconds.default(300_000),
   CHECK_TIMEOUT_MS: milliseconds.default(120_000),
   GITHUB_API_URL: z.url({ protocol: /^https?$/ }).default(githubApi),
+  OUTBOX_EVERY_MS: milliseconds.default(1_000),
+  OUTBOX_LEASE_MS: milliseconds.default(60_000),
+  OUTBOX_MARGIN_MS: milliseconds.default(5_000),
+  OUTBOX_MAX_TRIES: z.coerce.number().int().positive().default(3),
 });
 
 type Settings = z.infer<typeof settings>;
 
+type ActionKind = OwedKinds<Workflow>;
+
+const performers = {} satisfies Performers<ActionKind>;
+
+const actions = registryOf(performers);
+
 const loopsFor = (given: Settings, key: SealingKey | undefined): readonly Loop[] => [
   reaper({ everyMs: given.REAPER_EVERY_MS, leaseMs: given.LEASE_MS }),
+  ...outboxLoops({ everyMs: given.OUTBOX_EVERY_MS, leaseMs: given.OUTBOX_LEASE_MS, marginMs: given.OUTBOX_MARGIN_MS, maxTries: given.OUTBOX_MAX_TRIES, clock: realClock, registry: actions }),
   ...(key === undefined
     ? []
     : [

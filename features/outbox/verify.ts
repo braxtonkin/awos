@@ -1,6 +1,26 @@
-import type { Scenario } from '../../tools/verify/check.ts';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { parseArgs } from 'node:util';
+import { z } from 'zod';
+import { fail, pass, type Check, type Scenario } from '../../tools/verify/check.ts';
 import { defineModel, type Shape } from '../../tools/verify/models.ts';
+import { withPostgres, type TestPostgres } from '../../tools/verify/postgres.ts';
 import type { TlcRun } from '../../tools/verify/tlc.ts';
+import { provePlants } from './invariants.ts';
+import {
+  checkCatalog,
+  mutantName,
+  mutants,
+  probeRollback,
+  probeThroughput,
+  profileName,
+  simulate,
+  type MutantName,
+  type Plan,
+  type ProfileName,
+  type Run,
+  type Throughput,
+} from './simulate.ts';
 
 type TaskView = { readonly id: string; readonly state: string };
 
@@ -187,6 +207,176 @@ const performersStopTakingOwedRows = shape(
     last.performers.some(performer => (performer.step === 'idle' ? last.rows.some(row => claimable(last, row)) : !performer.stalled)),
 );
 
+const simulationFlags = {
+  profile: { type: 'string' },
+  seeds: { type: 'string' },
+  from: { type: 'string' },
+  seed: { type: 'string' },
+  steps: { type: 'string' },
+  mutant: { type: 'string' },
+  trace: { type: 'string' },
+} as const;
+
+const simulationOptions = z.object({
+  profile: z.union([profileName, z.literal('all')]).default('mixed'),
+  seeds: z.coerce.number().int().positive().default(20),
+  from: z.coerce.number().int().nonnegative().default(1),
+  seed: z.coerce.number().int().nonnegative().optional(),
+  steps: z.coerce.number().int().positive().default(300),
+  mutant: z.union([mutantName, z.literal('all')]).optional(),
+  trace: z.string().optional(),
+});
+
+type SimulationOptions = z.infer<typeof simulationOptions>;
+
+function parseSimulationOptions(args: readonly string[]): SimulationOptions {
+  const parsed = simulationOptions.safeParse(parseArgs({ args: [...args], options: simulationFlags, strict: true, allowPositionals: false }).values);
+  if (!parsed.success) throw new Error(z.prettifyError(parsed.error));
+  return parsed.data;
+}
+
+const seedsOf = (options: SimulationOptions): readonly number[] =>
+  options.seed === undefined ? Array.from({ length: options.seeds }, (_, index) => options.from + index) : [options.seed];
+
+const replay = (run: Run): string =>
+  `npm run verify -- outbox-sim ${run.plan.mutant === undefined ? `--profile ${run.plan.profile}` : `--mutant ${run.plan.mutant}`} --seed ${String(run.seed)} --steps ${String(run.plan.steps)}`;
+
+function violation(run: Run): string {
+  if (run.failure === undefined) return `seed ${String(run.seed)} broke nothing`;
+  const { step, move, broken } = run.failure;
+  const names = [...new Set(broken.map(found => found.property))].join(', ');
+  const rows = broken.slice(0, 3).map(found => `${found.property} ${JSON.stringify(found.row)}`);
+  return `${names} violated at seed ${String(run.seed)}, step ${String(step)}, after ${move}: ${rows.join('; ')}; replay: ${replay(run)}`;
+}
+
+const traceWriter = (folder: string | undefined): ((run: Run) => void) | undefined =>
+  folder === undefined
+    ? undefined
+    : run => {
+        mkdirSync(folder, { recursive: true });
+        writeFileSync(join(folder, `${run.plan.profile}-${run.plan.mutant ?? 'every-guard'}-seed-${String(run.seed)}.json`), `${JSON.stringify(run, null, 2)}\n`);
+      };
+
+const sum = (runs: readonly Run[], of: (run: Run) => number): number => runs.reduce((total, run) => total + of(run), 0);
+
+function tallyOf(runs: readonly Run[]): string {
+  const tally = new Map<string, number>();
+  for (const [outcome, times] of runs.flatMap(run => Object.entries(run.tally))) tally.set(outcome, (tally.get(outcome) ?? 0) + times);
+  return [...tally]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([outcome, times]) => `${outcome} ${String(times)}`)
+    .join(', ');
+}
+
+function alwaysFailsChecks(runs: readonly Run[]): readonly Check[] {
+  const failed = runs.flatMap(run => run.failedRows.map(row => ({ seed: run.seed, ...row })));
+  const wrong = failed.filter(row => row.tries !== 3 || row.taskState !== 'waiting' || !row.noteHasError);
+  const capName = "always-fails: each failed row counted 3 lapsed leases, and its task waits with the row's last error in its note";
+  const reowed = sum(runs, run => run.reowed);
+  const reoweName = 'always-fails: Retry owed the failed rows again with their tries reset';
+  const described = wrong
+    .slice(0, 3)
+    .map(row => `seed ${String(row.seed)} row ${row.row}: ${String(row.tries)} tries, task ${row.taskState}, note ${row.noteHasError ? 'has' : 'lacks'} the error`)
+    .join('; ');
+  return [
+    failed.length > 0 && wrong.length === 0 ? pass(capName, `${String(failed.length)} failed rows across ${String(runs.length)} seeds`) : fail(capName, failed.length === 0 ? 'no row failed' : described),
+    reowed > 0 ? pass(reoweName, `${String(reowed)} rows lapsed at try 1 again after a Retry`) : fail(reoweName, 'no failed row was tried again after a Retry'),
+  ];
+}
+
+function doneChecks(profile: ProfileName, runs: readonly Run[]): Check {
+  const name = `${profile}: every seed took a task to done`;
+  const done = runs.map(run => run.done);
+  const idle = runs.filter(run => run.done === 0).map(run => run.seed);
+  return idle.length === 0 ? pass(name, `${String(Math.min(...done))} to ${String(Math.max(...done))} tasks done per seed`) : fail(name, `seeds with no task done: ${idle.slice(0, 10).join(', ')}`);
+}
+
+const finishingProfiles: ReadonlySet<ProfileName> = new Set<ProfileName>(['mixed', 'two-engines']);
+
+async function profileChecks(postgres: TestPostgres, profile: ProfileName, options: SimulationOptions): Promise<readonly Check[]> {
+  const started = performance.now();
+  const runs = await simulate(postgres, [{ profile, seeds: seedsOf(options), steps: options.steps }], traceWriter(options.trace));
+  const seconds = (performance.now() - started) / 1000;
+  const failed = runs.filter(run => run.failure !== undefined);
+  const duplicates = sum(runs, run => run.duplicates);
+  const [first] = failed;
+  const name = `${profile}: ${String(runs.length)} seeds, ${String(failed.length)} violations`;
+  const detail = `${String(options.steps)} steps each plus a quiet phase, in ${seconds.toFixed(1)} s; ${tallyOf(runs)}`;
+  const duplicateName = `${profile}: duplicate effects ${String(duplicates)}`;
+  return [
+    first === undefined ? pass(name, detail) : fail(name, violation(first)),
+    duplicates === 0 ? pass(duplicateName, 'no marker took effect twice on either target') : fail(duplicateName, 'a marker took effect twice'),
+    ...(profile === 'always-fails' ? alwaysFailsChecks(runs) : []),
+    ...(finishingProfiles.has(profile) ? [doneChecks(profile, runs)] : []),
+  ];
+}
+
+async function mutantCheck(postgres: TestPostgres, mutant: MutantName, options: SimulationOptions): Promise<Check> {
+  const { guard, breaks, profile } = mutants[mutant];
+  const plan: Plan = { profile, seeds: seedsOf(options), steps: options.steps, mutant };
+  const runs = await simulate(postgres, [plan], traceWriter(options.trace));
+  const caught = runs.find(run => run.failure?.broken.some(found => breaks.includes(found.property)) === true);
+  const name = `without ${guard} (${mutant}): ${breaks.join(' or ')} violated`;
+  return caught === undefined ? fail(name, `no seed of ${String(runs.length)} broke ${breaks.join(' or ')}`) : pass(name, violation(caught));
+}
+
+async function plantChecks(postgres: TestPostgres): Promise<readonly Check[]> {
+  const proofs = await provePlants(postgres);
+  return proofs.map(proof => {
+    const name = `plant ${String(proof.plant)} of ${proof.property} is reported`;
+    return proof.atStart.length === 0 && proof.reported.includes(proof.property)
+      ? pass(name, `reported ${proof.reported.join(', ')}`)
+      : fail(name, `before the plant ${proof.atStart.join(', ') || 'nothing'}, after it ${proof.reported.join(', ') || 'nothing'}`);
+  });
+}
+
+async function catalogCheck(postgres: TestPostgres): Promise<Check> {
+  const catalog = await checkCatalog(postgres);
+  const name = 'every named constraint, index, and trigger on outbox has a mutant or a reason it has none';
+  return catalog.unlisted.length === 0 && catalog.absent.length === 0
+    ? pass(name, `${String(catalog.guards)} named guards`)
+    : fail(name, `unlisted: ${catalog.unlisted.join(', ') || 'none'}; listed but absent: ${catalog.absent.join(', ') || 'none'}`);
+}
+
+async function rollbackCheck(postgres: TestPostgres): Promise<Check> {
+  const { rows, effects } = await probeRollback(postgres);
+  const name = 'an enqueue in a transaction that rolls back leaves no row and no effect';
+  return rows === 0 && effects === 0 ? pass(name, 'no row, and the pass after it performed nothing') : fail(name, `${String(rows)} rows, ${String(effects)} effects`);
+}
+
+async function simulationChecks(postgres: TestPostgres, options: SimulationOptions): Promise<readonly Check[]> {
+  if (options.mutant === 'all') {
+    const checks: Check[] = [...(await plantChecks(postgres)), await catalogCheck(postgres)];
+    for (const mutant of mutantName.options) checks.push(await mutantCheck(postgres, mutant, options));
+    return checks;
+  }
+  if (options.mutant !== undefined) return [await mutantCheck(postgres, options.mutant, options)];
+  const chosen = options.profile === 'all' ? profileName.options : [options.profile];
+  const checks: Check[] = [await rollbackCheck(postgres)];
+  for (const profile of chosen) checks.push(...(await profileChecks(postgres, profile, options)));
+  return checks;
+}
+
+const perfEveryMs = 1_000;
+
+const listed = (values: readonly number[], unit: string): string => values.map(value => `${value.toFixed(0)} ${unit}`).join(', ');
+
+async function perfChecks(postgres: TestPostgres): Promise<readonly Check[]> {
+  const probes = await probeThroughput(postgres, perfEveryMs);
+  const batches = probes.filter(probe => probe.kind === 'batch');
+  const singles = probes.filter(probe => probe.kind === 'single');
+  const slowest = Math.min(...batches.map(probe => probe.perSecond));
+  const medians = singles.map(probe => probe.medianMs);
+  const median = [...medians].sort((a, b) => a - b)[Math.floor(medians.length / 2)] ?? Number.POSITIVE_INFINITY;
+  const rateName = 'one engine performs at least 50 rows per second';
+  const latencyName = `the median time from the owing commit to a single row's effect is at most ${String(perfEveryMs + 100)} ms`;
+  const rates = (list: readonly Throughput[]): string => listed(list.map(probe => probe.perSecond), 'rows/s');
+  return [
+    slowest >= 50 ? pass(rateName, `500 rows across 50 tasks, 3 times: ${rates(batches)}; batch medians ${listed(batches.map(probe => probe.medianMs), 'ms')}`) : fail(rateName, rates(batches)),
+    median <= perfEveryMs + 100 ? pass(latencyName, `single rows: ${listed(medians, 'ms')}`) : fail(latencyName, `single rows: ${listed(medians, 'ms')}`),
+  ];
+}
+
 export const scenarios: readonly Scenario[] = [
   defineModel({
     name: 'outbox',
@@ -238,4 +428,17 @@ export const scenarios: readonly Scenario[] = [
       { guard: 'PerformerIsFair', property: 'EveryOwedActionSettles', overrides: { MaxCrashes: '0', MaxStalls: '0', MaxRetries: '0' }, shape: performersStopTakingOwedRows },
     ],
   }),
+  {
+    name: 'outbox-sim',
+    summary: "runs seeded performers that claim, crash, stall, and fail against real Postgres, and checks each of Outbox.tla's properties by name after every step",
+    run: args => {
+      const options = parseSimulationOptions(args);
+      return withPostgres(postgres => simulationChecks(postgres, options));
+    },
+  },
+  {
+    name: 'outbox-perf',
+    summary: 'owes 500 rows across 50 tasks 3 times, interleaved with 3 single rows, and times one engine performing them against a target that answers at once',
+    run: () => withPostgres(perfChecks),
+  },
 ];

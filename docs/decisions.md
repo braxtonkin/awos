@@ -57,6 +57,21 @@ Rejected options:
 - **A claim without the marker check.** A crash between the post and the done mark makes the next performer post again.
 - **Release a row as soon as its call fails, and retry after a backoff.** A request still in flight can land after the retry posted, so the comment appears twice. Counting only failed calls also never caps a row whose every try crashes its performer.
 
+### An outbox row can end refused, and the store holds a task that owes an action
+
+Decided 24 Sep 2026 while building the outbox (P4), for the Land model in `features/github/` (M4). It amends the rule above that a row is marked done only after its action took effect.
+
+- A performer can end a row as refused when the target declines the action for a reason a retry cannot change, such as a merge refused because the head moved. The row records the refusal and the head it named as its result, so Land reads why. A refused row settles without an effect, and the rows its task owed after it are dropped in the same statement, because they assumed its effect.
+- A merge that finds the pull request already merged, already queued, or ejected in a way Land has not answered reports that as the row's result. It is never a reason to act again.
+- The claim statement re-checks that the row's task still stands. A stopped task, or a kind's own predicate, drops its unclaimed rows in the statement that claims, together with the rows its task owed after them.
+- A row that fails at the cap parks its task when the task is ready or already waiting, and a parked task waits on Retry. A done task cannot wait for a person, so the rows it owed after the failed row are dropped instead.
+- Each task counts its unsettled rows, and its generated `ready` column is true only when that count is zero. The foreign key that ties a live attempt to a ready task then refuses a claim while the task owes an action, and the row lock on the task serializes that claim with the transaction that owes the rows. `owesAction` in `shared/actions.ts` reads the same count, for Land.
+- A failed row is claimable again whenever its task is ready, and the claim resets its tries. A person's Retry makes the task ready, so the Retry owes the failed rows again in its own transaction.
+
+Rejected options:
+
+- **Refuse the claim and re-owe on Retry in the task feature's statements.** Each claim path and each Retry would need the same edit, and a fork's claim could miss it. The count on the task puts the rule in the store, where every claim meets it.
+
 ### Each attempt runs in its own Kubernetes Job
 
 Decided 23 Sep 2026. The engine starts one Kubernetes Job per attempt, in the engine's own namespace. The Job clones the repo and runs Codex. It gets only its owner's credentials for that run, and no database or Kubernetes API access. The engine watches the Job, saves what it did as evidence, and records the verdict. This matches how the current AutoWorker runs delivery attempts.

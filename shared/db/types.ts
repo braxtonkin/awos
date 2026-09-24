@@ -28,6 +28,8 @@ export type JsonPrimitive = boolean | number | string | null;
 
 export type JsonValue = JsonArray | JsonObject | JsonPrimitive;
 
+export type OutboxState = "done" | "dropped" | "failed" | "owed" | "refused";
+
 export type PersonKind = "person" | "shared";
 
 export type TaskState = "done" | "ready" | "stopped" | "waiting";
@@ -99,6 +101,24 @@ export interface HumanAction {
   task_id: Int8 | null;
 }
 
+export interface Outbox {
+  acts_as: Int8;
+  claim: string | null;
+  id: Generated<Int8>;
+  idempotency_key: string;
+  kind: string;
+  last_error: string | null;
+  lease_until: Timestamp | null;
+  owed_at: Timestamp;
+  payload: Json;
+  position: number;
+  result: Json | null;
+  settled_at: Timestamp | null;
+  state: Generated<OutboxState>;
+  task_id: Int8;
+  tries: Generated<number>;
+}
+
 export interface Person {
   email: string;
   id: Generated<Int8>;
@@ -157,6 +177,7 @@ export interface Task {
   key: string;
   lost: Generated<number>;
   needs_repository: boolean;
+  owed_actions: Generated<number>;
   ready: Generated<boolean | null>;
   repository_id: Int8 | null;
   retries: Generated<number>;
@@ -177,6 +198,7 @@ export interface DB {
   credential: Credential;
   credential_check: CredentialCheck;
   human_action: HumanAction;
+  outbox: Outbox;
   person: Person;
   repository: Repository;
   routine: Routine;
