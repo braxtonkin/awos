@@ -6,7 +6,8 @@ import type { Clock, Loop } from '../../shared/loop.ts';
 import { review } from '../../shared/review.ts';
 import type { Transacting } from '../../shared/transaction.ts';
 import type { Unasked } from '../../shared/workflow.ts';
-import { guarded, landPass, landStep, type AtLand, type Follow, type LandOutput, type LandStore, type ReadMergeState, type ReviewStep } from './land.ts';
+import { guarded, landPass, landStep, type AtLand, type Follow, type LandOutput, type LandStore, type ReviewStep } from './land.ts';
+import type { ReadMergeState } from '../../shared/merge-state.ts';
 import { workflow } from './workflow.ts';
 
 export type Standing = { readonly task: string; readonly actsAs: string; readonly state: string; readonly waitingOn: string | null };

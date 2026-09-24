@@ -4,18 +4,21 @@ import { hostname } from 'node:os';
 import { z } from 'zod';
 import { bridgeListener, noStepRunner, rules } from '../../features/bridge/engine.ts';
 import { landLoops } from '../../features/code-change/land-loop.ts';
-import { coreReview, type ReadMergeState } from '../../features/code-change/land.ts';
+import { coreReview } from '../../features/code-change/land.ts';
 import { checkLoop } from '../../features/credentials/check-loop.ts';
 import { checksFor } from '../../features/credentials/checks.ts';
 import { githubApi } from '../../features/credentials/github-check.ts';
 import { sealingKey, type SealingKey } from '../../features/credentials/seal.ts';
-import { writeBack } from '../../features/credentials/store.ts';
+import { open, writeBack } from '../../features/credentials/store.ts';
 import { providerProblems, reconcile } from '../../features/environments/lifecycle.ts';
 import { providersByName } from '../../features/environments/provider.ts';
 import { enqueue } from '../../features/outbox/enqueue.ts';
 import { connectCluster } from '../../features/jobs/launch.ts';
 import { jobSettings } from '../../features/jobs/settings.ts';
 import { sweep } from '../../features/jobs/sweep.ts';
+import { clientsFrom, type ClientFor, type OpenToken } from '../../features/github/client.ts';
+import { mergeStateReader } from '../../features/github/merge-state.ts';
+import { githubPerformers, outboxOwedAt } from '../../features/github/performers.ts';
 import { outboxLoops, registryOf } from '../../features/outbox/perform.ts';
 import { scheduleSource } from '../../features/routines/schedule-source.ts';
 import { postgresNow, scheduler } from '../../features/routines/scheduler.ts';
@@ -25,7 +28,7 @@ import { claim, renew } from '../../features/tasks/claim.ts';
 import { reaper } from '../../features/tasks/reaper.ts';
 import { startProblems } from '../../features/tasks/start.ts';
 import type { OwedKinds, Performers } from '../../shared/actions.ts';
-import { connect } from '../../shared/db/client.ts';
+import { connect, type Database } from '../../shared/db/client.ts';
 import { realClock, runLoop, type Loop } from '../../shared/loop.ts';
 import type { Workflow } from '../../shared/workflow.ts';
 import { workflows } from './workflows.ts';
@@ -67,20 +70,29 @@ const providers = providersByName([]);
 
 type ActionKind = OwedKinds<Workflow>;
 
-const performers = {} satisfies Performers<ActionKind>;
+const githubToken =
+  (db: Database, key: SealingKey | undefined): OpenToken =>
+  async actsAs => {
+    if (key === undefined) return { failed: 'The engine has no CREDENTIAL_KEY, so it cannot open a GitHub token.' };
+    const opened = await open(db, key, { connector: 'github', owner: actsAs });
+    return 'secret' in opened ? { token: opened.secret } : { failed: opened.reason };
+  };
 
-const actions = registryOf(performers);
+const githubClients = (db: Database, given: Settings, key: SealingKey | undefined): ClientFor => clientsFrom(githubToken(db, key), given.GITHUB_API_URL);
 
-const readMergeState: ReadMergeState | null = null;
+const performersFor = (db: Database, given: Settings, key: SealingKey | undefined) =>
+  ({
+    ...githubPerformers({ clientFor: githubClients(db, given, key), owedAt: outboxOwedAt(db) }),
+  }) satisfies Performers<ActionKind>;
 
-const loopsFor = (given: Settings, key: SealingKey | undefined): readonly Loop[] => [
+const loopsFor = (db: Database, given: Settings, key: SealingKey | undefined): readonly Loop[] => [
   reaper({ everyMs: given.REAPER_EVERY_MS, leaseMs: given.LEASE_MS }),
   scheduler({ everyMs: given.SCHEDULER_EVERY_MS, leaseMs: given.ROUTINE_LEASE_MS, sources, workflows, now: postgresNow }),
   reconcile({ providers, everyMs: given.ENVIRONMENTS_EVERY_MS, startDeadlineMs: given.ENVIRONMENT_START_DEADLINE_MS }),
   ...landLoops({
     everyMs: given.LAND_EVERY_MS,
     leaseMs: given.LEASE_MS,
-    read: readMergeState,
+    read: mergeStateReader(db, githubClients(db, given, key)),
     readTimeoutMs: given.LAND_READ_TIMEOUT_MS,
     review: coreReview,
     enqueue,
@@ -88,7 +100,7 @@ const loopsFor = (given: Settings, key: SealingKey | undefined): readonly Loop[]
     tasks: { claim, renew, handOff, approveFromOutside, finish: (db, attempt, report, now, then) => advance(db, workflows, attempt, report, now, then) },
   }),
   ...(given.JOB_IMAGE === undefined ? [] : [sweep({ everyMs: given.SWEEP_EVERY_MS, cluster: connectCluster(given.JOB_NAMESPACE) })]),
-  ...outboxLoops({ everyMs: given.OUTBOX_EVERY_MS, leaseMs: given.OUTBOX_LEASE_MS, marginMs: given.OUTBOX_MARGIN_MS, maxTries: given.OUTBOX_MAX_TRIES, clock: realClock, registry: actions }),
+  ...outboxLoops({ everyMs: given.OUTBOX_EVERY_MS, leaseMs: given.OUTBOX_LEASE_MS, marginMs: given.OUTBOX_MARGIN_MS, maxTries: given.OUTBOX_MAX_TRIES, clock: realClock, registry: registryOf(performersFor(db, given, key)) }),
   ...(key === undefined
     ? []
     : [
@@ -144,7 +156,7 @@ async function run(given: Settings, key: SealingKey | undefined): Promise<void> 
     });
     const address = bridge.address();
     say(`The engine serves the bridge on port ${typeof address === 'object' && address !== null ? String(address.port) : String(given.BRIDGE_PORT)}.`);
-    const loops = loopsFor(given, key);
+    const loops = loopsFor(db, given, key);
     if (key === undefined) say('The engine has no CREDENTIAL_KEY, so it opens and checks no credentials.');
     if (given.JOB_IMAGE === undefined) say('The engine has no JOB_IMAGE, so it launches no Jobs and sweeps none.');
     say(`The engine runs the workflows ${[...workflows.keys()].join(', ')}, the Verify providers ${[...providers.keys()].join(', ')}, and the loops ${loops.map(loop => `${loop.name} every ${String(loop.everyMs)} ms`).join(', ')}.`);

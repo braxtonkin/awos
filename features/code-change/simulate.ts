@@ -3,7 +3,8 @@ import type { Owe } from '../../shared/actions.ts';
 import type { MergeState } from '../../shared/merge-state.ts';
 import type { Unasked } from '../../shared/workflow.ts';
 import { violationsOf, type LandRead, type Observed, type PropertyName, type TaskView, type Violation } from './invariants.ts';
-import { coreReview, guarded, landPass, type Answer, type Answered, type DraftSetting, type Follow, type Guards, type LandOutput, type LandStore, type MergeRead, type PullRequestRef } from './land.ts';
+import type { Answered, MergeRead, PullRequest as PullRequestRef } from '../../shared/merge-state.ts';
+import { coreReview, guarded, landPass, type Answer, type DraftSetting, type Follow, type Guards, type LandOutput, type LandStore } from './land.ts';
 import { workflow } from './workflow.ts';
 
 export type WorldGuards = { readonly ActionCarriesHead: boolean; readonly FailedMergeKeepsClaim: boolean; readonly MergeClaimChecksTask: boolean; readonly LandPollIsFair: boolean };

@@ -1,5 +1,5 @@
 import { actionKinds, owe, type ActionSpec, type Owe, type Stands } from '../../shared/actions.ts';
-import { mergeState, type MergeState } from '../../shared/merge-state.ts';
+import { mergeState, type Answered, type MergeState, type ReadMergeState } from '../../shared/merge-state.ts';
 import type { Review } from '../../shared/review.ts';
 import type { Instruction, Unasked } from '../../shared/workflow.ts';
 import type { workflow } from './workflow.ts';
@@ -11,14 +11,6 @@ export type DraftSetting = 'when-green' | 'at-once';
 export type PullRequest = { readonly repository: string; readonly repositoryId: string; readonly branch: string; readonly number: number | null; readonly actsAs: string | null };
 
 export type Reading = { readonly state: MergeState; readonly draft: DraftSetting };
-
-export type PullRequestRef = { readonly repositoryId: string; readonly number: number; readonly actsAs: string };
-
-export type Answered = { readonly ejection: string | null; readonly review: string | null };
-
-export type MergeRead = { readonly state: MergeState } | { readonly failed: string };
-
-export type ReadMergeState = (pullRequest: PullRequestRef, answered: Answered, signal: AbortSignal) => Promise<MergeRead>;
 
 export type Answer = { readonly kind: 'ejection' | 'review' | 'refusal'; readonly id: string };
 
