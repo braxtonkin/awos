@@ -9,7 +9,7 @@ import { remoteHead, repositoryUrl } from '../../features/jobs/remote.ts';
 import { imageReference, type JobSettings } from '../../features/jobs/settings.ts';
 import type { RunAsRule } from '../../features/tasks/run-as.ts';
 import type { StepRunner } from '../../features/tasks/step-runner.ts';
-import { worker, type Environment, type Launched } from '../../features/tasks/worker.ts';
+import { worker, type Environment, type Launched, type Ready } from '../../features/tasks/worker.ts';
 import type { Database } from '../../shared/db/client.ts';
 import type { Loop } from '../../shared/loop.ts';
 import type { Instruction } from '../../shared/workflow.ts';
@@ -75,6 +75,14 @@ export function attempts(settings: AttemptSettings): Loop {
     startTurn: async (db, attempt, { prompt, outputSchema }, now) => {
       const sent = await sendCommand(db, attemptId.parse(attempt), { kind: 'turn.start', prompt, outputSchema }, now);
       if (sent === 'ended') throw new Error(`attempt ${attempt} ended before its turn was sent`);
+    },
+    ready: async (db, runAs): Promise<Ready> => {
+      const state = await db.selectFrom('credential').select('credential.state').where('credential.connector', '=', 'codex').where('credential.person_id', '=', runAs).executeTakeFirst();
+      if (state !== undefined && state.state === null) return { later: 'its Codex login has not been checked yet' };
+      const login = await loginForJob(db, settings.checks, runAs);
+      if ('refused' in login) return { refused: sentence(login.reason) };
+      const token = await githubToken(settings, runAs);
+      return 'refused' in token ? token : { ready: true };
     },
     launch: async (db, request): Promise<Launched> => {
       const login = await loginForJob(db, settings.checks, request.runAs.id);

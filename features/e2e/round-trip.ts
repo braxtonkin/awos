@@ -267,6 +267,39 @@ async function stopMidTurn(world: World, image: string): Promise<readonly Check[
   }
 }
 
+async function stopThenRetry(world: World, image: string): Promise<readonly Check[]> {
+  const key = 'stand-in-e';
+  const note = 'Keep the old export name.';
+  await addTask(world, key, `Implement slowly: ${ticking(60, 1000)}.`);
+  const engine = startEngine(world.store, engineSettings(world, image), world.out);
+  try {
+    await waitForWait(world, key);
+    await actAs(world.store, ['approve', key, '--step', 'specify', '--as', owner]);
+    const implement = await waitForAttempt(world, key, 'implement');
+    const ticked = implement === undefined ? undefined : await until(stepWaitMs, async () => ((await storedTicks(world, implement.id)).length >= 2 ? true : undefined));
+    const stopped = await actAs(world.store, ['stop', key, '--as', owner]);
+    const ended = implement === undefined ? undefined : await until(10_000, async () => ((await attemptsOf(world, key)).find(attempt => attempt.id === implement.id)?.verdict === 'stopped' ? true : undefined));
+    const retried = await actAs(world.store, ['retry', key, '--note', note, '--as', owner]);
+    const again = await waitForAttempt(world, key, 'implement', 1);
+    const prompt = again === undefined ? '' : await promptOf(world, again.id);
+    const specifies = (await attemptsOf(world, key)).filter(attempt => attempt.step === 'specify');
+    await actAs(world.store, ['stop', key, '--as', owner]);
+    return [
+      ticked === true && stopped.code === 0 && ended === true ? pass('8: Stop ends the Implement attempt at once', stopped.out) : fail('8: Stop ends the Implement attempt at once', `${stopped.out}; ${engine.said().slice(-800)}`),
+      retried.code === 0 && again !== undefined && specifies.length === 1
+        ? pass('8: Retry resumes the task at Implement and keeps Specify', `attempt ${again.id}, one Specify attempt`)
+        : fail('8: Retry resumes the task at Implement and keeps Specify', `${retried.out}; ${String(specifies.length)} Specify attempts`),
+      prompt.includes(`## Note from Lane Owner
+
+${note}`) && prompt.indexOf(note) > prompt.indexOf('# Implement')
+        ? pass("8: the next Implement prompt holds the note after the step's own prompt", `attempt ${again?.id ?? ''}`)
+        : fail("8: the next Implement prompt holds the note after the step's own prompt", prompt.slice(0, 800)),
+    ];
+  } finally {
+    await engine.stop();
+  }
+}
+
 async function standInImage(attemptImage: string): Promise<string> {
   const tag = `${registry.host}/autoworker-job-stand-in:round-trip`;
   const dockerfile = [
@@ -279,7 +312,7 @@ async function standInImage(attemptImage: string): Promise<string> {
   return pushByDigest(tag);
 }
 
-const lanes = ['stand-in', 'send-back', 'outage', 'stop', 'real'] as const;
+const lanes = ['stand-in', 'send-back', 'outage', 'stop', 'retry', 'real'] as const;
 
 type Lane = (typeof lanes)[number];
 
@@ -318,6 +351,7 @@ async function roundTripLive(args: readonly string[], out: (line: string) => voi
             if (name === 'send-back') checks.push(...(await sendBack(world, standIn)));
             if (name === 'outage') checks.push(...(await outage(world, standIn)));
             if (name === 'stop') checks.push(...(await stopMidTurn(world, standIn)));
+            if (name === 'retry') checks.push(...(await stopThenRetry(world, standIn)));
             if (name === 'real') {
               const reseeded = await seedWorld(store, await accessCopy());
               await store.db.updateTable('credential').set({ state: 'valid', checked_at: new Date() }).where('connector', '=', 'github').execute();

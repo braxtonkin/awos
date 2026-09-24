@@ -2,7 +2,7 @@ import type { Database } from '../../shared/db/client.ts';
 import type { Loop } from '../../shared/loop.ts';
 import type { Instruction } from '../../shared/workflow.ts';
 import { abandon, advance } from './advance.ts';
-import { claim, claimable, park, renew, type Start } from './claim.ts';
+import { claim, claimable, park, renew, unlaunched, type Start } from './claim.ts';
 import { continuation } from './continuation.ts';
 import type { RunAsRule } from './run-as.ts';
 import { promptFor, stepOf, type Prompt, type StepRunner } from './step-runner.ts';
@@ -21,6 +21,8 @@ export type JobRequest = {
 
 export type Launched = { readonly launched: string } | { readonly refused: Instruction };
 
+export type Ready = { readonly ready: true } | { readonly refused: Instruction } | { readonly later: string };
+
 export type Environment = { readonly started: string } | { readonly parks: Instruction } | { readonly failed: string } | { readonly ended: true };
 
 export type WorkerSettings = {
@@ -32,6 +34,7 @@ export type WorkerSettings = {
   readonly startEnvironment: (db: Database, attempt: string) => Promise<Environment>;
   readonly issueToken: (db: Database, attempt: string) => Promise<string | undefined>;
   readonly startTurn: (db: Database, attempt: string, prompt: Prompt, now: Date) => Promise<void>;
+  readonly ready: (db: Database, runAs: string) => Promise<Ready>;
   readonly launch: (db: Database, request: JobRequest) => Promise<Launched>;
 };
 
@@ -61,6 +64,12 @@ async function launchAttempt(db: Database, settings: WorkerSettings, attempt: st
     await abandon(db, attempt, noRepository, now);
     return `parked task ${step.key}, which has no repository`;
   }
+  const ready = await settings.ready(db, step.runAs.id);
+  if ('refused' in ready) {
+    await abandon(db, attempt, ready.refused, now);
+    return `parked task ${step.key}: ${ready.refused}`;
+  }
+  if ('later' in ready) return `attempt ${attempt} of task ${step.key} waits to launch, because ${ready.later}`;
   const environment = step.kind.startsEnvironment ? await settings.startEnvironment(db, attempt) : null;
   if (environment !== null && 'parks' in environment) {
     await abandon(db, attempt, environment.parks, now);
@@ -113,6 +122,9 @@ export function worker(settings: WorkerSettings): Loop {
     everyMs: settings.everyMs,
     pass: async (db, { now }) => {
       const lines: string[] = [];
+      for (const attempt of await unlaunched(db, settings.runner.workflows)) {
+        lines.push(await launchAttempt(db, settings, attempt, now).catch((error: unknown) => `did not launch attempt ${attempt}: ${reason(error)}`));
+      }
       for (const task of await claimable(db, settings.runner.workflows, ['agent'])) {
         lines.push(await take(db, settings, task, now).catch((error: unknown) => `did not claim task ${task}: ${reason(error)}`));
       }

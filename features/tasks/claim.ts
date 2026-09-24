@@ -152,3 +152,18 @@ export async function claimable(db: Database, workflows: Workflows, runBy: reado
     .execute();
   return rows.map(row => row.id);
 }
+
+export async function unlaunched(db: Database, workflows: Workflows): Promise<readonly string[]> {
+  const pairs = [...workflows.values()].flatMap(workflow => workflow.steps.filter(kind => kind.runBy === 'agent').map(kind => [workflow.name, kind.name] as const));
+  if (pairs.length === 0) return [];
+  const rows = await db
+    .selectFrom('attempt')
+    .innerJoin('task', 'task.id', 'attempt.task_id')
+    .select('attempt.id')
+    .where('attempt.finished_at', 'is', null)
+    .where('attempt.bridge_token_hash', 'is', null)
+    .where(eb => eb.or(pairs.map(([workflow, step]) => eb.and([eb('task.workflow', '=', workflow), eb('attempt.step', '=', step)]))))
+    .orderBy('attempt.id')
+    .execute();
+  return rows.map(row => row.id);
+}
