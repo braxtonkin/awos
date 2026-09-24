@@ -3,6 +3,7 @@ import { parseArgs } from 'node:util';
 import type { z } from 'zod';
 import { fail, pass, type Check, type Scenario } from '../../tools/verify/check.ts';
 import { Catalog, catalog } from './catalog.ts';
+import { cleanScenarios } from './clean-lanes.ts';
 import { driverNames } from './driver.ts';
 import { githubPayloads } from './github.ts';
 import { accessFromEnvironment, createRunBranch, runEndToEnd } from './harness.ts';
@@ -141,4 +142,4 @@ const e2ePayload: Scenario = {
   },
 };
 
-export const scenarios: readonly Scenario[] = [e2e, e2eBranch, e2ePayload, roundTripScenario, parkedScenario];
+export const scenarios: readonly Scenario[] = [e2e, e2eBranch, e2ePayload, ...cleanScenarios, roundTripScenario, parkedScenario];

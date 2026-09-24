@@ -14,7 +14,8 @@ import { fail, pass, type Check, type Scenario } from '../../tools/verify/check.
 import { docker } from '../../tools/verify/docker.ts';
 import { kind } from '../../tools/verify/kind.ts';
 import { withPostgres } from '../../tools/verify/postgres.ts';
-import { connectCluster, containerName, imageFor, jobName, jobState, labels, launch, manifests, type Cluster, type JobState } from './launch.ts';
+import { connectCluster, labels, type Cluster } from '../../shared/cluster.ts';
+import { containerName, imageFor, jobName, jobState, launch, manifests, type JobState } from './launch.ts';
 import { imageReference, type ImageReference, type JobSettings } from './settings.ts';
 import { sweepOnce } from './sweep.ts';
 import { attemptBranch } from './workspace.ts';

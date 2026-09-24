@@ -30,6 +30,7 @@ const CheckRun = z.object({
 
 export const githubPayloads = {
   ref: z.object({ ref: z.string(), object: z.object({ sha: z.string().min(1) }) }),
+  refs: z.array(z.object({ ref: z.string(), object: z.object({ sha: z.string().min(1) }) })),
   sha: z.object({ sha: z.string().min(1) }),
   status: z.object({ state: z.string(), context: z.string() }),
   pull: Pull,
@@ -47,6 +48,7 @@ export type SeedFile = { readonly path: string; readonly content: string };
 export type GitHub = {
   readonly repository: string;
   readonly branchHead: (branch: string) => Promise<string | undefined>;
+  readonly branchesStartingWith: (prefix: string) => Promise<readonly string[]>;
   readonly seedBranch: (branch: string, files: readonly SeedFile[], message: string) => Promise<string>;
   readonly pulls: (base: string) => Promise<readonly Pull[]>;
   readonly pull: (number: number) => Promise<Pull>;
@@ -106,6 +108,8 @@ export function githubFromEnvironment(env: NodeJS.ProcessEnv, repository: string
       if (!answer.ok) throw new Error(`GitHub GET ref answered ${String(answer.status)}`);
       return parsePayload('GitHub GET ref', githubPayloads.ref, await answer.json()).object.sha;
     },
+    branchesStartingWith: async prefix =>
+      (await call('GET', `${repo}/git/matching-refs/heads/${refPath(prefix)}`, githubPayloads.refs)).map(found => found.ref.slice('refs/heads/'.length)),
     seedBranch: async (branch, files, message) => {
       const tree = await call('POST', `${repo}/git/trees`, githubPayloads.sha, {
         tree: files.map(file => ({ path: file.path, mode: '100644', type: 'blob', content: file.content })),

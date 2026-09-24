@@ -56,8 +56,11 @@ type Method = 'GET' | 'POST';
 export function jiraFromEnvironment(env: NodeJS.ProcessEnv): Jira {
   const keys = JiraKeys.safeParse(env);
   if (!keys.success) throw new Error(`The Jira keys are not usable: ${keys.error.issues.map(issue => String(issue.path[0])).join(', ')}`);
-  const { JIRA_SITE: site, JIRA_EMAIL: email } = keys.data;
-  const authorization = `Basic ${Buffer.from(`${email}:${keys.data.JIRA_API_TOKEN}`).toString('base64')}`;
+  return jiraAt(keys.data.JIRA_SITE, keys.data.JIRA_EMAIL, keys.data.JIRA_API_TOKEN);
+}
+
+export function jiraAt(site: string, email: string, token: string): Jira {
+  const authorization = `Basic ${Buffer.from(`${email}:${token}`).toString('base64')}`;
 
   const call = async <Schema extends z.ZodType>(method: Method, path: string, schema: Schema, body?: unknown): Promise<z.output<Schema>> => {
     const answer = await fetch(new URL(path, site), {

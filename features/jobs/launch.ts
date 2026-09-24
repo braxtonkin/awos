@@ -1,15 +1,8 @@
-import { ApiException, BatchV1Api, CoreV1Api, KubeConfig, type V1Job, type V1Pod, type V1Secret } from '@kubernetes/client-node';
+import { ApiException, type V1Job, type V1Pod, type V1Secret } from '@kubernetes/client-node';
+import { labels, type Cluster } from '../../shared/cluster.ts';
 import type { AccessOnlyLogin } from '../../shared/codex-login.ts';
 import type { ImageReference, JobSettings } from './settings.ts';
 import type { SecretKey } from './workspace.ts';
-
-export type Cluster = { readonly batch: BatchV1Api; readonly core: CoreV1Api; readonly namespace: string };
-
-export function connectCluster(namespace: string): Cluster {
-  const config = new KubeConfig();
-  config.loadFromDefault();
-  return { batch: config.makeApiClient(BatchV1Api), core: config.makeApiClient(CoreV1Api), namespace };
-}
 
 export type RunAs = {
   readonly name: string;
@@ -32,8 +25,6 @@ export type LaunchInput = {
 };
 
 export type Manifests = { readonly secret: V1Secret; readonly job: V1Job };
-
-export const labels = { attempt: 'autoworker.dev/attempt', task: 'autoworker.dev/task', step: 'autoworker.dev/step' } as const;
 
 export const containerName = 'attempt';
 

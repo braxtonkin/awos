@@ -11,6 +11,7 @@ import { drivers, type DriverName } from './driver.ts';
 import { steps, walk, type DriverEnd, type Reached, type Walk } from './frontier.ts';
 import { githubFromEnvironment, type GitHub, type SeedFile } from './github.ts';
 import { jiraFromEnvironment, type Jira } from './jira.ts';
+import { linksFrom, renderReport, seconds, stepRuns } from './report.ts';
 
 export type Options = {
   readonly driver: DriverName;
@@ -63,8 +64,6 @@ export const accessFromEnvironment = (repository: string): { readonly jira: Jira
   github: githubFromEnvironment(process.env, repository),
 });
 
-const seconds = (ms: number): string => `${String(Math.round(ms / 1000))} s`;
-
 function stopLine(result: Walk): string {
   switch (result.stop.kind) {
     case 'complete':
@@ -76,25 +75,6 @@ function stopLine(result: Walk): string {
     case 'driver failed':
       return `the driver failed before ${result.stop.step}: ${result.stop.reason}`;
   }
-}
-
-function report(options: Options, run: { readonly branch: string; readonly ticket: string }, result: Walk, links: { readonly label: string; readonly url: string }[], overheadMs: number): string {
-  const filed = result.reached[0]?.at.getTime();
-  const rows = result.reached.map((step, index) => {
-    const previous = result.reached[index - 1]?.at.getTime() ?? step.at.getTime();
-    return `|${step.name}|${step.at.toISOString()}|${seconds(step.at.getTime() - (filed ?? step.at.getTime()))}|${seconds(step.at.getTime() - previous)}|`;
-  });
-  const furthest = result.reached.at(-1)?.name ?? 'none';
-  return [
-    'h3. End-to-end report',
-    `Run ${run.branch} with the ${options.driver} driver and the catalog entry ${options.entry.name}. Furthest step: ${furthest}. ${stopLine(result)}.`,
-    '',
-    '||Step||Reached at||Since filed||Duration||',
-    ...rows,
-    '',
-    `Links: ${links.map(link => `[${link.label}|${link.url}]`).join(', ')}`,
-    `Harness overhead: ${seconds(overheadMs)}.`,
-  ].join('\n');
 }
 
 function checks(options: Options, result: Walk, overheadMs: number, elapsedMs: number, mainUnchanged: boolean, reportLink: string): readonly Check[] {
@@ -168,9 +148,20 @@ export async function runEndToEnd(options: Options, out: (line: string) => void)
       await Promise.race([driving, new Promise(resolve => setTimeout(resolve, driverStopWaitMs))]);
       out(`furthest step: ${result.reached.at(-1)?.name ?? 'none'}`);
       const { mainAfter, reportLink } = await timed(async () => {
-        const links = [{ label: 'ticket', url: jira.browse(ticket) }, ...result.reached.flatMap(step => step.links.filter(link => link.label !== 'ticket'))];
-        const overheadSoFar = busyMs;
-        const posted = await jira.comment(ticket, report(options, { branch, ticket }, result, links, overheadSoFar));
+        const posted = await jira.comment(
+          ticket,
+          renderReport({
+            branch,
+            driver: options.driver,
+            entry: options.entry.name,
+            furthest: result.reached.at(-1)?.name ?? 'none',
+            stop: stopLine(result),
+            timeline: result.reached,
+            steps: await stepRuns(database, ticket),
+            links: linksFrom(jira.browse(ticket), result.reached),
+            overheadMs: busyMs,
+          }),
+        );
         return { mainAfter: await github.branchHead('main'), reportLink: jira.commentLink(ticket, posted) };
       });
       out(`report ${reportLink}`);

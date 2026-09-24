@@ -4,7 +4,8 @@ import { loginForJob, type CheckLoopSettings } from '../../features/credentials/
 import { open } from '../../features/credentials/store.ts';
 import { startEnvironment } from '../../features/environments/lifecycle.ts';
 import { describe, type Providers } from '../../features/environments/provider.ts';
-import { connectCluster, imageFor, jobName, launch, manifests } from '../../features/jobs/launch.ts';
+import { imageFor, jobName, launch, manifests } from '../../features/jobs/launch.ts';
+import { connectCluster } from '../../shared/cluster.ts';
 import { remoteHead, repositoryUrl } from '../../features/jobs/remote.ts';
 import { imageReference, type JobSettings } from '../../features/jobs/settings.ts';
 import type { RunAsRule } from '../../features/tasks/run-as.ts';

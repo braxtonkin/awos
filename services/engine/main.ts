@@ -21,7 +21,6 @@ import { githubPerformers, outboxOwedAt } from '../../features/github/performers
 import type { JiraAccess } from '../../features/jira/client.ts';
 import { jiraPerformers } from '../../features/jira/performers.ts';
 import { currentAssignee, jiraSearch, ticketDescription } from '../../features/jira/source.ts';
-import { connectCluster } from '../../features/jobs/launch.ts';
 import { jobSettings } from '../../features/jobs/settings.ts';
 import { sweep } from '../../features/jobs/sweep.ts';
 import { enqueue } from '../../features/outbox/enqueue.ts';
@@ -36,6 +35,7 @@ import { coreRunAs, type RunAsRule } from '../../features/tasks/run-as.ts';
 import { finishStep, type StepRunner } from '../../features/tasks/step-runner.ts';
 import { startProblems } from '../../features/tasks/start.ts';
 import type { Performers } from '../../shared/actions.ts';
+import { connectCluster } from '../../shared/cluster.ts';
 import { connect, type Database } from '../../shared/db/client.ts';
 import { realClock, runLoop, type Loop } from '../../shared/loop.ts';
 import { attempts } from './attempts.ts';
