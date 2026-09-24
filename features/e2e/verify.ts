@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { parseArgs } from 'node:util';
 import type { z } from 'zod';
-import { fail, pass, type Check, type Scenario } from '../../tools/verify/check.ts';
+import { checksOf, fail, pass, type Check, type Line, type Scenario } from '../../tools/verify/check.ts';
 import { accessCopy, fakeCodexLogin, faultNames, runAsNames, standInImage, type Fault, type RunAs } from './autoworker.ts';
 import { Catalog, catalog, type Entry } from './catalog.ts';
 import { cleanScenarios } from './clean-lanes.ts';
@@ -9,7 +9,7 @@ import { driverNames, type DriverName } from './driver.ts';
 import { githubFromEnvironment, githubPayloads } from './github.ts';
 import { createRunBranch, runEndToEnd, type Inspect, type RunResult } from './harness.ts';
 import { jiraPayloads } from './jira.ts';
-import { laneChecks, lanes, laneTen } from './lanes.ts';
+import { laneLines, lanes, laneTen } from './lanes.ts';
 import { parsePayload, PayloadRejected } from './payload.ts';
 import { parkedScenario } from './parked.ts';
 import { seconds } from './report.ts';
@@ -40,7 +40,7 @@ const openWorld = (name: WorldName, repository: string): Promise<World> => {
 };
 
 async function localWorld(repository: string): Promise<World> {
-  const broken = (await kind.run(['up'])).find(check => !check.passed);
+  const broken = (checksOf(await kind.run(['up']))).find(check => !check.passed);
   if (broken !== undefined) throw new Error(`kind did not come up: ${broken.name}, ${broken.detail}`);
   const local = await startLocalWorld(await kindAddress(), repository);
   return {
@@ -86,9 +86,9 @@ const out = (line: string): void => {
 const tokensLine = (result: RunResult): string =>
   result.steps.map(step => `${step.step} ${step.inputTokens === undefined ? 'none' : String(step.inputTokens)}`).join(', ') || 'no attempts';
 
-async function runSeries(series: Series): Promise<readonly Check[]> {
+async function runSeries(series: Series): Promise<readonly Line[]> {
   const world = await openWorld(series.world, series.repository);
-  const checks: Check[] = [];
+  const checks: Line[] = [];
   const results: RunResult[] = [];
   try {
     for (const [index, entry] of series.entries.entries()) {
@@ -98,13 +98,13 @@ async function runSeries(series: Series): Promise<readonly Check[]> {
       results.push(result);
       checks.push(...result.checks.map(check => ({ ...check, name: `${label}${check.name}` })));
       out(`${label || 'run: '}${result.ticket} on ${result.branch}, time to clean ${result.toCleanMs === undefined ? 'not reached' : seconds(result.toCleanMs)}, report ${result.reportLink}, input tokens per step: ${tokensLine(result)}`);
-      if (result.checks.some(check => !check.passed)) break;
+      if (checksOf(result.checks).some(check => !check.passed)) break;
     }
   } finally {
     await world.stop();
   }
   if (series.entries.length > 1) {
-    const clean = results.filter(result => result.checks.every(check => check.passed)).length;
+    const clean = results.filter(result => checksOf(result.checks).every(check => check.passed)).length;
     const name = `${String(series.entries.length)} runs in a row reach clean`;
     checks.push(clean === series.entries.length ? pass(name, results.map(result => `${result.ticket} ${result.toCleanMs === undefined ? '' : seconds(result.toCleanMs)}`).join(', ')) : fail(name, `stopped at run ${String(results.length)}, after ${String(clean)} clean runs`));
   }
@@ -195,10 +195,7 @@ const p7Lane: Scenario = {
       lane.inspect,
     );
     if ('passed' in series) return [series];
-    const checks = await runSeries(series);
-    const decided = laneChecks(lane, checks);
-    const name = `lane ${String(lane.number)} ${lane.slug}`;
-    return [...checks.filter(check => !decided.includes(check)).map(check => ({ name: `info: ${check.name}`, passed: true, detail: `${check.passed ? "passed" : "failed, which does not decide this lane"}: ${check.detail}` })), ...decided, decided.length > 0 && decided.every(check => check.passed) ? pass(name, `${String(decided.length)} deciding checks passed`) : fail(name, `${String(decided.filter(check => !check.passed).length)} of ${String(decided.length)} deciding checks failed`)];
+    return laneLines(lane, await runSeries(series));
   },
 };
 

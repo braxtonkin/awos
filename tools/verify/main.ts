@@ -1,4 +1,5 @@
 import { fileURLToPath } from 'node:url';
+import { render } from './check.ts';
 import { loadScenarios, runScenario } from './scenarios.ts';
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
@@ -12,11 +13,7 @@ if (scenario === undefined) {
   process.stderr.write(`${problem}\n\nScenarios:\n${listing}\n`);
   process.exitCode = 2;
 } else {
-  const checks = await runScenario(scenario, args);
-  for (const check of checks) {
-    process.stdout.write(`${check.passed ? 'PASS' : 'FAIL'}  ${check.name}${check.detail === '' ? '' : `  (${check.detail})`}\n`);
-  }
-  const passed = checks.filter(check => check.passed).length;
-  process.stdout.write(`${String(passed)} of ${String(checks.length)} checks passed\n`);
-  process.exitCode = passed === checks.length ? 0 : 1;
+  const { text, exitCode } = render(await runScenario(scenario, args));
+  process.stdout.write(text);
+  process.exitCode = exitCode;
 }

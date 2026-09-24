@@ -10,7 +10,7 @@ import { ApiException, KubeConfig, RbacAuthorizationV1Api, type V1Job } from '@k
 import { z } from 'zod';
 import { accessOnly, type AccessOnlyLogin } from '../../shared/codex-login.ts';
 import { connect, refusal, type Database } from '../../shared/db/client.ts';
-import { fail, pass, type Check, type Scenario } from '../../tools/verify/check.ts';
+import { checksOf, fail, pass, type Check, type Scenario } from '../../tools/verify/check.ts';
 import { docker } from '../../tools/verify/docker.ts';
 import { kind } from '../../tools/verify/kind.ts';
 import { withPostgres } from '../../tools/verify/postgres.ts';
@@ -645,7 +645,7 @@ async function live(args: readonly string[]): Promise<readonly Check[]> {
   if (unknown.length > 0) return [fail('jobs-live runs known lanes', `unknown ${unknown.join(', ')}; name any of ${Object.keys(lanes).join(', ')}, changed-digest, or all`)];
   const githubToken = process.env['GITHUB_TOKEN'];
   if (githubToken === undefined || githubToken === '') return [fail('GITHUB_TOKEN is set', 'run jobs-live in the live service')];
-  const checks: Check[] = [...(await kind.run(['up']))];
+  const checks: Check[] = [...(checksOf(await kind.run(['up'])))];
   if (!checks.every(check => check.passed)) return checks;
   checks.push(pass('registry ready', await ensureRegistry()));
   const built = await buildAttemptImage();

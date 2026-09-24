@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { setTimeout as wait } from 'node:timers/promises';
 import { z } from 'zod';
-import { fail, pass, type Check, type Scenario } from '../../tools/verify/check.ts';
+import { checksOf, fail, pass, type Check, type Scenario } from '../../tools/verify/check.ts';
 import { kindAddress } from '../../tools/verify/cluster.ts';
 import { kind } from '../../tools/verify/kind.ts';
 import type { GitHub } from './github.ts';
@@ -280,7 +280,7 @@ export const worldScenario: Scenario = {
   name: 'e2e-world',
   summary: 'starts the local world of a fake GitHub, a fake Jira, and the git daemon, then drives a run branch to a merge and a ticket to Done through them, with a planted failing test that sandbox must fail',
   run: async () => {
-    const cluster = await kind.run(['up']);
+    const cluster = checksOf(await kind.run(['up']));
     if (!cluster.every(check => check.passed)) return cluster;
     const world = await startLocalWorld(await kindAddress(), repository);
     const folder = await mkdtemp(join(tmpdir(), 'e2e-world-'));

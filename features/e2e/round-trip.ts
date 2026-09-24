@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { setTimeout as wait } from 'node:timers/promises';
 import { sql } from 'kysely';
 import { z } from 'zod';
-import { fail, pass, type Check, type Scenario } from '../../tools/verify/check.ts';
+import { checksOf, fail, pass, type Check, type Scenario } from '../../tools/verify/check.ts';
 import { buildAttemptImage, ensureRegistry, gitServer, jobNamespace, kindAddress, kubernetes, registry, seedRepository, type GitServer } from '../../tools/verify/cluster.ts';
 import { kind } from '../../tools/verify/kind.ts';
 import { withPostgres } from '../../tools/verify/postgres.ts';
@@ -341,7 +341,7 @@ async function roundTripLive(args: readonly string[], out: (line: string) => voi
   const chosen = args.length === 0 || args.includes('all') ? [...lanes] : args;
   const unknown = chosen.filter(name => !isLane(name));
   if (unknown.length > 0) return [fail('round-trip names known parts', `unknown ${unknown.join(', ')}; name any of ${lanes.join(', ')}, or all`)];
-  const checks: Check[] = [...(await kind.run(['up']))];
+  const checks: Check[] = [...(checksOf(await kind.run(['up'])))];
   if (!checks.every(check => check.passed)) return checks;
   checks.push(pass('1: registry ready', await ensureRegistry()));
   const attemptImage = await buildAttemptImage(`${registry.host}/autoworker-job:round-trip`);

@@ -10,7 +10,7 @@ import { sql } from 'kysely';
 import { labels } from '../../shared/cluster.ts';
 import { accessOnly } from '../../shared/codex-login.ts';
 import { connect, type Database } from '../../shared/db/client.ts';
-import { fail, pass, type Check } from '../../tools/verify/check.ts';
+import { checksOf, fail, pass, type Check } from '../../tools/verify/check.ts';
 import { buildAttemptImage, ensureRegistry, jobNamespace, kindAddress, kubernetes, pushByDigest, registry, repositoryRoot, sh } from '../../tools/verify/cluster.ts';
 import { kind } from '../../tools/verify/kind.ts';
 import type { EngineWorld } from './world.ts';
@@ -320,7 +320,7 @@ async function podNames(core: CoreV1Api, namespace: string, attempt: string): Pr
 }
 
 export async function driveAutoWorker(drive: Drive): Promise<void> {
-  const up = await kind.run(['up']);
+  const up = checksOf(await kind.run(['up']));
   const broken = up.find(check => !check.passed);
   if (broken !== undefined) throw new Error(`kind did not come up: ${broken.name}, ${broken.detail}`);
   drive.log(await ensureRegistry());

@@ -7,7 +7,7 @@ import { sql } from 'kysely';
 import { z } from 'zod';
 import { connectCluster, labels, type Cluster } from '../../shared/cluster.ts';
 import { connect, type Database } from '../../shared/db/client.ts';
-import { fail, pass, type Check, type Scenario } from '../../tools/verify/check.ts';
+import { checksOf, fail, pass, type Check, type Scenario } from '../../tools/verify/check.ts';
 import { kind } from '../../tools/verify/kind.ts';
 import { withPostgres, type TestPostgres } from '../../tools/verify/postgres.ts';
 import { cleanChecks, leftovers, type CleanSources, type Leftover, type Place } from './clean.ts';
@@ -224,7 +224,7 @@ async function inWorld<T>(postgres: TestPostgres, world: World, work: (db: Datab
 async function cleanLane(args: readonly string[]): Promise<readonly Check[]> {
   const { values } = parseArgs({ args: [...args], options: { repository: { type: 'string', default: 'braxtonkdev/autoworker-oss' }, 'read-github': { type: 'boolean', default: false } } });
   if (values['read-github'] && (process.env['GITHUB_TOKEN'] ?? '') === '') return [fail('GITHUB_TOKEN is set', '--read-github runs in the live service, which reads GitHub with the sandbox token')];
-  const checks: Check[] = [...(await kind.run(['up']))];
+  const checks: Check[] = [...(checksOf(await kind.run(['up'])))];
   if (!checks.every(check => check.passed)) return checks;
   const cluster = connectCluster(`e2e-clean-${randomBytes(3).toString('hex')}`);
   await cluster.core.createNamespace({ body: { metadata: { name: cluster.namespace } } });

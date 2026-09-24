@@ -1,5 +1,5 @@
-import { fail, pass, type Check } from '../../tools/verify/check.ts';
-import type { Fault, RunAs } from './autoworker.ts';
+import { asInfo, fail, isCheck, pass, type Check, type Line } from '../../tools/verify/check.ts';
+import { teamAccount, type Fault, type RunAs } from './autoworker.ts';
 import type { Inspect } from './harness.ts';
 
 const nobodyToRunAs = 'Nobody to run this task as.';
@@ -33,10 +33,12 @@ export type Lane = {
 
 const everyCheck = (): boolean => true;
 
+type Deciders = { readonly exactly: readonly string[]; readonly counted?: readonly string[] };
+
 const named =
-  (...prefixes: readonly string[]) =>
+  ({ exactly, counted = [] }: Deciders) =>
   (name: string): boolean =>
-    prefixes.some(prefix => name.startsWith(prefix) || name.includes(`: ${prefix}`));
+    exactly.includes(name) || counted.some(prefix => name.startsWith(`${prefix} `));
 
 const run = { runs: 1, fault: undefined, runAs: 'assignee', assigned: true, timeoutSeconds: 2700, inspect: undefined, before: undefined } as const;
 
@@ -56,7 +58,7 @@ export const lanes: readonly Lane[] = [
     slug: 'engine-restart',
     fault: 'engine-restart',
     procedure: 'Kill the engine at the first stored event of Implement, wait 10 s, and start it again. Pass when the attempt continues, its events have no gap or duplicate, one pull request exists, and no Jira comment repeats.',
-    decidedBy: named('engine restarted', 'attempt continued', 'pull requests', 'duplicate comments', 'clean: nothing left in events', 'clean'),
+    decidedBy: named({ exactly: ['engine restarted', 'attempt continued', 'clean'], counted: ['pull requests', 'duplicate comments'] }),
   },
   {
     ...run,
@@ -64,7 +66,7 @@ export const lanes: readonly Lane[] = [
     slug: 'lost-job',
     fault: 'lost-job',
     procedure: "Delete the Implement attempt's pod mid-step. Pass when the reaper marks the attempt lost, the next attempt starts in a fresh pod with the lost attempt's summary in its prompt, the run reaches clean, and one pull request exists.",
-    decidedBy: named('pod deleted mid-step', 'lost attempt replaced', 'clean', 'pull requests'),
+    decidedBy: named({ exactly: ['pod deleted mid-step', 'lost attempt replaced', 'clean'], counted: ['pull requests'] }),
   },
   {
     ...run,
@@ -74,7 +76,7 @@ export const lanes: readonly Lane[] = [
     timeoutSeconds: 300,
     inspect: noAssigneeInspect,
     procedure: 'File the ticket with no assignee. Pass when the claim is refused, the task waits with the decided note, no attempt row exists, and no Job starts.',
-    decidedBy: named('ticket filed', 'task recorded', 'lane 4:'),
+    decidedBy: named({ exactly: ['ticket filed', 'task recorded'], counted: ['lane 4:'] }),
   },
   {
     ...run,
@@ -83,35 +85,35 @@ export const lanes: readonly Lane[] = [
     runAs: 'team',
     assigned: false,
     procedure: "Give the routine a team account to run as, holding the owner's logins, and leave the ticket unassigned. Pass when the first attempt records the team account as its run-as identity and its Job starts.",
-    decidedBy: named('ticket filed', 'task recorded', 'plan posted', 'record: every attempt ran as'),
+    decidedBy: named({ exactly: ['ticket filed', 'task recorded', 'plan posted', `record: every attempt ran as ${teamAccount}`] }),
   },
   {
     ...run,
     number: 6,
     slug: 'verify',
     procedure: "Read the Verify attempt's environment row and evidence. Pass when the tests-only environment started and stopped once, and the evidence holds the reproduction script and its two runs, failing first and passing second.",
-    decidedBy: named('record: each Verify attempt started and stopped its environment once', 'record: Verify evidence'),
+    decidedBy: named({ exactly: ['record: each Verify attempt started and stopped its environment once', 'record: Verify evidence holds the reproduction script and its two runs, failing first and passing second'] }),
   },
   {
     ...run,
     number: 7,
     slug: 'report',
     procedure: "Read the run's report comment back from Jira. Pass when it holds a timeline with each step's duration, input tokens per step, and links to the ticket, the pull request, the merge commit, and both CI runs.",
-    decidedBy: named('report posted', 'the report comment reads back'),
+    decidedBy: named({ exactly: ['report posted', 'the report comment reads back from Jira with its timeline, input tokens per step, and every link'] }),
   },
   {
     ...run,
     number: 8,
     slug: 'replay',
     procedure: "Replay each finished attempt's stored events through shared/items.ts. Pass when the replayed items match the finished items stored during the run, one for one.",
-    decidedBy: named('record: replay', 'clean: nothing left in replay'),
+    decidedBy: named({ exactly: ['record: replay through shared/items.ts matches the stored finished items one for one', 'clean'] }),
   },
   {
     ...run,
     number: 9,
     slug: 'clean-negative',
     procedure: 'After a passing run, plant a Secret labeled for a finished attempt and rerun the clean check. Pass when the check fails and names the Secret.',
-    decidedBy: named('clean', 'the clean check fails on a planted Secret and names it'),
+    decidedBy: named({ exactly: ['clean', 'the clean check fails on a planted Secret and names it'] }),
   },
 ];
 
@@ -119,4 +121,14 @@ export const allCommands = ['npm run check', 'npm run verify -- guardrails', 'np
 
 export const laneTen = `Lane 10 runs ${allCommands.join(', ')} at head in the verify service, and passes when each exits 0.`;
 
-export const laneChecks = (lane: Lane, checks: readonly Check[]): readonly Check[] => checks.filter(check => lane.decidedBy(check.name.replace(/^run \d+: /, '')));
+const decides = (lane: Lane, line: Line): boolean => lane.decidedBy(line.name.replace(/^run \d+: /, ''));
+
+const deciding = (line: Line): Check => (isCheck(line) ? line : fail(line.name, `${line.observed}: ${line.detail}, and this lane expects it`));
+
+export function laneLines(lane: Lane, lines: readonly Line[]): readonly Line[] {
+  const decided = lines.filter(line => decides(lane, line)).map(deciding);
+  const passed = decided.filter(check => check.passed).length;
+  const name = `lane ${String(lane.number)} ${lane.slug}: ${String(passed)} of ${String(decided.length)} deciding checks passed`;
+  const summary = decided.length > 0 && passed === decided.length ? pass(name, '') : fail(name, decided.filter(check => !check.passed).map(check => check.name).join('; ') || 'no check decides this lane');
+  return [...lines.filter(line => !decides(lane, line)).map(line => (isCheck(line) ? asInfo(line) : line)), ...decided, summary];
+}

@@ -5,7 +5,7 @@ import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { connectCluster } from '../../shared/cluster.ts';
 import { connect, type Database } from '../../shared/db/client.ts';
-import { fail, pass, type Check } from '../../tools/verify/check.ts';
+import { fail, info, pass, type Check, type Line } from '../../tools/verify/check.ts';
 import { withPostgres } from '../../tools/verify/postgres.ts';
 import { endStatus, teamAccount, type Fault, type RunAs } from './autoworker.ts';
 import type { Entry } from './catalog.ts';
@@ -36,7 +36,7 @@ export type Options = {
 export type RunResult = {
   readonly branch: string;
   readonly ticket: string;
-  readonly checks: readonly Check[];
+  readonly checks: readonly Line[];
   readonly reportLink: string;
   readonly toCleanMs: number | undefined;
   readonly steps: readonly StepRun[];
@@ -93,12 +93,12 @@ function stopLine(result: Walk): string {
   }
 }
 
-const within = (name: string, ms: number | undefined, budgetMs: number, missing: string): Check =>
-  ms === undefined ? pass(name, missing) : ms <= budgetMs ? pass(name, seconds(ms)) : fail(name, seconds(ms));
+const within = (name: string, ms: number | undefined, budgetMs: number, missing: string): Line =>
+  ms === undefined ? info(name, 'n/a', missing) : ms <= budgetMs ? pass(name, seconds(ms)) : fail(name, seconds(ms));
 
 type Timing = { readonly overheadMs: number; readonly elapsedMs: number; readonly autoworkerOverheadMs: number | undefined };
 
-function frontierChecks(options: Options, result: Walk, timing: Timing, mainUnchanged: boolean): readonly Check[] {
+function frontierChecks(options: Options, result: Walk, timing: Timing, mainUnchanged: boolean): readonly Line[] {
   const found = new Map<string, Reached>(result.reached.map(step => [step.name, step]));
   const filed = found.get('ticket filed')?.at.getTime() ?? 0;
   const perStep = steps.map(({ name }) => {
@@ -114,7 +114,7 @@ function frontierChecks(options: Options, result: Walk, timing: Timing, mainUnch
     result.stop.kind === 'complete' ? pass('frontier reaches clean', stopLine(result)) : fail('frontier reaches clean', `furthest step: ${result.reached.at(-1)?.name ?? 'none'}. ${stopLine(result)}`),
     within('ticket filed to merged within 45 minutes', since('merged'), filedToMergedBudgetMs, 'not merged'),
     within('ticket filed to clean within 45 minutes', since('clean'), filedToCleanBudgetMs, 'not clean'),
-    within('harness overhead within 60 s', timing.overheadMs, overheadBudgetMs, ''),
+    timing.overheadMs <= overheadBudgetMs ? pass('harness overhead within 60 s', seconds(timing.overheadMs)) : fail('harness overhead within 60 s', seconds(timing.overheadMs)),
     timing.elapsedMs <= options.timeoutMs + timeoutGraceMs ? pass('run ends within its timeout plus 15 s', `${seconds(timing.elapsedMs)} of ${seconds(options.timeoutMs)}`) : fail('run ends within its timeout plus 15 s', `${seconds(timing.elapsedMs)} of ${seconds(options.timeoutMs)}`),
     within("AutoWorker's overhead within 10 minutes", timing.autoworkerOverheadMs, autoworkerOverheadBudgetMs, 'not measured, because the run did not reach clean with the AutoWorker driver'),
     mainUnchanged ? pass('main unchanged', '') : fail('main unchanged', 'main moved during the run'),
