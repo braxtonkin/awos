@@ -59,7 +59,7 @@ Rejected options:
 
 ### An outbox row can end refused, and the store holds a task that owes an action
 
-Decided 24 Sep 2026 while building the outbox (P4), for the Land model in `features/github/` (M4). It amends the rule above that a row is marked done only after its action took effect.
+Decided 24 Sep 2026 while building the outbox (P4), for the Land model, now in `features/code-change/` (M4). It amends the rule above that a row is marked done only after its action took effect.
 
 - A performer can end a row as refused when the target declines the action for a reason a retry cannot change, such as a merge refused because the head moved. The row records the refusal and the head it named as its result, so Land reads why. A refused row settles without an effect, and the rows its task owed after it are dropped in the same statement, because they assumed its effect.
 - A merge that finds the pull request already merged, already queued, or ejected in a way Land has not answered reports that as the row's result. It is never a reason to act again.
@@ -319,6 +319,22 @@ Decided 23 Sep 2026. Implement opens its pull request as a draft, and GitHub can
 Rejected option:
 
 - **One rule for every repository.** Review customs differ between repositories, and a generic core can't know them.
+
+### Land runs in the engine, and hands each action it owes to the outbox
+
+Decided 24 Sep 2026 while building Land (L1), to fit `features/code-change/Land.tla` (M4) to the outbox and the task store.
+
+- Land is an engine loop with no Job and no agent. Each pass claims a Land attempt for every ready task at Land through the task claim, renews its lease, reads the pull request's merge state, and acts by one table of rules, `rules` in `features/code-change/land.ts`, in the order `Land.tla` decides. A task that owes an action is skipped before GitHub is read.
+- An attempt that owes `pr.mark-ready`, `pr.update-branch`, or `pr.merge` ends with the verdict `handed_off` in the transaction that owes the action, and its task stays at Land. The store refuses to owe an action while its task has a live attempt, and refuses to claim a task that owes one, so the attempt has to end first. The next pass claims a fresh attempt once the row settles.
+- Land keeps its memory in the store it already has. An attempt that answered a review or a queue ejection records the id in its output as `answers`, and the head of a refused merge is the refused row's result.
+- Merged ends the attempt with a pass, and the same transaction owes a comment on the ticket and `branch.delete`. A required approval ends it with `review_required`, and the same transaction writes the review step's note and owes what the step returns. The core's step returns nothing, because approval comes from the repository's rules and a fork's plug-in (G).
+- A conflict returns the task to Implement with the verdict `red_check`, counted in `landRounds`, because Code change declares no other route back from Land.
+- The model moved from `features/github/` to `features/code-change/`, beside the loop it covers (A4). The folder's `invariants.ts` names its seven properties, and `land-sim` checks each one by name.
+
+Rejected options:
+
+- **Keep the attempt live and owe from it.** The store refuses the row while the attempt is live.
+- **End the attempt with `pass` or `lost`.** A pass ends the task at Land, and a lost attempt counts toward parking it.
 
 ### A request for help says exactly what to do
 

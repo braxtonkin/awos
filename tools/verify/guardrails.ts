@@ -83,6 +83,20 @@ const plantedStep = "name: 'planted', reads: [], prompt: 'Planted.', needsReposi
 
 const violations: readonly Violation[] = [
   {
+    name: 'tsc rejects a review step that owes an approval',
+    file: 'features/planted/approves.ts',
+    source: "import { z } from 'zod';\nimport type { ActionSpec } from '../../shared/actions.ts';\nimport { reviewOwes, type ReviewStep } from '../code-change/land.ts';\n\nconst approve: ActionSpec<'pr.approve', { readonly repository: string }, { readonly review: string }> = { kind: 'pr.approve', payload: z.object({ repository: z.string() }), result: z.object({ review: z.string() }) };\n\nexport const approving: ReviewStep = pull => ({ actions: [reviewOwes(approve, { repository: pull.repository })], note: 'The planted step approved.' });\n",
+    tool: 'tsc',
+    expect: ['TS2345'],
+  },
+  {
+    name: 'tsc rejects a review step that owes an action it did not build with reviewOwes',
+    file: 'features/planted/owes.ts',
+    source: "import { z } from 'zod';\nimport { owe, type ActionSpec } from '../../shared/actions.ts';\nimport type { ReviewStep } from '../code-change/land.ts';\n\nconst approve: ActionSpec<'pr.approve', { readonly repository: string }, { readonly review: string }> = { kind: 'pr.approve', payload: z.object({ repository: z.string() }), result: z.object({ review: z.string() }) };\n\nexport const approving: ReviewStep = pull => ({ actions: [owe(approve, { repository: pull.repository })], note: 'The planted step approved.' });\n",
+    tool: 'tsc',
+    expect: ['TS2322'],
+  },
+  {
     name: 'tsc rejects an unchecked index access',
     file: 'features/planted/index.ts',
     source: 'const names: string[] = [];\nexport const size = names[0].length;\n',
@@ -978,6 +992,12 @@ const plantedModel: Violation = {
 };
 
 const allowances: readonly Allowance[] = [
+  {
+    name: 'tsc accepts a review step that owes a review request',
+    file: 'features/planted/requests.ts',
+    source: "import { z } from 'zod';\nimport type { ActionSpec } from '../../shared/actions.ts';\nimport { reviewOwes, type ReviewStep } from '../code-change/land.ts';\n\nconst request: ActionSpec<'pr.request-review', { readonly repository: string }, { readonly requested: boolean }> = { kind: 'pr.request-review', payload: z.object({ repository: z.string() }), result: z.object({ requested: z.boolean() }) };\n\nexport const requesting: ReviewStep = pull => ({ actions: [reviewOwes(request, { repository: pull.repository })], note: 'The planted step asked for a review.' });\n",
+    tool: 'tsc',
+  },
   {
     name: 'eslint accepts a shebang on line 1, as an editor parses it',
     file: 'features/planted/cli.ts',

@@ -68,7 +68,7 @@ export const workflow = {
       prompt: "Bring the pull request to a state GitHub reports mergeable under the repository's own rules. Summarize its checks and reviews in a text block.",
       needsRepository: true,
       canEnd: true,
-      owes: [{ kind: 'merge', irreversible: true }],
+      owes: [{ kind: 'pr.merge', irreversible: true }],
       output: review,
       requires: ['text'],
       failures: {

@@ -1,5 +1,7 @@
 import { hostname } from 'node:os';
 import { z } from 'zod';
+import { landLoops } from '../../features/code-change/land-loop.ts';
+import { coreReview, type ReadPullRequest } from '../../features/code-change/land.ts';
 import { checkLoop } from '../../features/credentials/check-loop.ts';
 import { checksFor } from '../../features/credentials/checks.ts';
 import { githubApi } from '../../features/credentials/github-check.ts';
@@ -7,10 +9,13 @@ import { sealingKey, type SealingKey } from '../../features/credentials/seal.ts'
 import { writeBack } from '../../features/credentials/store.ts';
 import { providerProblems, reconcile } from '../../features/environments/lifecycle.ts';
 import { providersByName } from '../../features/environments/provider.ts';
+import { enqueue } from '../../features/outbox/enqueue.ts';
 import { outboxLoops, registryOf } from '../../features/outbox/perform.ts';
 import { scheduleSource } from '../../features/routines/schedule-source.ts';
 import { postgresNow, scheduler } from '../../features/routines/scheduler.ts';
 import { sourcesByKind } from '../../features/routines/source.ts';
+import { advance, approveFromOutside, handOff } from '../../features/tasks/advance.ts';
+import { claim, renew } from '../../features/tasks/claim.ts';
 import { reaper } from '../../features/tasks/reaper.ts';
 import { startProblems } from '../../features/tasks/start.ts';
 import type { OwedKinds, Performers } from '../../shared/actions.ts';
@@ -39,6 +44,7 @@ const settings = z.object({
   OUTBOX_MAX_TRIES: z.coerce.number().int().positive().default(3),
   ENVIRONMENTS_EVERY_MS: milliseconds.default(30_000),
   ENVIRONMENT_START_DEADLINE_MS: milliseconds.default(600_000),
+  LAND_EVERY_MS: milliseconds.default(10_000),
 });
 
 type Settings = z.infer<typeof settings>;
@@ -53,10 +59,20 @@ const performers = {} satisfies Performers<ActionKind>;
 
 const actions = registryOf(performers);
 
+const readPullRequest: ReadPullRequest | null = null;
+
 const loopsFor = (given: Settings, key: SealingKey | undefined): readonly Loop[] => [
   reaper({ everyMs: given.REAPER_EVERY_MS, leaseMs: given.LEASE_MS }),
   scheduler({ everyMs: given.SCHEDULER_EVERY_MS, leaseMs: given.ROUTINE_LEASE_MS, sources, workflows, now: postgresNow }),
   reconcile({ providers, everyMs: given.ENVIRONMENTS_EVERY_MS, startDeadlineMs: given.ENVIRONMENT_START_DEADLINE_MS }),
+  ...landLoops({
+    everyMs: given.LAND_EVERY_MS,
+    leaseMs: given.LEASE_MS,
+    read: readPullRequest,
+    review: coreReview,
+    enqueue,
+    tasks: { claim, renew, handOff, approveFromOutside, finish: (db, attempt, report, now, then) => advance(db, workflows, attempt, report, now, then) },
+  }),
   ...outboxLoops({ everyMs: given.OUTBOX_EVERY_MS, leaseMs: given.OUTBOX_LEASE_MS, marginMs: given.OUTBOX_MARGIN_MS, maxTries: given.OUTBOX_MAX_TRIES, clock: realClock, registry: actions }),
   ...(key === undefined
     ? []
