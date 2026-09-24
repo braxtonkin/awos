@@ -427,6 +427,13 @@ const violations: readonly Violation[] = [
     ],
   },
   {
+    name: "dependency-cruiser rejects a database driver in the bridge's Job side, which the Job entry point imports",
+    file: 'features/bridge/job.ts',
+    edit: { from: "import { spawn } from 'node:child_process';\n", to: "import { spawn } from 'node:child_process';\nimport 'pg';\n" },
+    tool: 'depcruise',
+    expect: ['job-has-no-database'],
+  },
+  {
     name: 'dependency-cruiser rejects a Kubernetes client in a Job',
     file: 'services/job/kube.ts',
     source: "import { KubeConfig } from '@kubernetes/client-node';\nexport const job = KubeConfig;\n",
