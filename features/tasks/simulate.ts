@@ -11,7 +11,7 @@ import { step, type Failure as StepFailure, type StepKind, type StepVerdict, typ
 import type { TestPostgres } from '../../tools/verify/postgres.ts';
 import { act, advance, approveFromOutside, note, type PersonAction, type Report } from './advance.ts';
 import { claim, claimable, renew } from './claim.ts';
-import { watch, type PropertyName, type Violation } from './invariants.ts';
+import { logLostApprovals, loseApprovals, watch, type PropertyName, type Violation } from './invariants.ts';
 import { reaper } from './reaper.ts';
 import { workflowsByName } from './start.ts';
 
@@ -1032,8 +1032,8 @@ const rules: Readonly<Record<Move, Rule>> = {
     allowed: (_world, quiet) => !quiet,
     perform: async ({ db, world, random }) => {
       const task = pick(random, await approvalsToLose(db));
-      if (task === undefined) return 'no ready task at an irreversible step holds an approval that Tasks.tla lets it lose';
-      await db.updateTable('task').set({ approved: [] }).where('id', '=', task).execute();
+      if (task === undefined) return 'no ready task at an irreversible step holds an approval';
+      await loseApprovals(db, task);
       count(world, 'approval lost');
       return `task ${task}: its approvals went missing`;
     },
@@ -1063,24 +1063,19 @@ const rules: Readonly<Record<Move, Rule>> = {
   },
 };
 
-function losesApprovalWithinItsModel(workflow: Workflow | undefined, step: string, approved: readonly string[]): boolean {
-  const kind = workflow?.steps.find(candidate => candidate.name === step);
-  if (workflow === undefined || kind?.owes.some(owed => owed.irreversible) !== true) return false;
-  const at = (name: string): number => workflow.steps.findIndex(candidate => candidate.name === name);
-  const targets = Object.values(kind.failures).flatMap(failure => ('to' in failure ? [failure.to] : []));
-  return approved.every(gate => targets.every(target => at(gate) >= at(target)));
-}
+const owesIrreversible = (workflow: string, step: string): boolean =>
+  byName.get(workflow)?.steps.find(kind => kind.name === step)?.owes.some(owed => owed.irreversible) === true;
 
 async function approvalsToLose(db: Database): Promise<readonly string[]> {
   const ready = await db
     .selectFrom('task')
-    .select(['task.id', 'task.workflow', 'task.step', sql<string[]>`task.approved::text[]`.as('approved')])
+    .select(['task.id', 'task.workflow', 'task.step'])
     .where('task.state', '=', 'ready')
     .where(sql<boolean>`cardinality(task.approved) > 0`)
     .where(eb => eb.not(eb.exists(eb.selectFrom('attempt').select('attempt.id').whereRef('attempt.task_id', '=', 'task.id').where('attempt.finished_at', 'is', null))))
     .orderBy('task.id')
     .execute();
-  return ready.filter(task => losesApprovalWithinItsModel(byName.get(task.workflow), task.step, task.approved)).map(task => task.id);
+  return ready.filter(task => owesIrreversible(task.workflow, task.step)).map(task => task.id);
 }
 
 async function noteReleases(db: Database, world: World, from: number): Promise<string> {
@@ -1290,6 +1285,7 @@ async function runSeed(postgres: TestPostgres, plan: Plan, seed: number): Promis
       startEngine(engines, index);
     });
     await engines.virtual.idle();
+    await logLostApprovals(db);
     const watched = await watch(db, workflows, profile.reapEveryMs, new Date(epoch));
     const ended = async (steps: number, failure: Failure | undefined): Promise<Run> => ({
       plan,

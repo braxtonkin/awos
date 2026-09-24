@@ -57,7 +57,8 @@ CONSTANTS
     OutsideApprovalsAreFinite,
     LaterReviewParks,
     OutsideApprovalNeedsAWait,
-    RetryKeepsApprovals
+    RetryKeepsApprovals,
+    LostApprovalStaysLost
 
 CodeChangeSteps == <<"specify", "implement", "verify", "land">>
 
@@ -134,6 +135,7 @@ TypeOK ==
                            state : TaskStates,
                            end : StepSet,
                            approved : SUBSET DOMAIN After,
+                           missing : SUBSET DOMAIN After,
                            reviews : 0..(MaxReviewReturns + 1),
                            rounds : [Returning -> 0..(MaxRounds + 1)],
                            reruns : 0..(MaxEnvReruns + 1),
@@ -154,7 +156,7 @@ TypeOK ==
 Init ==
     /\ \E ends \in [Tasks -> EndSteps] :
          /\ \A t \in Tasks : ends[t] \in EndsFor(t)
-         /\ task = [t \in Tasks |-> [step |-> First, state |-> "ready", end |-> ends[t], approved |-> {}, reviews |-> 0, rounds |-> NoRounds, reruns |-> 0, lost |-> 0, retries |-> 0, inputWaits |-> 0, outputs |-> {}, passed |-> FALSE]]
+         /\ task = [t \in Tasks |-> [step |-> First, state |-> "ready", end |-> ends[t], approved |-> {}, missing |-> {}, reviews |-> 0, rounds |-> NoRounds, reruns |-> 0, lost |-> 0, retries |-> 0, inputWaits |-> 0, outputs |-> {}, passed |-> FALSE]]
     /\ attempt = [w \in Workers |-> NoTask]
     /\ worker = [w \in Workers |-> "idle"]
     /\ lateResults = {}
@@ -185,11 +187,13 @@ NeedsInput(current) ==
     ELSE [current EXCEPT !.state = "asking", !.inputWaits = Min(@ + 1, MaxInputWaits + 1)]
 
 SentBack(current, s) ==
-    [current EXCEPT !.step = s,
-                    !.approved = IF ReturnClearsApprovals THEN {g \in @ : Rank[g] < Rank[s]} ELSE @,
-                    !.reruns = 0,
-                    !.retries = 0,
-                    !.inputWaits = 0]
+    LET held == IF LostApprovalStaysLost THEN current.approved ELSE current.approved \cup current.missing
+    IN [current EXCEPT !.step = s,
+                       !.approved = IF ReturnClearsApprovals THEN {g \in held : Rank[g] < Rank[s]} ELSE held,
+                       !.missing = {g \in @ : Rank[g] < Rank[s]},
+                       !.reruns = 0,
+                       !.retries = 0,
+                       !.inputWaits = 0]
 
 RoundFailed(current, target) ==
     LET s == current.step
@@ -362,14 +366,14 @@ OutsideApproval(t) ==
     /\ task' = [task EXCEPT ![t].state = "ready"]
     /\ UNCHANGED <<attempt, worker, lateResults, humanActions, claimEpoch, runnable, runAs, reassignments>>
 
-ApprovalGoesMissing(t) == task[t].step \in Merges /\ task'[t] = [task[t] EXCEPT !.approved = {}]
+ApprovalGoesMissing(t) == task[t].step \in Merges /\ task'[t] = [task[t] EXCEPT !.approved = {}, !.missing = @ \cup task[t].approved]
 
 LoseApproval(t) ==
     /\ task[t].state = "ready"
     /\ task[t].step \in Merges
     /\ task[t].approved # {}
     /\ LiveOn(t) = {}
-    /\ task' = [task EXCEPT ![t].approved = {}]
+    /\ task' = [task EXCEPT ![t].approved = {}, ![t].missing = @ \cup task[t].approved]
     /\ UNCHANGED <<attempt, worker, lateResults, humanActions, claimEpoch, runnable, runAs, reassignments>>
 
 Terminated == \A t \in Tasks : task[t].state \in Settled
@@ -432,7 +436,7 @@ StopsAtItsEndStage == \A t \in Tasks : Rank[task[t].step] <= Rank[task[t].end] /
 
 ApprovalsMatchGatesPassed ==
     \A t \in Tasks : LET passedGates == {g \in Gates(t) : Rank[g] < Rank[task[t].step]}
-                    IN IF task[t].step \in Merges THEN task[t].approved \subseteq passedGates ELSE task[t].approved = passedGates
+                    IN task[t].missing \subseteq passedGates /\ task[t].approved = passedGates \ task[t].missing
 
 ReviewReturnsCapped == \A t \in Tasks : task[t].reviews <= MaxReviewReturns
 
