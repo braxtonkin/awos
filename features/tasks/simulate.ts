@@ -11,11 +11,11 @@ import { step, type Failure as StepFailure, type StepKind, type StepVerdict, typ
 import type { TestPostgres } from '../../tools/verify/postgres.ts';
 import { act, advance, approveFromOutside, note, type PersonAction, type Report } from './advance.ts';
 import { claim, claimable, renew } from './claim.ts';
-import { watch, type PropertyName, type Violation } from './invariants.ts';
+import { logLostApprovals, loseApprovals, watch, type PropertyName, type Violation } from './invariants.ts';
 import { reaper } from './reaper.ts';
 import { workflowsByName } from './start.ts';
 
-export const profileName = z.enum(['default', 'races', 'hangs', 'verdicts', 'people', 'needs-input', 'mixed', 'behavior', 'environment', 'crashes', 'db-pause', 'two-engines']);
+export const profileName = z.enum(['default', 'races', 'hangs', 'verdicts', 'people', 'reviews', 'needs-input', 'mixed', 'behavior', 'environment', 'crashes', 'db-pause', 'two-engines']);
 
 export type ProfileName = z.infer<typeof profileName>;
 
@@ -279,6 +279,18 @@ export const profiles: Readonly<Record<ProfileName, Profile>> = {
     odds: { claim: 6, renew: 4, finish: 5, ...quietFaults, stop: 1, retry: 2, approve: 3, sendBack: 2, answer: 2, stale: 2, outside: 1, doubleDecision: 0.5 },
     effects: { ...mostlyPass, ask: 2 },
   },
+  reviews: {
+    stepsPerTask: 15,
+    workers: 4,
+    nobodyEvery: 0,
+    leaseMs: 30_000,
+    reapEveryMs: 15_000,
+    ...oneEngine,
+    stepMs: 6_000,
+    burst: 5,
+    odds: { claim: 6, renew: 4, finish: 6, ...quietFaults, ...noPeople, approve: 3, retry: 0.5, outside: 1 },
+    effects: { pass: 1, fail: 0, ask: 0, return: 0, rerun: 0, review: 1, await: 0 },
+  },
   'needs-input': {
     stepsPerTask: 15,
     workers: 4,
@@ -361,6 +373,7 @@ export type Run = {
   readonly hung: number;
   readonly hungNotLost: readonly string[];
   readonly tally: Readonly<Record<string, number>>;
+  readonly fired: Readonly<Record<string, number>>;
   readonly done: number;
   readonly tasks: readonly Settled[];
   readonly releases: readonly Release[];
@@ -406,6 +419,7 @@ type World = {
   readonly hung: Set<string>;
   readonly bursts: Burst[];
   readonly tally: Map<string, number>;
+  readonly fired: Map<Move, number>;
   readonly people: readonly string[];
   readonly routines: readonly Seeded[];
   clock: number;
@@ -596,6 +610,16 @@ async function refused(write: () => Promise<unknown>, guard: string): Promise<'a
   } catch (error) {
     const found = refusal(error);
     if (found !== undefined && 'name' in found && found.name === guard) return 'refused';
+    throw error;
+  }
+}
+
+async function outsideApproves(db: Database, task: string): Promise<'moved' | 'found nothing' | 'refused by review_wait_names_its_review'> {
+  try {
+    return (await approveFromOutside(db, task)) ? 'moved' : 'found nothing';
+  } catch (error) {
+    const found = refusal(error);
+    if (found !== undefined && 'name' in found && found.name === 'review_wait_names_its_review') return 'refused by review_wait_names_its_review';
     throw error;
   }
 }
@@ -820,17 +844,17 @@ const rules: Readonly<Record<Move, Rule>> = {
     allowed: (_world, quiet) => !quiet,
     perform: async turn => {
       const { db, world, random, now } = turn;
-      const old = pick(
-        random,
-        await db
-          .selectFrom('attempt')
-          .innerJoin('task', 'task.id', 'attempt.task_id')
-          .select(['attempt.id', 'attempt.task_id'])
-          .where('attempt.finished_at', 'is not', null)
-          .where(eb => eb.or([eb('task.review_attempt', 'is', null), eb('task.review_attempt', '<>', eb.ref('attempt.id'))]))
-          .orderBy('attempt.id')
-          .execute(),
-      );
+      const olds = await db
+        .selectFrom('attempt')
+        .innerJoin('task', 'task.id', 'attempt.task_id')
+        .select(['attempt.id', 'attempt.task_id', 'task.waiting_on'])
+        .where('attempt.finished_at', 'is not', null)
+        .where(eb => eb.or([eb('task.review_attempt', 'is', null), eb('task.review_attempt', '<>', eb.ref('attempt.id'))]))
+        .where(eb => eb.not(eb.exists(eb.selectFrom('human_action').select('human_action.id').whereRef('human_action.attempt_id', '=', 'attempt.id'))))
+        .orderBy('attempt.id')
+        .execute();
+      const behindANewerReview = olds.filter(candidate => candidate.waiting_on === 'approval' || candidate.waiting_on === 'answer');
+      const old = pick(random, behindANewerReview.length > 0 && random() < 0.8 ? behindANewerReview : olds);
       const person = pick(random, world.people);
       if (old === undefined || person === undefined) return 'no stale review to approve';
       const outcome = await act(db, byName, old.task_id, { id: randomUUID(), person, at: now }, { kind: 'approve', review: old.id });
@@ -842,11 +866,13 @@ const rules: Readonly<Record<Move, Rule>> = {
   outside: {
     allowed: (_world, quiet) => !quiet,
     perform: async ({ db, world, random }) => {
-      const task = pick(random, await tasksWhere(db, 'outside'));
+      const stray = random() < 0.3;
+      const task = stray ? pick(random, world.tasks) : pick(random, await tasksWhere(db, 'outside'))?.id;
       if (task === undefined) return 'no task awaits an outside approval';
-      const moved = await approveFromOutside(db, task.id);
-      count(world, `outside approval ${moved ? 'moved' : 'found nothing'}`);
-      return `task ${task.id}: outside approval ${moved ? 'moved it' : 'found nothing'}`;
+      const outcome = await outsideApproves(db, task);
+      const aimed = stray ? 'outside approval at any task' : 'outside approval';
+      count(world, `${aimed} ${outcome}`);
+      return `task ${task}: ${aimed} ${outcome}`;
     },
   },
   doubleDecision: {
@@ -1032,8 +1058,8 @@ const rules: Readonly<Record<Move, Rule>> = {
     allowed: (_world, quiet) => !quiet,
     perform: async ({ db, world, random }) => {
       const task = pick(random, await approvalsToLose(db));
-      if (task === undefined) return 'no ready task at an irreversible step holds an approval that Tasks.tla lets it lose';
-      await db.updateTable('task').set({ approved: [] }).where('id', '=', task).execute();
+      if (task === undefined) return 'no ready task at an irreversible step holds an approval';
+      await loseApprovals(db, task);
       count(world, 'approval lost');
       return `task ${task}: its approvals went missing`;
     },
@@ -1063,24 +1089,19 @@ const rules: Readonly<Record<Move, Rule>> = {
   },
 };
 
-function losesApprovalWithinItsModel(workflow: Workflow | undefined, step: string, approved: readonly string[]): boolean {
-  const kind = workflow?.steps.find(candidate => candidate.name === step);
-  if (workflow === undefined || kind?.owes.some(owed => owed.irreversible) !== true) return false;
-  const at = (name: string): number => workflow.steps.findIndex(candidate => candidate.name === name);
-  const targets = Object.values(kind.failures).flatMap(failure => ('to' in failure ? [failure.to] : []));
-  return approved.every(gate => targets.every(target => at(gate) >= at(target)));
-}
+const owesIrreversible = (workflow: string, step: string): boolean =>
+  byName.get(workflow)?.steps.find(kind => kind.name === step)?.owes.some(owed => owed.irreversible) === true;
 
 async function approvalsToLose(db: Database): Promise<readonly string[]> {
   const ready = await db
     .selectFrom('task')
-    .select(['task.id', 'task.workflow', 'task.step', sql<string[]>`task.approved::text[]`.as('approved')])
+    .select(['task.id', 'task.workflow', 'task.step'])
     .where('task.state', '=', 'ready')
     .where(sql<boolean>`cardinality(task.approved) > 0`)
     .where(eb => eb.not(eb.exists(eb.selectFrom('attempt').select('attempt.id').whereRef('attempt.task_id', '=', 'task.id').where('attempt.finished_at', 'is', null))))
     .orderBy('task.id')
     .execute();
-  return ready.filter(task => losesApprovalWithinItsModel(byName.get(task.workflow), task.step, task.approved)).map(task => task.id);
+  return ready.filter(task => owesIrreversible(task.workflow, task.step)).map(task => task.id);
 }
 
 async function noteReleases(db: Database, world: World, from: number): Promise<string> {
@@ -1112,8 +1133,17 @@ async function perform(turn: Turn): Promise<{ readonly move: string; readonly de
     moves.map(candidate => [candidate, quietly(candidate) && rules[candidate].allowed(turn.world, turn.quiet) ? turn.profile.odds[candidate] : 0] as const),
   );
   if (move === undefined) return { move: 'idle', detail: 'no move is allowed' };
-  return { move, detail: await rules[move].perform(turn) };
+  const tallied = (): number => [...turn.world.tally.values()].reduce((sum, times) => sum + times, 0);
+  const before = tallied();
+  const detail = await rules[move].perform(turn);
+  if (tallied() > before) turn.world.fired.set(move, (turn.world.fired.get(move) ?? 0) + 1);
+  return { move, detail };
 }
+
+export const laterReviews = (runs: readonly Run[]): number => runs.reduce((sum, run) => sum + (run.tally['finish changes_requested observed waiting'] ?? 0), 0);
+
+export const unfiredFaults =(profile: ProfileName, runs: readonly Run[]): readonly string[] =>
+  [...faults].filter(fault => profiles[profile].odds[fault] > 0 && runs.every(run => (run.fired[fault] ?? 0) === 0));
 
 async function dropGuard(db: Database, name: MutantName): Promise<void> {
   const { rows } = await sql<{ ddl: string }>`
@@ -1220,6 +1250,7 @@ async function setUp(db: Database, profile: Profile, steps: number, engines: Eng
     hung: new Set(),
     bursts: [],
     tally: new Map(),
+    fired: new Map(),
     people: [ada.id, bo.id],
     routines,
     clock: epoch,
@@ -1289,6 +1320,7 @@ async function runSeed(postgres: TestPostgres, plan: Plan, seed: number): Promis
       startEngine(engines, index);
     });
     await engines.virtual.idle();
+    await logLostApprovals(db);
     const watched = await watch(db, workflows, profile.reapEveryMs, new Date(epoch));
     const ended = async (steps: number, failure: Failure | undefined): Promise<Run> => ({
       plan,
@@ -1299,6 +1331,7 @@ async function runSeed(postgres: TestPostgres, plan: Plan, seed: number): Promis
       hung: world.hung.size,
       hungNotLost: failure === undefined ? await hungNotLost(db, world.hung) : [],
       tally: Object.fromEntries(world.tally),
+      fired: Object.fromEntries(world.fired),
       done: await tasksIn(db, 'done'),
       tasks: await settledTasks(db),
       releases: await releases(db),
@@ -1317,10 +1350,11 @@ async function runSeed(postgres: TestPostgres, plan: Plan, seed: number): Promis
       const engineDue = due !== undefined && due <= world.clock;
       if (!engineDue) engines.virtual.advance(world.clock);
       const turn: Turn = { db, postgres, world, profile, plan, random, quiet, now: new Date(world.clock) };
+      const said = engines.log.length;
       const made = engineDue ? { move: 'engine', detail: await engineStep(turn) } : await perform(turn);
       const at = engines.virtual.clock.now().getTime();
       trace.push({ step, at: at - epoch, ...made });
-      const broken = await watched.step(new Date(at));
+      const broken = await watched.step(new Date(at), engines.log.slice(said).some(line => line.includes(': gave ')));
       if (broken.length > 0) return await ended(step, { step, move: made.move, broken });
       world.clock = Math.max(world.clock, at) + (engineDue ? 0 : 1 + Math.floor(random() * profile.stepMs));
     }
