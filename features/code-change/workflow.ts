@@ -1,12 +1,14 @@
 import { readFileSync } from 'node:fs';
 import { z } from 'zod';
 import { actionKinds } from '../../shared/actions.ts';
-import { review } from '../../shared/review.ts';
+import { review, reviewWith } from '../../shared/review.ts';
 import { step, type Workflow } from '../../shared/workflow.ts';
 
 const corePrompt = (name: string): string => readFileSync(new URL(`prompts/${name}.md`, import.meta.url), 'utf8');
 
 const may = <K extends string>({ kind }: { readonly kind: K }): { readonly kind: K; readonly irreversible: false } => ({ kind, irreversible: false });
+
+const planned = reviewWith('text', 'choice');
 
 const verified = review.extend({ behavior: z.enum(['fixed', 'still_wrong']).nullable() });
 
@@ -22,7 +24,7 @@ export const workflow = {
       needsRepository: true,
       canEnd: false,
       owes: [may(actionKinds.ticketComment), may(actionKinds.ticketTransition), may(actionKinds.branchDelete)],
-      output: review,
+      output: planned,
       requires: ['text'],
       failures: { fail: { kind: 'fail' }, needs_input: { kind: 'ask' } },
       blocked: 'fail',
