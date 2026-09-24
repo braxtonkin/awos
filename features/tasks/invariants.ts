@@ -219,9 +219,15 @@ export const properties = {
       from task t
       join versions v on v.id = t.id
       join facts fh on fh.workflow = t.workflow and fh.step = t.step
-      where array(select a::text from unnest(t.approved) a order by 1) is distinct from
-            array(select g from unnest(v.gates) g join facts f on f.workflow = t.workflow and f.step = g where f.position < fh.position order by g)`,
-    plants: [{ setup: [], violation: sql`update task set approved = '{specify}' where id = 1` }],
+      cross join lateral (
+        select array(select a::text from unnest(t.approved) a order by 1) as approved,
+               array(select g from unnest(v.gates) g join facts f on f.workflow = t.workflow and f.step = g where f.position < fh.position order by g) as passed
+      ) held
+      where case when fh.irreversible then not (held.approved <@ held.passed) else held.approved is distinct from held.passed end`,
+    plants: [
+      { setup: [], violation: sql`update task set approved = '{specify}' where id = 1` },
+      { setup: atLand, violation: sql`update task set approved = '{implement,specify}' where id = 1` },
+    ],
   },
   StoppedTaskCanResume: {
     moment: 'each-step',
@@ -339,7 +345,10 @@ export const properties = {
                      = (s.was_step, s.was_retries, s.was_lost, s.was_input_waits, s.was_counts, s.was_approved, s.was_outputs))
         and not (s.was_state = 'waiting' and s.was_waiting_on = 'outside_approval' and s.state = 'ready'
                  and (s.step, s.retries, s.lost, s.input_waits, s.counts, s.approved, s.outputs)
-                     = (s.was_step, s.was_retries, s.was_lost, s.was_input_waits, s.was_counts, s.was_approved, s.was_outputs))`,
+                     = (s.was_step, s.was_retries, s.was_lost, s.was_input_waits, s.was_counts, s.was_approved, s.was_outputs))
+        and not (exists (select 1 from facts f where f.workflow = s.workflow and f.step = s.was_step and f.irreversible) and s.approved = '{}'
+                 and (s.step, s.state, s.waiting_on, s.retries, s.lost, s.input_waits, s.counts, s.outputs)
+                     is not distinct from (s.was_step, s.was_state, s.was_waiting_on, s.was_retries, s.was_lost, s.was_input_waits, s.was_counts, s.was_outputs))`,
     plants: [
       { setup: [], violation: sql`update task set state = 'waiting', waiting_on = 'retry', waiting_reason = ${waitingForAPerson} where id = 1` },
       {
@@ -360,6 +369,11 @@ export const properties = {
         setup: [sql`update task set state = 'waiting', waiting_on = 'outside_approval', waiting_reason = 'Planted.' where id = 1`],
         violation: sql`update task set state = 'ready', waiting_on = null, waiting_reason = null, retries = 1 where id = 1`,
       },
+      {
+        setup: [finishedAttempt('specify', 'pass'), sql`update task set step = 'implement', approved = '{specify}' where id = 1`],
+        violation: sql`update task set approved = '{}' where id = 1`,
+      },
+      { setup: atLand, violation: sql`update task set approved = '{}', retries = 1 where id = 1` },
     ],
   },
   AttemptEndsOnlyWithItsTask: {
