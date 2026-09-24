@@ -10,7 +10,7 @@ import { sealingKey, type SealingKey } from '../../features/credentials/seal.ts'
 import { writeBack } from '../../features/credentials/store.ts';
 import { providerProblems, reconcile } from '../../features/environments/lifecycle.ts';
 import { providersByName } from '../../features/environments/provider.ts';
-import { connectCluster } from '../../features/jobs/launch.ts';
+import { connectCluster } from '../../shared/cluster.ts';
 import { jobSettings } from '../../features/jobs/settings.ts';
 import { sweep } from '../../features/jobs/sweep.ts';
 import { outboxLoops, registryOf } from '../../features/outbox/perform.ts';
