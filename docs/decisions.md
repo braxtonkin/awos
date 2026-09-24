@@ -150,7 +150,7 @@ Rejected options:
 
 ### Agents reach the engine through a bridge in the Job
 
-Decided 23 Sep 2026. A small bridge inside each Job runs the app server over its standard input and output and connects out to the engine. The bridge is the Job's main process in the attempt's own pod, so the bridge and the agent share one lifecycle. It numbers every event and resends any the engine has not stored, so an engine restart loses nothing, and steering messages come back over the same connection. The Job listens on no port. With the engine stopped for 8 seconds mid-task, the prototype bridge lost none of the run's 275 events.
+Decided 23 Sep 2026. A small bridge inside each Job runs the app server over its standard input and output and connects out to the engine. The bridge is the Job's main process in the attempt's own pod, so the bridge and the agent share one lifecycle. It numbers every event and resends any the engine has not stored, so an engine restart loses nothing. Steering messages and stops come back on a second stream that the bridge opens to the engine. The Job listens on no port. With the engine stopped for 8 seconds mid-task, the prototype bridge lost none of the run's 275 events.
 
 Rejected option:
 
