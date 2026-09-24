@@ -136,9 +136,11 @@ export interface Person {
 
 export interface Repository {
   branch: string;
+  fast_test_command: string | null;
   github: string;
   id: Generated<Int8>;
   saved_by: string;
+  verify_provider: Generated<string>;
 }
 
 export interface Routine {
@@ -224,6 +226,18 @@ export interface Task {
   workflow: string;
 }
 
+export interface VerifyEnvironment {
+  attempt_id: Int8;
+  called_at: Timestamp;
+  id: Generated<Int8>;
+  provider: string;
+  recorded_at: Timestamp;
+  result: Json | null;
+  returned_at: Timestamp | null;
+  starting: Generated<number>;
+  stopped_at: Timestamp | null;
+}
+
 export interface DB {
   attempt: Attempt;
   connector: Connector;
@@ -239,4 +253,5 @@ export interface DB {
   routine_step: RoutineStep;
   routine_version: RoutineVersion;
   task: Task;
+  verify_environment: VerifyEnvironment;
 }

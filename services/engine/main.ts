@@ -5,6 +5,8 @@ import { checksFor } from '../../features/credentials/checks.ts';
 import { githubApi } from '../../features/credentials/github-check.ts';
 import { sealingKey, type SealingKey } from '../../features/credentials/seal.ts';
 import { writeBack } from '../../features/credentials/store.ts';
+import { providerProblems, reconcile } from '../../features/environments/lifecycle.ts';
+import { providersByName } from '../../features/environments/provider.ts';
 import { outboxLoops, registryOf } from '../../features/outbox/perform.ts';
 import { scheduleSource } from '../../features/routines/schedule-source.ts';
 import { postgresNow, scheduler } from '../../features/routines/scheduler.ts';
@@ -35,11 +37,15 @@ const settings = z.object({
   OUTBOX_LEASE_MS: milliseconds.default(60_000),
   OUTBOX_MARGIN_MS: milliseconds.default(5_000),
   OUTBOX_MAX_TRIES: z.coerce.number().int().positive().default(3),
+  ENVIRONMENTS_EVERY_MS: milliseconds.default(30_000),
+  ENVIRONMENT_START_DEADLINE_MS: milliseconds.default(600_000),
 });
 
 type Settings = z.infer<typeof settings>;
 
 const sources = sourcesByKind([scheduleSource]);
+
+const providers = providersByName([]);
 
 type ActionKind = OwedKinds<Workflow>;
 
@@ -50,6 +56,7 @@ const actions = registryOf(performers);
 const loopsFor = (given: Settings, key: SealingKey | undefined): readonly Loop[] => [
   reaper({ everyMs: given.REAPER_EVERY_MS, leaseMs: given.LEASE_MS }),
   scheduler({ everyMs: given.SCHEDULER_EVERY_MS, leaseMs: given.ROUTINE_LEASE_MS, sources, workflows, now: postgresNow }),
+  reconcile({ providers, everyMs: given.ENVIRONMENTS_EVERY_MS, startDeadlineMs: given.ENVIRONMENT_START_DEADLINE_MS }),
   ...outboxLoops({ everyMs: given.OUTBOX_EVERY_MS, leaseMs: given.OUTBOX_LEASE_MS, marginMs: given.OUTBOX_MARGIN_MS, maxTries: given.OUTBOX_MAX_TRIES, clock: realClock, registry: actions }),
   ...(key === undefined
     ? []
@@ -85,9 +92,15 @@ async function run(given: Settings, key: SealingKey | undefined): Promise<void> 
       process.exitCode = 1;
       return;
     }
+    const unknownProviders = await providerProblems(db, providers);
+    if (unknownProviders.length > 0) {
+      process.stderr.write(`The engine did not start, because a repository or an environment names a Verify provider it was not given.\n${unknownProviders.join('\n')}\n`);
+      process.exitCode = 1;
+      return;
+    }
     const loops = loopsFor(given, key);
     if (key === undefined) say('The engine has no CREDENTIAL_KEY, so it opens and checks no credentials.');
-    say(`The engine runs the workflows ${[...workflows.keys()].join(', ')}, and the loops ${loops.map(loop => `${loop.name} every ${String(loop.everyMs)} ms`).join(', ')}.`);
+    say(`The engine runs the workflows ${[...workflows.keys()].join(', ')}, the Verify providers ${[...providers.keys()].join(', ')}, and the loops ${loops.map(loop => `${loop.name} every ${String(loop.everyMs)} ms`).join(', ')}.`);
     await Promise.all(loops.map(loop => runLoop(loop, db, realClock, stop.signal, say)));
     say('The engine stopped.');
   } finally {

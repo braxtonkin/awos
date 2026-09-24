@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -663,6 +663,10 @@ async function saveRoutine(db: Database, person: string, repository: string, wor
 
 const quickEngine = { REAPER_EVERY_MS: '200', LEASE_MS: '1000' } as const;
 
+const startLine = 'The engine runs';
+
+const everyLoop = ['the workflows code-change', 'the Verify providers tests-only', 'reaper every 200 ms', 'scheduler every 10000 ms', 'environments every 30000 ms', 'checks every 60000 ms'] as const;
+
 function startEngine(env: NodeJS.ProcessEnv): { readonly status: number | null; readonly said: string } {
   const started = spawnSync(process.execPath, [engineMain], { env, encoding: 'utf8', timeout: 30_000 });
   return { status: started.status, said: `${started.stdout}${started.stderr}`.trim() };
@@ -741,15 +745,19 @@ async function engineStartChecks(postgres: TestPostgres): Promise<readonly Check
       .returning('id')
       .executeTakeFirstOrThrow();
     await saveRoutine(db, person.id, repository.id, 'code-change');
-    const known = runEngine(scratch.stableUrl, quickEngine);
-    const started = await known.waitFor('The engine runs the workflows code-change, and the loops reaper every 200 ms, scheduler every 10000 ms.');
-    const knownStatus = started ? await known.terminate() : null;
+    const known = runEngine(scratch.stableUrl, { ...quickEngine, CREDENTIAL_KEY: randomBytes(32).toString('base64'), CREDENTIAL_KEY_VERSION: '1' });
+    const started = await known.waitFor(startLine);
+    const knownStatus = await known.terminate();
+    const line = known.said().split('\n').find(said => said.startsWith(startLine)) ?? '';
+    const unnamed = everyLoop.filter(part => !line.includes(part));
     const stranger = await saveRoutine(db, person.id, repository.id, 'no-such-flow');
     const unknown = startEngine({ ...process.env, DATABASE_URL: scratch.stableUrl });
     const knownName = 'the engine starts when every routine uses a workflow it was given, and exits 0 on SIGTERM';
     const unknownName = 'the engine refuses to start and names the routine whose workflow it was not given';
     return [
-      started && knownStatus === 0 ? pass(knownName, known.said().replaceAll('\n', ' ')) : fail(knownName, `exit ${String(knownStatus)}: ${known.said()} ${known.errors()}`),
+      started && unnamed.length === 0 && knownStatus === 0
+        ? pass(knownName, known.said().replaceAll('\n', ' '))
+        : fail(knownName, `started ${String(started)}, the startup line misses [${unnamed.join(', ')}], exit ${String(knownStatus)}: ${known.said()} ${known.errors()}`),
       unknown.status === 1 && unknown.said.includes(`Routine ${stranger} version 1 uses the workflow no-such-flow, which this engine was not given.`)
         ? pass(unknownName, unknown.said.replaceAll('\n', ' '))
         : fail(unknownName, `exit ${String(unknown.status)}: ${unknown.said}`),
@@ -772,13 +780,13 @@ async function idleCheck(postgres: TestPostgres): Promise<Check> {
   const scratch = await postgres.scratch();
   try {
     const engine = runEngine(scratch.stableUrl, quickEngine);
-    const started = await engine.waitFor('The engine runs');
-    await wait(900);
-    const status = started ? await engine.terminate() : null;
+    const started = await engine.waitFor(startLine);
+    if (started) await wait(900);
+    const status = await engine.terminate();
     const passes = passesIn(engine.said());
-    return status === 0 && passes >= 3 && engine.errors() === ''
+    return started && status === 0 && passes >= 3 && engine.errors() === ''
       ? pass(name, engine.said().replaceAll('\n', ' '))
-      : fail(name, `exit ${String(status)} after ${String(passes)} clean passes: ${engine.said()} ${engine.errors()}`);
+      : fail(name, `started ${String(started)}, exit ${String(status)} after ${String(passes)} clean passes: ${engine.said()} ${engine.errors()}`);
   } finally {
     await scratch.drop();
   }
