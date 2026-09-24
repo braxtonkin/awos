@@ -166,12 +166,19 @@ const shapeOf = (value: unknown): string => {
   return `object with ${Object.keys(value).join(', ') || 'no keys'}`;
 };
 
+const reviewKeys: ReadonlySet<string> = new Set(Object.keys(review.shape));
+
+export function describeReply(output: unknown): string {
+  const parsed = review.loose().safeParse(output);
+  if (!parsed.success) return `reply did not parse as a review, its shape is ${shapeOf(output)}`;
+  const extra = Object.entries(parsed.data).filter(([key]) => !reviewKeys.has(key)).map(([key, value]) => `, ${key} ${JSON.stringify(value)}`).join('');
+  return `review ${parsed.data.outcome}${extra}: ${parsed.data.summary.slice(0, 160)}`;
+}
+
 async function reviewLines(database: Database, ticket: string): Promise<readonly string[]> {
   const rows = await database.selectFrom('attempt').innerJoin('task', 'task.id', 'attempt.task_id').select(['attempt.id', 'attempt.step', 'attempt.verdict', 'attempt.output']).where('task.key', '=', ticket).orderBy('attempt.id').execute();
   return rows.map(row => {
-    const parsed = review.safeParse(row.output);
-    const said = parsed.success ? `review ${parsed.data.outcome}: ${parsed.data.summary.slice(0, 160)}` : `reply did not parse as a review, its shape is ${shapeOf(row.output)}`;
-    return `attempt ${row.id} ${row.step} ${row.verdict ?? 'live'}, ${said}`;
+    return `attempt ${row.id} ${row.step} ${row.verdict ?? 'live'}, ${describeReply(row.output)}`;
   });
 }
 

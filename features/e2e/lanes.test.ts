@@ -1,5 +1,6 @@
 import { expect, test } from 'vitest';
 import { fail, info, pass, render } from '../../tools/verify/check.ts';
+import { describeReply } from './harness.ts';
 import { laneLines, lanes } from './lanes.ts';
 
 const noAssignee = lanes.find(lane => lane.slug === 'no-assignee');
@@ -34,4 +35,11 @@ test('a time limit whose step never happened fails a lane that expects the step'
     ].join('\n'),
   );
   expect(exitCode).toBe(1);
+});
+
+test("the run prints Verify's reply with its behavior, and names the shape of a reply that is not a review", () => {
+  const verified = { outcome: 'done', summary: 'Reproduced and fixed.', blocks: [{ kind: 'text', title: null, body: 'Ran both.' }], behavior: 'fixed' };
+  expect(describeReply(verified)).toBe('review done, behavior "fixed": Reproduced and fixed.');
+  expect(describeReply({ outcome: 'done', summary: 'Planned.', blocks: [] })).toBe('review done: Planned.');
+  expect(describeReply({ note: 'no review' })).toBe('reply did not parse as a review, its shape is object with note');
 });
