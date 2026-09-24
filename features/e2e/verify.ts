@@ -11,6 +11,7 @@ import { jiraPayloads } from './jira.ts';
 import { parsePayload, PayloadRejected } from './payload.ts';
 import { parkedScenario } from './parked.ts';
 import { roundTripScenario } from './round-trip.ts';
+import { standInSolutionsScenario } from './stand-in-check.ts';
 
 const defaultRepository = 'braxtonkdev/autoworker-oss';
 const defaultProject = 'SBX';
@@ -142,4 +143,4 @@ const e2ePayload: Scenario = {
   },
 };
 
-export const scenarios: readonly Scenario[] = [e2e, e2eBranch, e2ePayload, ...cleanScenarios, roundTripScenario, parkedScenario];
+export const scenarios: readonly Scenario[] = [e2e, e2eBranch, e2ePayload, ...cleanScenarios, roundTripScenario, parkedScenario, standInSolutionsScenario];
