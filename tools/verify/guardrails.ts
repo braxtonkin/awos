@@ -79,7 +79,7 @@ const staleTypes = `${generatedTypes} differs from a fresh generation`;
 
 const codeChange = 'code-change';
 
-const plantedStep = "name: 'planted', reads: [], prompt: 'Planted.', needsRepository: true, canEnd: true, owes: [], output: review, requires: ['text'], failures: { fail: { kind: 'fail' } }";
+const plantedStep = "name: 'planted', reads: [], runBy: 'agent', prompt: 'Planted.', startsEnvironment: false, needsRepository: true, canEnd: true, owes: [], output: review, requires: ['text'], failures: { fail: { kind: 'fail' } }";
 
 const violations: readonly Violation[] = [
   {

@@ -15,6 +15,7 @@ import { modelShape, shapeDrift } from '../../tools/verify/model-shape.ts';
 import { checkModel, type TlcRun, type TraceState } from '../../tools/verify/tlc.ts';
 import { checkCatalog, type Catalog } from './catalog.ts';
 import { claim, lostTooOften } from './claim.ts';
+import { coreRunAs } from './run-as.ts';
 import { provePlants, type PlantProof } from './invariants.ts';
 import {
   badEnd,
@@ -852,7 +853,7 @@ async function sigtermChecks(postgres: TestPostgres): Promise<readonly Check[]> 
     const claimedAt = new Date();
     const attempts: string[] = [];
     for (const [index, task] of tasks.entries()) {
-      const claimed = await claim(db, task.id, claimedAt, index < 8 ? 1_000 : 6_000);
+      const claimed = await claim(db, task.id, claimedAt, index < 8 ? 1_000 : 6_000, await coreRunAs(null)(db, task.id), null);
       if (!('attempt' in claimed)) throw new Error(`the lane could not claim task ${task.id}: ${claimed.refused}`);
       attempts.push(claimed.attempt);
     }

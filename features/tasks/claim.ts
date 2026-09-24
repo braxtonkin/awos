@@ -1,8 +1,9 @@
-import type { ExpressionBuilder } from 'kysely';
+import { sql, type ExpressionBuilder } from 'kysely';
+import { owesAction } from '../../shared/actions.ts';
 import { refusal, type Database, type Refusal } from '../../shared/db/client.ts';
 import type { DB, TaskState } from '../../shared/db/types.ts';
-import type { Instruction } from '../../shared/workflow.ts';
-import { nobodyToRunAs, runAs } from './run-as.ts';
+import type { Instruction, StepKind } from '../../shared/workflow.ts';
+import { nobodyToRunAs } from './run-as.ts';
 import type { Workflows } from './start.ts';
 
 export const caps = { lost: 3, stageRetries: 2, inputWaits: 3 } as const;
@@ -29,11 +30,13 @@ const later = (now: Date, ms: number): Date => new Date(now.getTime() + ms);
 const hasLiveAttempt = (eb: ExpressionBuilder<DB, 'task'>) =>
   eb.exists(eb.selectFrom('attempt').select('attempt.id').whereRef('attempt.task_id', '=', 'task.id').where('attempt.finished_at', 'is', null));
 
-export async function claim(db: Database, task: string, now: Date, leaseMs: number): Promise<Claim> {
+export type Start = { readonly commit: string };
+
+export async function claim(db: Database, task: string, now: Date, leaseMs: number, runAs: string | null, start: Start | null): Promise<Claim> {
   try {
     const inserted = await db
       .insertInto('attempt')
-      .columns(['task_id', 'routine_id', 'routine_version', 'step', 'epoch', 'run_as_id', 'started_at', 'lease_until'])
+      .columns(['task_id', 'routine_id', 'routine_version', 'step', 'epoch', 'run_as_id', 'started_at', 'lease_until', 'branch', 'start_commit'])
       .expression(
         db
           .selectFrom('task')
@@ -48,9 +51,14 @@ export async function claim(db: Database, task: string, now: Date, leaseMs: numb
               .as('routine_version'),
             'task.step',
             'task.epoch',
-            runAs(eb).as('run_as_id'),
+            eb.cast<string | null>(eb.val(runAs), 'bigint').as('run_as_id'),
             eb.cast<Date>(eb.val(now), 'timestamptz').as('started_at'),
             eb.cast<Date>(eb.val(later(now, leaseMs)), 'timestamptz').as('lease_until'),
+            (start === null
+              ? sql<string | null>`null::text`
+              : sql<string>`'autoworker/' || task.key || '-attempt-' || (select count(*) + 1 from attempt where attempt.task_id = task.id)`
+            ).as('branch'),
+            eb.cast<string | null>(eb.val(start?.commit ?? null), 'text').as('start_commit'),
           ])
           .where('task.id', '=', task),
       )
@@ -73,7 +81,6 @@ async function parkForPerson(db: Database, task: string): Promise<boolean> {
       .set({ state: 'waiting', waiting_on: 'retry', waiting_reason: nobodyToRunAs })
       .where('task.id', '=', task)
       .where('task.state', '=', 'ready')
-      .where(eb => eb(runAs(eb), 'is', null))
       .where(eb => eb.not(hasLiveAttempt(eb)))
       .executeTakeFirst();
     return numUpdatedRows === 1n;
@@ -128,14 +135,17 @@ export async function reap(db: Database, now: Date): Promise<readonly Reaped[]> 
   return rows.map(row => ({ attempt: row.id, task: row.task, key: row.key, expiredForMs: now.getTime() - row.lease_until.getTime(), parked: row.state === 'waiting' }));
 }
 
-export async function claimable(db: Database, workflows: Workflows): Promise<readonly string[]> {
-  const known = [...workflows.keys()];
-  if (known.length === 0) return [];
+export type RunBy = StepKind['runBy'];
+
+export async function claimable(db: Database, workflows: Workflows, runBy: readonly RunBy[] = ['agent', 'engine']): Promise<readonly string[]> {
+  const pairs = [...workflows.values()].flatMap(workflow => workflow.steps.filter(kind => runBy.includes(kind.runBy)).map(kind => [workflow.name, kind.name] as const));
+  if (pairs.length === 0) return [];
   const rows = await db
     .selectFrom('task')
     .select('task.id')
     .where('task.state', '=', 'ready')
-    .where('task.workflow', 'in', known)
+    .where(eb => eb.or(pairs.map(([workflow, step]) => eb.and([eb('task.workflow', '=', workflow), eb('task.step', '=', step)]))))
+    .where(eb => eb.not(owesAction(eb)))
     .where(eb => eb.not(hasLiveAttempt(eb)))
     .orderBy('task.id')
     .execute();

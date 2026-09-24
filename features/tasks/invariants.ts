@@ -1,11 +1,10 @@
-import { expressionBuilder, sql, type RawBuilder } from 'kysely';
+import { sql, type RawBuilder } from 'kysely';
 import { z } from 'zod';
 import { connect, type Database } from '../../shared/db/client.ts';
-import type { DB } from '../../shared/db/types.ts';
 import type { Workflow } from '../../shared/workflow.ts';
 import type { TestPostgres } from '../../tools/verify/postgres.ts';
 import { caps } from './claim.ts';
-import { nobodyToRunAs, runAs } from './run-as.ts';
+import { nobodyToRunAs } from './run-as.ts';
 
 type Moment = 'each-step' | 'after-quiet-phase';
 
@@ -628,7 +627,7 @@ const helpers = (workflows: readonly Workflow[], everyMs: number) => sql`
            array(select distinct a.step::text from attempt a where a.task_id = task.id and a.verdict = 'pass' order by 1) as outputs,
            latest.id as latest, latest.verdict as latest_verdict,
            task.waiting_reason,
-           ${runAs(expressionBuilder<DB, 'task'>())} as runs_as
+           coalesce((select r.run_as_id from routine r where r.id = task.routine_id), (select p.id from person p where p.jira_account_id = task.assignee_account_id)) as runs_as
     from task
     left join lateral (
       select a.id, a.verdict from attempt a where a.task_id = task.id and a.finished_at is not null order by a.id desc limit 1

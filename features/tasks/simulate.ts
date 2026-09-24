@@ -11,6 +11,7 @@ import { step, type Failure as StepFailure, type StepKind, type StepVerdict, typ
 import type { TestPostgres } from '../../tools/verify/postgres.ts';
 import { act, advance, approveFromOutside, note, type PersonAction, type Report } from './advance.ts';
 import { claim, claimable, renew } from './claim.ts';
+import { coreRunAs } from './run-as.ts';
 import { watch, type PropertyName, type Violation } from './invariants.ts';
 import { reaper } from './reaper.ts';
 import { workflowsByName } from './start.ts';
@@ -70,7 +71,9 @@ const agentStep = (name: string, reads: readonly string[], canEnd: boolean, need
   step({
     name,
     reads,
+    runBy: 'agent',
     prompt: `Simulated ${name}.`,
+    startsEnvironment: false,
     needsRepository,
     canEnd,
     owes: [],
@@ -90,7 +93,9 @@ export const workflows: readonly [Workflow, ...Workflow[]] = [
       step({
         name: 'verify',
         reads: ['specify', 'implement'],
+        runBy: 'agent',
         prompt: 'Simulated verify.',
+        startsEnvironment: true,
         needsRepository: true,
         canEnd: false,
         owes: [],
@@ -107,10 +112,12 @@ export const workflows: readonly [Workflow, ...Workflow[]] = [
       step({
         name: 'land',
         reads: ['implement', 'verify'],
+        runBy: 'engine',
         prompt: 'Simulated land.',
+        startsEnvironment: false,
         needsRepository: true,
         canEnd: true,
-        owes: [{ kind: 'merge', irreversible: true }],
+        owes: [{ kind: 'pr.merge', irreversible: true }],
         output: reviewSchema,
         requires: ['text'],
         failures: {
@@ -138,6 +145,7 @@ export const workflows: readonly [Workflow, ...Workflow[]] = [
 export const parks = { rounds: failedToVerify, reruns: environmentDown } as const;
 
 const byName = workflowsByName(workflows);
+const runsAs = coreRunAs(null);
 
 type Effect = 'pass' | StepFailure['kind'];
 
@@ -660,7 +668,7 @@ const rules: Readonly<Record<Move, Rule>> = {
       const worker = pick(random, idleWorkers(world));
       const task = pick(random, quiet ? await claimable(db, byName) : world.tasks);
       if (worker === undefined || task === undefined) return 'nothing to claim';
-      const outcome = await claim(db, task, now, profile.leaseMs);
+      const outcome = await claim(db, task, now, profile.leaseMs, await runsAs(db, task), null);
       if ('refused' in outcome) {
         const refusedWith = 'parked' in outcome ? `${outcome.refused}, ${outcome.parked ? 'parked' : 'not parked'}` : outcome.refused;
         count(world, `claim refused ${refusedWith}`);
@@ -743,8 +751,9 @@ const rules: Readonly<Record<Move, Rule>> = {
     perform: async ({ db, world, profile, random, now }) => {
       const task = pick(random, await claimable(db, byName));
       if (task === undefined) return 'nothing claimable';
+      const runAs = await runsAs(db, task);
       const started = performance.now();
-      const outcomes = await Promise.all(Array.from({ length: profile.burst }, () => claim(db, task, now, profile.leaseMs)));
+      const outcomes = await Promise.all(Array.from({ length: profile.burst }, () => claim(db, task, now, profile.leaseMs, runAs, null)));
       const won = outcomes.flatMap(outcome => ('attempt' in outcome ? [outcome.attempt] : []));
       world.bursts.push({ winners: won.length, ms: performance.now() - started });
       count(world, 'burst');
@@ -954,8 +963,8 @@ const rules: Readonly<Record<Move, Rule>> = {
       const [finished, acted, ...claims] = await Promise.all([
         settle(advance(db, byName, worker.attempt, report, now)),
         settle(act(db, byName, live.task_id, { id: randomUUID(), person, at: now }, action)),
-        settle(claim(db, live.task_id, now, profile.leaseMs)),
-        settle(claim(db, live.task_id, now, profile.leaseMs)),
+        settle(claim(db, live.task_id, now, profile.leaseMs, await runsAs(db, live.task_id), null)),
+        settle(claim(db, live.task_id, now, profile.leaseMs, await runsAs(db, live.task_id), null)),
       ]);
       const won = claims.flatMap(outcome => ('attempt' in outcome ? [outcome.attempt] : []));
       const taker = pick(random, idleWorkers(world));
@@ -1349,7 +1358,7 @@ export async function probeReaper(postgres: TestPostgres, expiring: number): Pro
   try {
     const world = await setUp(db, profile, expiring * profile.stepsPerTask, engines);
     for (const task of world.tasks.slice(0, expiring)) {
-      const outcome = await claim(db, task, new Date(epoch), profile.leaseMs);
+      const outcome = await claim(db, task, new Date(epoch), profile.leaseMs, await runsAs(db, task), null);
       if ('refused' in outcome) throw new Error(`the probe could not claim task ${task}: ${outcome.refused}`);
     }
     startEngine(engines, 0);
