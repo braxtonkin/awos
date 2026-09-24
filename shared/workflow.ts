@@ -72,10 +72,8 @@ export function step<O extends Review, F extends Failures, K extends string = ne
 
 export const builtByStep = (kind: StepKind): boolean => builtBySteps.has(kind);
 
-export const outputSchema = (kind: StepKind): Readonly<Record<string, unknown>> => {
-  const { $schema: _dialect, ...schema } = z.toJSONSchema(kind.output, { target: 'draft-7', io: 'output' });
-  return schema;
-};
+export const outputSchema = (kind: StepKind): Readonly<Record<string, unknown>> =>
+  Object.fromEntries(Object.entries(z.toJSONSchema(kind.output, { target: 'draft-7', io: 'output' })).filter(([key]) => key !== '$schema'));
 
 export type Workflow<K extends string = string> = { readonly name: string; readonly steps: readonly [StepKind<K>, ...StepKind<K>[]] };
 

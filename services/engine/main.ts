@@ -2,8 +2,10 @@ import { once } from 'node:events';
 import { createServer } from 'node:http';
 import { hostname } from 'node:os';
 import { z } from 'zod';
-import { bridgeListener, noStepRunner, rules } from '../../features/bridge/engine.ts';
-import { checkLoop } from '../../features/credentials/check-loop.ts';
+import { agentSteps } from '../../features/code-change/stage-output.ts';
+import { workflow as codeChange } from '../../features/code-change/workflow.ts';
+import { bridgeListener, rules } from '../../features/bridge/engine.ts';
+import { checkLoop, type CheckLoopSettings } from '../../features/credentials/check-loop.ts';
 import { checksFor } from '../../features/credentials/checks.ts';
 import { githubApi } from '../../features/credentials/github-check.ts';
 import { sealingKey, type SealingKey } from '../../features/credentials/seal.ts';
@@ -13,16 +15,20 @@ import { providersByName } from '../../features/environments/provider.ts';
 import { connectCluster } from '../../features/jobs/launch.ts';
 import { jobSettings } from '../../features/jobs/settings.ts';
 import { sweep } from '../../features/jobs/sweep.ts';
+import { enqueue } from '../../features/outbox/enqueue.ts';
 import { outboxLoops, registryOf } from '../../features/outbox/perform.ts';
 import { scheduleSource } from '../../features/routines/schedule-source.ts';
 import { postgresNow, scheduler } from '../../features/routines/scheduler.ts';
 import { sourcesByKind } from '../../features/routines/source.ts';
 import { reaper } from '../../features/tasks/reaper.ts';
+import { coreRunAs } from '../../features/tasks/run-as.ts';
+import { finishStep, type StepRunner } from '../../features/tasks/step-runner.ts';
 import { startProblems } from '../../features/tasks/start.ts';
 import type { OwedKinds, Performers } from '../../shared/actions.ts';
-import { connect } from '../../shared/db/client.ts';
+import { connect, type Database } from '../../shared/db/client.ts';
 import { realClock, runLoop, type Loop } from '../../shared/loop.ts';
 import type { Workflow } from '../../shared/workflow.ts';
+import { attempts } from './attempts.ts';
 import { workflows } from './workflows.ts';
 
 const milliseconds = z.coerce.number().int().positive();
@@ -46,6 +52,10 @@ const settings = z.object({
   ENVIRONMENTS_EVERY_MS: milliseconds.default(30_000),
   ENVIRONMENT_START_DEADLINE_MS: milliseconds.default(600_000),
   ...jobSettings,
+  JOB_ENGINE_URL: z.url({ protocol: /^https?$/ }).optional(),
+  GIT_BASE_URL: z.url({ protocol: /^(https|git)$/ }).default('https://github.com/'),
+  WORKER_EVERY_MS: milliseconds.default(5_000),
+  ATTEMPT_START_LEASE_MS: milliseconds.default(300_000),
   BRIDGE_PORT: z.coerce.number().int().min(0).max(65_535).default(4520),
   BRIDGE_POLL_MS: milliseconds.default(250),
   BRIDGE_KEEPALIVE_MS: milliseconds.default(5_000),
@@ -64,25 +74,47 @@ const performers = {} satisfies Performers<ActionKind>;
 
 const actions = registryOf(performers);
 
-const loopsFor = (given: Settings, key: SealingKey | undefined): readonly Loop[] => [
+const runner: StepRunner = { workflows, agents: new Map([[codeChange.name, agentSteps]]), enqueue };
+
+const runAs = coreRunAs(null);
+
+const checkSettings = (given: Settings, key: SealingKey): CheckLoopSettings => ({
+  everyMs: given.CHECKS_EVERY_MS,
+  leaseMs: given.CHECK_LEASE_MS,
+  key,
+  checks: checksFor({ codex: { timeoutMs: given.CHECK_TIMEOUT_MS }, github: { baseUrl: given.GITHUB_API_URL, timeoutMs: given.CHECK_TIMEOUT_MS } }),
+  checker: `engine ${hostname()} ${String(process.pid)}`,
+  now: () => new Date(),
+  writeBack,
+});
+
+const workerLoops = (db: Database, given: Settings, key: SealingKey | undefined): readonly Loop[] =>
+  key === undefined || given.JOB_IMAGE === undefined || given.JOB_ENGINE_URL === undefined
+    ? []
+    : [
+        attempts({
+          everyMs: given.WORKER_EVERY_MS,
+          startLeaseMs: given.ATTEMPT_START_LEASE_MS,
+          runner,
+          runAs,
+          db,
+          checks: checkSettings(given, key),
+          jobs: { image: given.JOB_IMAGE, namespace: given.JOB_NAMESPACE, serviceAccount: given.JOB_SERVICE_ACCOUNT, deadlineSeconds: given.JOB_DEADLINE_SECONDS },
+          engineUrl: given.JOB_ENGINE_URL,
+          gitBaseUrl: given.GIT_BASE_URL,
+          providers,
+          startDeadlineMs: given.ENVIRONMENT_START_DEADLINE_MS,
+        }),
+      ];
+
+const loopsFor = (db: Database, given: Settings, key: SealingKey | undefined): readonly Loop[] => [
   reaper({ everyMs: given.REAPER_EVERY_MS, leaseMs: given.LEASE_MS }),
   scheduler({ everyMs: given.SCHEDULER_EVERY_MS, leaseMs: given.ROUTINE_LEASE_MS, sources, workflows, now: postgresNow }),
   reconcile({ providers, everyMs: given.ENVIRONMENTS_EVERY_MS, startDeadlineMs: given.ENVIRONMENT_START_DEADLINE_MS }),
   ...(given.JOB_IMAGE === undefined ? [] : [sweep({ everyMs: given.SWEEP_EVERY_MS, cluster: connectCluster(given.JOB_NAMESPACE) })]),
   ...outboxLoops({ everyMs: given.OUTBOX_EVERY_MS, leaseMs: given.OUTBOX_LEASE_MS, marginMs: given.OUTBOX_MARGIN_MS, maxTries: given.OUTBOX_MAX_TRIES, clock: realClock, registry: actions }),
-  ...(key === undefined
-    ? []
-    : [
-        checkLoop({
-          everyMs: given.CHECKS_EVERY_MS,
-          leaseMs: given.CHECK_LEASE_MS,
-          key,
-          checks: checksFor({ codex: { timeoutMs: given.CHECK_TIMEOUT_MS }, github: { baseUrl: given.GITHUB_API_URL, timeoutMs: given.CHECK_TIMEOUT_MS } }),
-          checker: `engine ${hostname()} ${String(process.pid)}`,
-          now: () => new Date(),
-          writeBack,
-        }),
-      ]),
+  ...(key === undefined ? [] : [checkLoop(checkSettings(given, key))]),
+  ...workerLoops(db, given, key),
 ];
 
 const say = (line: string): void => {
@@ -113,7 +145,7 @@ async function run(given: Settings, key: SealingKey | undefined): Promise<void> 
     const bridge = createServer(
       bridgeListener(
         db,
-        { leaseMs: given.LEASE_MS, finish: noStepRunner, now: () => new Date(), rules },
+        { leaseMs: given.LEASE_MS, finish: (tx, attempt, now) => finishStep(runner, tx, attempt, now), now: () => new Date(), rules },
         { pollMs: given.BRIDGE_POLL_MS, keepAliveMs: given.BRIDGE_KEEPALIVE_MS, bodyLimitBytes: given.BRIDGE_BODY_LIMIT_BYTES, stop: stop.signal },
       ),
     );
@@ -125,9 +157,10 @@ async function run(given: Settings, key: SealingKey | undefined): Promise<void> 
     });
     const address = bridge.address();
     say(`The engine serves the bridge on port ${typeof address === 'object' && address !== null ? String(address.port) : String(given.BRIDGE_PORT)}.`);
-    const loops = loopsFor(given, key);
+    const loops = loopsFor(db, given, key);
     if (key === undefined) say('The engine has no CREDENTIAL_KEY, so it opens and checks no credentials.');
     if (given.JOB_IMAGE === undefined) say('The engine has no JOB_IMAGE, so it launches no Jobs and sweeps none.');
+    else if (given.JOB_ENGINE_URL === undefined) say('The engine has no JOB_ENGINE_URL, so its Jobs could not reach the bridge, and it launches none.');
     say(`The engine runs the workflows ${[...workflows.keys()].join(', ')}, the Verify providers ${[...providers.keys()].join(', ')}, and the loops ${loops.map(loop => `${loop.name} every ${String(loop.everyMs)} ms`).join(', ')}.`);
     await Promise.all(loops.map(loop => runLoop(loop, db, realClock, stop.signal, say)));
     bridge.closeAllConnections();

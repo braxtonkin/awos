@@ -91,6 +91,7 @@ export function manifests(input: LaunchInput, settings: JobSettings): Manifests 
                 image: input.image,
                 imagePullPolicy: 'IfNotPresent',
                 envFrom: [{ secretRef: { name } }],
+                env: [{ name: 'ATTEMPT_IMAGE', value: input.image }],
                 securityContext: { capabilities: { drop: ['ALL'], add: ['SETUID', 'SETGID', 'KILL'] }, seccompProfile: { type: 'RuntimeDefault' } },
               },
             ],

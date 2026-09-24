@@ -4,6 +4,7 @@ import { setTimeout as wait } from 'node:timers/promises';
 import { sql, type Transaction } from 'kysely';
 import { z } from 'zod';
 import type { Database } from '../../shared/db/client.ts';
+import { inTransaction, type Transacting } from '../../shared/transaction.ts';
 import type { AttemptCommandKind, DB } from '../../shared/db/types.ts';
 import { finalMessage, isFragmentMethod, reduce } from '../../shared/items.ts';
 import {
@@ -29,7 +30,7 @@ import {
 
 export type Writer = Transaction<DB>;
 
-export type Finish = (writer: Writer, attempt: AttemptId, now: Date) => Promise<void>;
+export type Finish = (writer: Transacting, attempt: AttemptId, now: Date) => Promise<void>;
 
 export type Decision = 'store' | 'skip' | 'stop';
 
@@ -172,6 +173,9 @@ async function storeLine(writer: Writer, attempt: AttemptId, line: Line, now: Da
       stored_at: now,
     })
     .execute();
+  if (line.kind === 'pushed') {
+    await writer.updateTable('attempt').set({ last_pushed: line.commit }).where('id', '=', attempt).where('branch', '=', line.branch).execute();
+  }
   if (parsed.method === 'item/completed' && parsed.itemId !== null) {
     await writer.deleteFrom('attempt_event').where('attempt_id', '=', attempt).where('item_id', '=', parsed.itemId).where('fragment', '=', true).execute();
   }
@@ -197,10 +201,14 @@ async function storeLine(writer: Writer, attempt: AttemptId, line: Line, now: Da
   }
 }
 
+const alreadyStored = (held: Held | undefined, denied: Refused | undefined, posted: EventsPost): boolean =>
+  held !== undefined && denied?.refused === 'ended' && posted.lines.every(line => line.seq <= Number(held.high_water));
+
 export async function receive(db: Database, engine: BridgeEngine, from: Caller, posted: EventsPost): Promise<EventsAnswer | Refused> {
-  return db.transaction().execute(async writer => {
+  return inTransaction(db, async writer => {
     const held = await hold(writer, from.attempt);
     const denied = gate(engine, held, from);
+    if (alreadyStored(held, denied, posted)) return { stored: Number(held?.high_water ?? 0) };
     if (denied !== undefined || held === undefined) return denied ?? refused('token', `No attempt ${from.attempt}.`);
     const now = engine.now();
     await admit(writer, engine, from, now, posted.received);
