@@ -125,6 +125,7 @@ async function notesFor(db: Database, step: Step): Promise<readonly string[]> {
     .select('attempt.started_at')
     .where('attempt.task_id', '=', step.task)
     .where('attempt.id', '<', step.attempt)
+    .where('attempt.verdict', '<>', 'lost')
     .orderBy('attempt.id', 'desc')
     .limit(1)
     .executeTakeFirst();
@@ -148,7 +149,7 @@ async function answersFor(db: Database, step: Step): Promise<readonly string[]> 
     .where('attempt.task_id', '=', step.task)
     .where('attempt.step', '=', step.kind.name)
     .where('attempt.id', '<', step.attempt)
-    .where('attempt.finished_at', 'is not', null)
+    .where('attempt.verdict', '<>', 'lost')
     .orderBy('attempt.id', 'desc')
     .limit(1)
     .executeTakeFirst();
@@ -261,7 +262,7 @@ async function branchesToDelete(tx: Transacting, step: Step): Promise<readonly s
     .where('attempt.task_id', '=', step.task)
     .where('attempt.step', '=', step.kind.name)
     .where('attempt.branch', 'is not', null)
-    .where(eb => eb.or([eb('attempt.last_pushed', 'is not', null), eb('attempt.verdict', '=', 'lost')]))
+    .where(eb => eb.or([eb('attempt.last_pushed', 'is not', null), eb('attempt.verdict', 'in', ['lost', 'stopped'])]))
     .orderBy('attempt.id')
     .execute();
   return rows.flatMap(row => (row.branch === null ? [] : [row.branch]));

@@ -2,7 +2,7 @@ import type { Database } from '../../shared/db/client.ts';
 import type { Loop } from '../../shared/loop.ts';
 import type { Instruction } from '../../shared/workflow.ts';
 import { abandon, advance } from './advance.ts';
-import { claim, claimable, type Start } from './claim.ts';
+import { claim, claimable, park, renew, type Start } from './claim.ts';
 import { continuation } from './continuation.ts';
 import type { RunAsRule } from './run-as.ts';
 import { promptFor, stepOf, type Prompt, type StepRunner } from './step-runner.ts';
@@ -10,7 +10,7 @@ import { promptFor, stepOf, type Prompt, type StepRunner } from './step-runner.t
 export type JobRequest = {
   readonly attempt: string;
   readonly taskKey: string;
-  readonly number: number;
+  readonly branch: string;
   readonly step: string;
   readonly image: string | null;
   readonly repository: string;
@@ -28,7 +28,7 @@ export type WorkerSettings = {
   readonly startLeaseMs: number;
   readonly runner: StepRunner;
   readonly runAs: RunAsRule;
-  readonly branchHead: (actsAs: string, github: string, branch: string) => Promise<string>;
+  readonly branchHead: (actsAs: string, github: string, branch: string) => Promise<{ readonly head: string } | { readonly refused: Instruction }>;
   readonly startEnvironment: (db: Database, attempt: string) => Promise<Environment>;
   readonly issueToken: (db: Database, attempt: string) => Promise<string | undefined>;
   readonly startTurn: (db: Database, attempt: string, prompt: Prompt, now: Date) => Promise<void>;
@@ -39,14 +39,17 @@ const noRepository: Instruction = 'This task has no repository, and its step run
 
 const reason = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
-async function startOf(db: Database, settings: WorkerSettings, task: string, runAs: string): Promise<Start | null> {
+async function startOf(db: Database, settings: WorkerSettings, task: string, runAs: string): Promise<Start | { readonly refused: Instruction } | null> {
   const found = await continuation(db, task);
   switch (found.from) {
     case 'lost':
+      return { commit: found.commit, inherited: true };
     case 'task':
-      return { commit: found.commit };
-    case 'repository':
-      return { commit: await settings.branchHead(runAs, found.github, found.branch) };
+      return { commit: found.commit, inherited: false };
+    case 'repository': {
+      const read = await settings.branchHead(runAs, found.github, found.branch);
+      return 'refused' in read ? read : { commit: read.head, inherited: false };
+    }
     case 'nowhere':
       return null;
   }
@@ -68,14 +71,15 @@ async function launchAttempt(db: Database, settings: WorkerSettings, attempt: st
     return `attempt ${attempt} of task ${step.key} ended ${step.kind.blocked}, because ${environment.failed}`;
   }
   if (environment !== null && 'ended' in environment) return `attempt ${attempt} of task ${step.key} ended before its environment started`;
+  if (environment !== null && (await renew(db, attempt, new Date(), settings.startLeaseMs)) === 'lost') return `attempt ${attempt} of task ${step.key} ended while its environment started`;
   const prompt = await promptFor(db, step, environment?.started ?? null);
   const token = await settings.issueToken(db, attempt);
-  if (token === undefined) return `attempt ${attempt} of task ${step.key} already has its bridge token, so this pass launched nothing`;
+  if (token === undefined) return `attempt ${attempt} of task ${step.key} ended before its Job launched, so this pass launched nothing`;
   await settings.startTurn(db, attempt, prompt, now);
   const launched = await settings.launch(db, {
     attempt,
     taskKey: step.key,
-    number: step.number,
+    branch: step.branch,
     step: step.kind.name,
     image: step.repository.jobImage,
     repository: step.repository.github,
@@ -91,14 +95,9 @@ async function launchAttempt(db: Database, settings: WorkerSettings, attempt: st
 }
 
 async function take(db: Database, settings: WorkerSettings, task: string, now: Date): Promise<string> {
-  let runAs: string | null;
-  let start: Start | null;
-  try {
-    runAs = await settings.runAs(db, task);
-    start = runAs === null ? null : await startOf(db, settings, task, runAs);
-  } catch (error) {
-    return `did not claim task ${task}, because who it runs as or where it starts could not be read: ${reason(error)}`;
-  }
+  const runAs = await settings.runAs(db, task);
+  const start = runAs === null ? null : await startOf(db, settings, task, runAs);
+  if (start !== null && 'refused' in start) return `parked task ${task} before its claim: ${(await park(db, task, start.refused)) ? start.refused : 'it was no longer ready'}`;
   const claimed = await claim(db, task, now, settings.startLeaseMs, runAs, start);
   if ('refused' in claimed) return `did not claim task ${task}: ${claimed.refused}${'parked' in claimed && claimed.parked ? ', and parked it' : ''}`;
   try {
@@ -114,7 +113,9 @@ export function worker(settings: WorkerSettings): Loop {
     everyMs: settings.everyMs,
     pass: async (db, { now }) => {
       const lines: string[] = [];
-      for (const task of await claimable(db, settings.runner.workflows, ['agent'])) lines.push(await take(db, settings, task, now));
+      for (const task of await claimable(db, settings.runner.workflows, ['agent'])) {
+        lines.push(await take(db, settings, task, now).catch((error: unknown) => `did not claim task ${task}: ${reason(error)}`));
+      }
       return lines;
     },
   };

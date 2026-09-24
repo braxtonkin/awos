@@ -36,13 +36,22 @@ const planOf = (earlier: readonly Earlier[]): string => {
   return plan.success ? plan.data.plan : 'No plan was recorded.';
 };
 
+const shownLimit = 4000;
+
+const tokenShapes = /\b(?:gh[pousr]_\w+|github_pat_\w+|ATATT[\w=-]+|eyJ[\w-]+\.[\w.-]+)/g;
+
+const shown = (text: string): string => {
+  const redacted = text.trim().replace(tokenShapes, '[redacted]');
+  return redacted.length <= shownLimit ? redacted : `${redacted.slice(0, shownLimit)}\n[cut after ${String(shownLimit)} characters]`;
+};
+
 const ranText = (what: string, ran: z.infer<typeof reproductionEvidence>['before']): string =>
-  `${what}: \`${ran.command}\` exited ${ran.exitCode === null ? 'without a code' : String(ran.exitCode)}.\n\n\`\`\`\n${ran.output.trim()}\n\`\`\``;
+  `${what}: \`${ran.command}\` exited ${ran.exitCode === null ? 'without a code' : String(ran.exitCode)}.\n\n\`\`\`\n${shown(ran.output)}\n\`\`\``;
 
 const evidenceText = (evidence: Evidence | null): string | null => {
   const parsed = reproductionEvidence.safeParse(evidence);
   if (!parsed.success) return null;
-  return [`Reproduction script:\n\n\`\`\`sh\n${parsed.data.script.trim()}\n\`\`\``, ranText('On the base commit', parsed.data.before), ranText('On the change', parsed.data.after)].join('\n\n');
+  return [`Reproduction script:\n\n\`\`\`sh\n${shown(parsed.data.script)}\n\`\`\``, ranText('On the base commit', parsed.data.before), ranText('On the change', parsed.data.after)].join('\n\n');
 };
 
 function cameBack(earlier: readonly Earlier[]): string | null {
@@ -69,26 +78,37 @@ function input({ step, ticket: { key, title }, base, earlier }: StepInput): stri
   }
 }
 
-const lastRun = (commands: readonly Ran[], text: string): Ran | undefined => commands.findLast(ran => ran.command.includes(text));
+const wrapped = /^(?:\S*\/)?(?:ba)?sh\s+-l?c\s+(['"])([\s\S]*)\1$/;
+
+const unwrapped = (command: string): string => wrapped.exec(command.trim())?.[2] ?? command.trim();
+
+const lastRun = (commands: readonly Ran[], text: string): number => commands.findLastIndex(ran => unwrapped(ran.command) === text);
 
 const behaviorOf = (before: Ran, after: Ran): 'fixed' | 'still_wrong' | null => {
   if (before.exitCode === null || after.exitCode === null || before.exitCode === 0) return null;
   return after.exitCode === 0 ? 'fixed' : 'still_wrong';
 };
 
+type Runs = { readonly script: Ran; readonly before: Ran; readonly after: Ran };
+
+function runsOf(commands: readonly Ran[]): Runs | undefined {
+  const at = { script: lastRun(commands, reproduction.show), before: lastRun(commands, reproduction.before), after: lastRun(commands, reproduction.after) };
+  const [script, before, after] = [commands[at.script], commands[at.before], commands[at.after]];
+  if (script === undefined || before === undefined || after === undefined || !(at.script < at.before && at.before < at.after)) return undefined;
+  return { script, before, after };
+}
+
 function settleVerify(output: unknown, commands: readonly Ran[]): Settled {
-  const shown = lastRun(commands, reproduction.show);
-  const before = lastRun(commands, reproduction.before);
-  const after = lastRun(commands, reproduction.after);
+  const runs = runsOf(commands);
   const evidence =
-    shown === undefined || before === undefined || after === undefined
+    runs === undefined
       ? null
       : {
-          script: shown.output,
-          before: { command: before.command, exitCode: before.exitCode, output: before.output },
-          after: { command: after.command, exitCode: after.exitCode, output: after.output },
+          script: runs.script.output,
+          before: { command: runs.before.command, exitCode: runs.before.exitCode, output: runs.before.output },
+          after: { command: runs.after.command, exitCode: runs.after.exitCode, output: runs.after.output },
         };
-  const behavior = before === undefined || after === undefined ? null : behaviorOf(before, after);
+  const behavior = runs === undefined ? null : behaviorOf(runs.before, runs.after);
   const judged = typeof output === 'object' && output !== null && !Array.isArray(output) ? { ...output, behavior } : output;
   return { output: judged, evidence };
 }

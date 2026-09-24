@@ -199,7 +199,7 @@ async function storeLine(writer: Writer, attempt: AttemptId, line: Line, now: Da
 }
 
 const alreadyStored = (held: Held | undefined, denied: Refused | undefined, posted: EventsPost): boolean =>
-  held !== undefined && denied?.refused === 'ended' && posted.lines.every(line => line.seq <= Number(held.high_water));
+  held !== undefined && denied?.refused === 'ended' && posted.lines.length > 0 && posted.lines.every(line => line.seq <= Number(held.high_water));
 
 export async function receive(db: Database, engine: BridgeEngine, from: Caller, posted: EventsPost): Promise<EventsAnswer | Refused> {
   return inTransaction(db, async writer => {

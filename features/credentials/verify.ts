@@ -503,7 +503,7 @@ const sandboxRoutine = {
 
 const sandboxImage = `registry.example.com/sandbox-job@sha256:${'a'.repeat(64)}`;
 
-const sandboxSettings = { ...sandboxRepository, image: sandboxImage, fastTestCommand: 'npm test', verifyProvider: 'tests-only' };
+const sandboxSettings = { ...sandboxRepository, image: sandboxImage, fastTestCommand: 'npm test', verifyProvider: 'tests-only', ignorableChecks: ['lint-docs'], draftLeaves: 'at-once', ignoredReviewers: ['bot-reviewer'] };
 
 const setupFile = { admin: 'ada@example.com', people: [ada], repositories: [sandboxSettings], routines: [sandboxRoutine] };
 
@@ -586,8 +586,10 @@ async function appliesOnce(world: SetupWorld): Promise<Outcome> {
       'version',
     ])
     .executeTakeFirst();
-  const repository = await world.engine.selectFrom('repository').select(['github', 'branch', 'job_image', 'fast_test_command', 'verify_provider']).execute();
-  const expectedRepository = [{ github: 'example/sandbox', branch: 'main', job_image: sandboxImage, fast_test_command: 'npm test', verify_provider: 'tests-only' }];
+  const repository = await world.engine.selectFrom('repository').select(['github', 'branch', 'job_image', 'fast_test_command', 'verify_provider', 'ignorable_checks', 'draft_leaves', 'ignored_reviewers']).execute();
+  const expectedRepository = [
+    { github: 'example/sandbox', branch: 'main', job_image: sandboxImage, fast_test_command: 'npm test', verify_provider: 'tests-only', ignorable_checks: ['lint-docs'], draft_leaves: 'at-once', ignored_reviewers: ['bot-reviewer'] },
+  ];
   const steps = await world.engine.selectFrom('routine_step').select(['step', 'instructions', sql<string[]>`skills::text[]`.as('skills')]).execute();
   const person = await world.engine.selectFrom('person').select(['id', 'email', 'jira_account_id', 'kind']).executeTakeFirst();
   const key = sealingKey(world.env);
@@ -754,7 +756,8 @@ async function refusesBadSettings(world: SetupWorld): Promise<Outcome> {
     { field: 'repositories[0].image', says: 'sha256 digest', repository: { ...sandboxSettings, image: 'registry.example.com/sandbox-job:latest' } },
     { field: 'repositories[0].fastTestCommand', says: 'must not be blank', repository: { ...sandboxSettings, fastTestCommand: '' } },
     { field: 'repositories[0].verifyProvider', says: 'lowercase letters', repository: { ...sandboxSettings, verifyProvider: 'Tests Only' } },
-    { field: 'repositories[0]', says: 'Unrecognized key: "ignoredReviewers"', repository: { ...sandboxSettings, ignoredReviewers: ['bot'] } },
+    { field: 'repositories[0]', says: 'Unrecognized key: "reviewers"', repository: { ...sandboxSettings, reviewers: ['bot'] } },
+    { field: 'repositories[0].draftLeaves', says: 'Invalid option', repository: { ...sandboxSettings, draftLeaves: 'never' } },
   ];
   const problems: string[] = [];
   const said: string[] = [];

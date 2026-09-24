@@ -68,8 +68,7 @@ export function attempts(settings: AttemptSettings): Loop {
     runAs: settings.runAs,
     branchHead: async (actsAs, github, branch) => {
       const token = await githubToken(settings, actsAs);
-      if ('refused' in token) throw new Error(token.refused);
-      return remoteHead(repositoryUrl(settings.gitBaseUrl, github), branch, token.token);
+      return 'refused' in token ? token : { head: await remoteHead(repositoryUrl(settings.gitBaseUrl, github), branch, token.token) };
     },
     startEnvironment: environmentOf(settings),
     issueToken: (db, attempt) => issueToken(db, attemptId.parse(attempt)),
@@ -89,7 +88,7 @@ export function attempts(settings: AttemptSettings): Loop {
           {
             attempt: request.attempt,
             taskKey: request.taskKey,
-            number: request.number,
+            branch: request.branch,
             step: request.step,
             image,
             repositoryUrl: repositoryUrl(settings.gitBaseUrl, request.repository),

@@ -3,7 +3,7 @@ import { actionKinds } from '../../shared/actions.ts';
 import type { Database } from '../../shared/db/client.ts';
 
 export type Continuation =
-  | { readonly from: 'lost'; readonly commit: string; readonly attempt: string }
+  | { readonly from: 'lost'; readonly commit: string }
   | { readonly from: 'task'; readonly commit: string }
   | { readonly from: 'repository'; readonly github: string; readonly branch: string }
   | { readonly from: 'nowhere' };
@@ -45,7 +45,7 @@ export async function continuation(db: Database, task: string): Promise<Continua
   if (row === undefined) return { from: 'nowhere' };
   if (row.previous !== null) {
     const previous = await db.selectFrom('attempt').select(['attempt.verdict', 'attempt.last_pushed']).where('attempt.id', '=', row.previous).executeTakeFirstOrThrow();
-    if (previous.verdict === 'lost' && previous.last_pushed !== null) return { from: 'lost', commit: previous.last_pushed, attempt: row.previous };
+    if (previous.verdict === 'lost' && previous.last_pushed !== null) return { from: 'lost', commit: previous.last_pushed };
   }
   const head = await taskBranchHead(db, task);
   if (head !== null) return { from: 'task', commit: head };
