@@ -21,7 +21,7 @@ export type Reaped = { readonly attempt: string; readonly task: string; readonly
 
 const claimRefusals: readonly { readonly refused: Refused; readonly is: (refusal: Refusal) => boolean }[] = [
   { refused: 'nobody-to-run-as', is: found => found.kind === 'not_null' && found.table === 'attempt' && found.column === 'run_as_id' },
-  { refused: 'busy', is: found => found.kind === 'unique' && found.name === 'one_live_attempt_per_task' },
+  { refused: 'busy', is: found => found.kind === 'unique' && (found.name === 'one_live_attempt_per_task' || found.name === 'one_attempt_per_branch') },
   { refused: 'not-ready', is: found => found.kind === 'foreign_key' && found.name === 'live_attempt_matches_ready_task' },
 ];
 

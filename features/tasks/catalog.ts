@@ -75,6 +75,8 @@ export const noMutantYet: Readonly<Record<string, readonly string[]>> = {
     'push_is_a_commit',
     'branch_starts_somewhere',
     'push_needs_a_branch',
+  ],
+  'two claims of one task count the same attempt number only when they race, and one_live_attempt_per_task already refuses the second of those as busy, so dropping this index changes nothing a property can see while that one stands; the claim refuses a collision here as busy too': [
     'one_attempt_per_branch',
   ],
   'the routines simulator in features/routines records tasks and owns this guard, and its mutant drops it there': ['task_keeps_its_routine'],
