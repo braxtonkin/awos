@@ -46,6 +46,7 @@ jobs:
       - run: docker compose run --rm verify npm test
       - run: docker compose run --rm verify npm run verify -- tasks-sim --mutant all
       - run: docker compose run --rm verify npm run verify -- credentials-sim --mutant all
+      - run: docker compose run --rm verify npm run verify -- github-sim --mutant all
       - run: docker compose run --rm verify npm run verify -- engine-start
       - run: docker compose run --rm verify npm run verify -- code-change
       - run: docker compose run --rm verify npm run verify -- jira

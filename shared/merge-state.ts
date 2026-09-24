@@ -23,3 +23,13 @@ export const mergeValue = z.discriminatedUnion('kind', [
 export const mergeState = z.object({ head: commit, value: mergeValue });
 
 export type MergeState = z.infer<typeof mergeState>;
+
+export type MergeValue = z.infer<typeof mergeValue>;
+
+export type PullRequest = { readonly repositoryId: string; readonly number: number; readonly actsAs: string };
+
+export type Answered = { readonly ejection: string | null; readonly review: string | null };
+
+export type MergeRead = { readonly state: MergeState } | { readonly failed: string };
+
+export type ReadMergeState = (pullRequest: PullRequest, answered: Answered, signal: AbortSignal) => Promise<MergeRead>;
