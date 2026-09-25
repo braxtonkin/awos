@@ -75,6 +75,8 @@ const livenessModel = (section: string): string =>
 
 const plantedSpec = '---- MODULE Planted ----\nEXTENDS Naturals\nCONSTANTS Limit, Fair\nVARIABLE x\nTypeOK == x \\in 0..Limit\nInit == x = 0\nNext == x < Limit /\\ x\' = x + 1\nSpec == Init /\\ [][Next]_x /\\ (Fair => WF_x(Next))\nSettles == <>(x = Limit)\n====\n';
 
+const settlingSpec = plantedSpec.replace("Next == x < Limit /\\ x' = x + 1", "Next == (x < Limit /\\ x' = x + 1) \\/ (x = Limit /\\ UNCHANGED x)");
+
 const plantedInvariants = 'features/planted/invariants.ts';
 
 const holdsAndStepConfig = 'SPECIFICATION Spec\n\nINVARIANTS\n    PlantedHolds\n\nPROPERTIES\n    PlantedStep\n';
@@ -1323,12 +1325,12 @@ const plantedStates: Violation = {
   expect: ['Planted explores 3 distinct states, over its ceiling of 1'],
   companions: [
     { file: 'features/planted/verify.ts', source: livenessModel('PROPERTIES') },
-    { file: 'features/planted/Planted.tla', source: plantedSpec },
+    { file: 'features/planted/Planted.tla', source: settlingSpec },
     { file: 'features/planted/Planted.cfg', source: 'SPECIFICATION Spec\n\nCONSTANTS\n    Limit = 2\n    Fair = TRUE\n\nINVARIANTS\n    TypeOK\n\nPROPERTIES\n    Settles\n' },
   ],
 };
 
-const grownProduct = 'features/planted/grown.ts';
+const grownProduct = 'features/tasks/grown.ts';
 
 const grownSource = 'export const grown = 1;\n';
 
@@ -1352,10 +1354,10 @@ const budgetViolations: readonly Violation[] = [
   },
   {
     name: 'the budget check rejects a line past its role longest-line ceiling, even when a raise covers the lines',
-    file: 'features/planted/wide.ts',
+    file: 'features/tasks/wide.ts',
     source: `export const wide = '${'w'.repeat(400)}';\n`,
     tool: 'budget',
-    expect: ['features/planted/wide.ts:1 is 422 characters wide, over the longest-line/product ceiling'],
+    expect: ['features/tasks/wide.ts:1 is 423 characters wide, over the longest-line/product ceiling'],
     companions: [{ file: plantedRaise, source: raiseFile({ 'lines/product': 1, 'characters/product': 1000 }) }],
   },
   {
