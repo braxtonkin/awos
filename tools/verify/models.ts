@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
+import { budgetFile, ceilingsAt, stateKey } from '../budget/budget.ts';
 import { fail, pass, type Check, type Scenario } from './check.ts';
 import { checkModel, traceLine, type TlcOptions, type TlcRun } from './tlc.ts';
 
@@ -244,22 +245,47 @@ const configOf = (parsed: ParsedConfig, lines: readonly string[], value: (name: 
 
 const listing = (section: Section, properties: readonly string[]): readonly string[] => (properties.length === 0 ? [] : [section, ...properties.map(property => `    ${property}`)]);
 
-function checkHolds(model: Model, file: string, text: string, sized: Pick<TlcOptions, 'heap'> = {}): Check {
+type Holds = { readonly check: Check; readonly states: number | undefined };
+
+function checkHolds(model: Model, file: string, text: string, sized: Pick<TlcOptions, 'heap'> = {}): Holds {
   const name = `${file} holds every property`;
   const parsed = parseConfig(text);
   const liveness = [...parsed.listed.PROPERTIES].filter(property => isLiveness(model, property));
   if (liveness.length === 0) {
     const run = runTlc(model.module, text, sized);
-    return run.clean ? pass(name, `No error has been found in ${String(run.distinctStates)} distinct states, checked in ${run.seconds.toFixed(1)} s`) : fail(name, failure(run));
+    return {
+      check: run.clean ? pass(name, `No error has been found in ${String(run.distinctStates)} distinct states, checked in ${run.seconds.toFixed(1)} s`) : fail(name, failure(run)),
+      states: run.distinctStates,
+    };
   }
   const safety = runTlc(model.module, configOf(parsed, [...listing('INVARIANTS', [...parsed.listed.INVARIANTS]), ...listing('PROPERTIES', [...parsed.listed.PROPERTIES].filter(property => !isLiveness(model, property)))]), sized);
   const settles = runTlc(model.module, configOf(parsed, listing('PROPERTIES', liveness)), { ...holdsLiveness, ...sized });
   const failed = [safety, settles].find(run => !run.clean);
-  if (failed !== undefined) return fail(name, failure(failed));
-  return pass(
-    name,
-    `No error has been found in ${String(safety.distinctStates)} distinct states, safety checked in ${safety.seconds.toFixed(1)} s and ${liveness.join(', ')} in ${settles.seconds.toFixed(1)} s over ${String(settles.distinctStates)} distinct states`,
-  );
+  const states = Math.max(safety.distinctStates ?? 0, settles.distinctStates ?? 0);
+  if (failed !== undefined) return { check: fail(name, failure(failed)), states };
+  return {
+    check: pass(
+      name,
+      `No error has been found in ${String(safety.distinctStates)} distinct states, safety checked in ${safety.seconds.toFixed(1)} s and ${liveness.join(', ')} in ${settles.seconds.toFixed(1)} s over ${String(settles.distinctStates)} distinct states`,
+    ),
+    states,
+  };
+}
+
+const repositoryRoot = fileURLToPath(new URL('../../', import.meta.url));
+
+function checkStates(model: Model, states: number | undefined): Check {
+  const module = moduleNameOf(model.module);
+  const key = stateKey(module);
+  const name = `${module} stays within its distinct-state ceiling ${key} in ${budgetFile}`;
+  const ceilings = ceilingsAt(repositoryRoot);
+  if (typeof ceilings === 'string') return fail(name, ceilings);
+  if (states === undefined) return fail(name, 'TLC reported no distinct state count');
+  const explored = `${module} explores ${String(states)} distinct states`;
+  const ceiling = ceilings.get(key);
+  const raise = (amount: number): string => `npm run budget -- --raise <unit> --why "<why>" --add ${key}=${String(amount)}`;
+  if (ceiling === undefined) return fail(name, `${explored}, and ${key} has no ceiling. Add one in a commit of its own: ${raise(states)}`);
+  return states <= ceiling ? pass(name, `${explored}, within ${String(ceiling)}`) : fail(name, `${explored}, over its ceiling of ${String(ceiling)}. Shrink the model's bounds, or raise the ceiling in a commit of its own: ${raise(states - ceiling)}`);
 }
 
 const mutantConfig = (text: string, mutant: AnyMutant, section: Section): string =>
@@ -297,12 +323,14 @@ function runModel(model: Model, args: readonly string[]): readonly Check[] {
   }
   const nightlyText = readConfig(model.module, configs.nightly);
   const nightlyReview = [checkConfig(model, configs.nightly, nightlyText), checkPlants(model, configs.nightly, nightlyText)];
-  if (nightly) return [...nightlyReview, checkHolds(model, configs.nightly.file, nightlyText, { heap: 'nightly' })];
+  if (nightly) return [...nightlyReview, checkHolds(model, configs.nightly.file, nightlyText, { heap: 'nightly' }).check];
+  const holds = checkHolds(model, configs.pr.file, prText);
   return [
     checkConfig(model, configs.pr, prText),
     checkPlants(model, configs.pr, prText),
     ...(configs.nightly.file === configs.pr.file ? [] : nightlyReview),
-    checkHolds(model, configs.pr.file, prText),
+    holds.check,
+    ...(holds.check.passed ? [checkStates(model, holds.states)] : []),
     ...mutants.map(candidate => checkMutant(model, prText, candidate)),
   ];
 }
