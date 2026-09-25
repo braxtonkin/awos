@@ -49,7 +49,7 @@ const parseJson = (text: string): unknown => JSON.parse(text);
 const laneFinish: Finish = async (writer, attempt, now) => {
   const rows = await writer.selectFrom('attempt_event').select('body').where('attempt_id', '=', attempt).where('kind', '=', 'app').orderBy('seq').execute();
   const items = reduce(rows);
-  const last = items.items.findLast(item => item.type === 'agentMessage' && item.completed);
+  const last = items.items.findLast(item => item.type === 'agentMessage' && item.status === 'completed');
   await writer
     .updateTable('attempt')
     .set({ finished_at: now, verdict: 'pass', output: JSON.stringify({ finalMessage: last?.text ?? null }) })
@@ -281,7 +281,7 @@ function tallyChecks(counted: Tally): readonly Check[] {
   ];
 }
 
-const itemKey = (item: Item): string => JSON.stringify([item.id, item.type, item.text, item.completed, item.clientId]);
+const itemKey = (item: Item): string => JSON.stringify([item.id, item.type, item.text, item.status, item.clientId]);
 
 async function pruneAndReplayChecks(world: World): Promise<readonly Check[]> {
   const live = reduce((await tapped(world)).map(line => ({ body: parseJson(line.text) })));
@@ -290,7 +290,7 @@ async function pruneAndReplayChecks(world: World): Promise<readonly Check[]> {
   const joined = reduce(history.filter(row => row.fragment).map(row => ({ body: row.body })));
   const finals = new Map(stored.items.map(item => [item.id, item]));
   const compared = joined.items.map(item => ({ item, final: finals.get(item.id) }));
-  const mismatched = compared.filter(({ item, final }) => final === undefined || !final.completed || final.text !== item.text);
+  const mismatched = compared.filter(({ item, final }) => final === undefined || final.status !== 'completed' || final.text !== item.text);
   const byType = [...new Set(compared.map(({ final }) => final?.type ?? 'missing'))];
   const sameSteps = isDeepStrictEqual(live.items.map(itemKey), stored.items.map(itemKey)) && isDeepStrictEqual(live.turns, stored.turns);
   const replayName = 'the stored lines replay through shared/items.ts into the same items and turns the live stream produced, one for one';

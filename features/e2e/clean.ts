@@ -85,11 +85,11 @@ function replayLeftovers(attempt: Attempt): readonly Leftover[] {
   const stored = new Set(seqsOf(events, completed).keys());
   const found: Leftover[] = [];
   for (const item of stored) {
-    if (replayed.get(item)?.completed !== true) found.push(leftover('replay', `attempt ${attempt.id} item ${item}`, 'is stored as completed but does not replay as a completed item through shared/items.ts'));
+    if (replayed.get(item)?.status !== 'completed') found.push(leftover('replay', `attempt ${attempt.id} item ${item}`, 'is stored as completed but does not replay as a completed item through shared/items.ts'));
   }
   for (const item of transcript.items) {
-    if (item.completed && !stored.has(item.id)) found.push(leftover('replay', `attempt ${attempt.id} item ${item.id}`, 'replays as completed with no stored item/completed event'));
-    if (!item.completed && attempt.verdict === 'pass') found.push(leftover('replay', `attempt ${attempt.id} item ${item.id}`, `replays unfinished in an attempt that passed, from ${item.type === 'unknown' ? 'fragments alone' : `its ${item.type} item, which never completed`}`));
+    if (item.status === 'completed' && !stored.has(item.id)) found.push(leftover('replay', `attempt ${attempt.id} item ${item.id}`, 'replays as completed with no stored item/completed event'));
+    if (item.status === 'inProgress' && attempt.verdict === 'pass') found.push(leftover('replay', `attempt ${attempt.id} item ${item.id}`, `replays in progress in an attempt that passed, from ${item.type === 'unknown' ? 'fragments alone' : `its ${item.type} item`}`));
   }
   for (const turn of transcript.turns) {
     if (turn.status === 'inProgress' && attempt.verdict === 'pass') found.push(leftover('replay', `attempt ${attempt.id} turn ${turn.id}`, 'replays in progress in an attempt that passed'));
