@@ -118,6 +118,10 @@ const accessOnlyLoginFrom = "import { accessOnly, type AccessOnlyLogin } from '.
 
 const plantedCheck = "import type { Checks } from './checks.ts';\nimport type { Check } from './kinds.ts';\n\nconst check: Check = { rotates: () => false, run: () => Promise.reject(new Error('planted')) };\n";
 
+const ticketKeyPattern = ['^[A-Z]', '[A-Z0-9_]*', '-\\d+$'].join('');
+
+const ticketKeyCopy = 'Import ticket from shared/actions.ts';
+
 const violations: readonly Violation[] = [
   {
     name: 'tsc rejects a review step that owes an approval',
@@ -291,6 +295,27 @@ const violations: readonly Violation[] = [
     source: "import { pass } from '../../tools/verify/check.js';\nexport const planted = pass('planted', 'tsc resolves this import and node cannot');\n",
     tool: 'eslint',
     expect: ['no-restricted-syntax'],
+  },
+  {
+    name: 'eslint rejects a regular expression that copies the ticket-key pattern',
+    file: 'features/planted/ticket-key.ts',
+    source: `export const key = /${ticketKeyPattern}/;\n`,
+    tool: 'eslint',
+    expect: [ticketKeyCopy],
+  },
+  {
+    name: 'eslint rejects a string that copies the ticket-key pattern',
+    file: 'features/planted/ticket-key-text.ts',
+    source: `export const key = new RegExp('${ticketKeyPattern.replaceAll('\\', '\\\\')}');\n`,
+    tool: 'eslint',
+    expect: [ticketKeyCopy],
+  },
+  {
+    name: 'eslint rejects a copy of the ticket-key pattern in shared/ outside shared/actions.ts, which alone may hold it',
+    file: 'shared/planted-ticket-key.ts',
+    source: `export const key = /${ticketKeyPattern}/;\n`,
+    tool: 'eslint',
+    expect: [ticketKeyCopy],
   },
   {
     name: 'eslint rejects a dynamic import by its .js name',

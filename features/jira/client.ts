@@ -1,11 +1,10 @@
 import { z } from 'zod';
+import { ticket as ticketKey } from '../../shared/actions.ts';
 import { basicAuthorization, type JiraLogin, type OpenJiraLogin } from '../../shared/jira-login.ts';
 
 export type JiraAccess = { readonly site: string | undefined; readonly timeoutMs: number; readonly logins: OpenJiraLogin };
 
 type Method = 'GET' | 'POST' | 'PUT';
-
-const ticketKey = z.string().regex(/^[A-Z][A-Z0-9_]*-\d+$/, { error: 'must be a ticket key such as ABC-12' });
 
 const account = z.object({ accountId: z.string().min(1) });
 

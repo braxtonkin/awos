@@ -19,6 +19,19 @@ const autoworker: CompatiblePlugin = plugin;
 const importSource = ':matches(ImportDeclaration, ExportAllDeclaration, ExportNamedDeclaration, ImportExpression)';
 const importByJsName = 'Import the .ts file by its .ts name. Node runs .ts files directly and cannot find a .js name that only tsc resolves.';
 
+const restrictedImports = [
+  { selector: `${importSource}[source.value=/^\\..*\\.[cm]?js$/]`, message: importByJsName },
+  { selector: 'ImportExpression > TemplateLiteral.source', message: 'Write an import path as a plain string, so the import rules can read it.' },
+  { selector: `${importSource}[source.value=/\\.claude/]`, message: 'Product code never imports from .claude/, which holds agent tooling that lint does not check.' },
+];
+
+const ticketKeyText = '/\\[A-Z\\]\\[A-Z0-9_\\]\\*-\\\\d\\+/';
+
+const ticketKeyCopy = {
+  selector: `:matches(Literal[regex.pattern=${ticketKeyText}], Literal[value=${ticketKeyText}], TemplateElement[value.raw=${ticketKeyText}])`,
+  message: 'Import ticket from shared/actions.ts, which holds the one ticket-key rule, in place of a copy of its pattern.',
+};
+
 export default defineConfig(
   { ignores: ['.claude/**'] },
   {
@@ -37,14 +50,15 @@ export default defineConfig(
     rules: {
       '@typescript-eslint/ban-ts-comment': ['error', { 'ts-expect-error': true, 'ts-ignore': true, 'ts-nocheck': true }],
       'no-warning-comments': ['error', { terms: ['@ts-'], location: 'anywhere' }],
-      'no-restricted-syntax': [
-        'error',
-        { selector: `${importSource}[source.value=/^\\..*\\.[cm]?js$/]`, message: importByJsName },
-        { selector: 'ImportExpression > TemplateLiteral.source', message: 'Write an import path as a plain string, so the import rules can read it.' },
-        { selector: `${importSource}[source.value=/\\.claude/]`, message: 'Product code never imports from .claude/, which holds agent tooling that lint does not check.' },
-      ],
+      'no-restricted-syntax': ['error', ...restrictedImports, ticketKeyCopy],
       'autoworker/no-comments': 'error',
       'autoworker/no-brand-assertions': 'error',
+    },
+  },
+  {
+    files: ['shared/actions.ts'],
+    rules: {
+      'no-restricted-syntax': ['error', ...restrictedImports],
     },
   },
 );

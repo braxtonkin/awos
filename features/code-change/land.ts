@@ -1,4 +1,4 @@
-import { actionKinds, owe, type ActionSpec, type Owe, type Stands } from '../../shared/actions.ts';
+import { actionKinds, owe, ticket, type ActionSpec, type Owe, type Stands } from '../../shared/actions.ts';
 import { mergeState, type Answered, type MergeState, type ReadMergeState } from '../../shared/merge-state.ts';
 import type { Review } from '../../shared/review.ts';
 import type { Instruction, Unasked } from '../../shared/workflow.ts';
@@ -218,8 +218,6 @@ export type Land = { readonly store: LandStore; readonly read: ReadMergeState; r
 
 const nothingFollows: Follow = { whenDone: [], whenAwaiting: null };
 
-const ticketKey = /^[A-Z][A-Z0-9_]*-\d+$/;
-
 function owedFor(action: Owing, task: AtLand, reading: Reading): Owe {
   const { repository, branch } = task.pull;
   switch (action) {
@@ -234,9 +232,9 @@ function owedFor(action: Owing, task: AtLand, reading: Reading): Owe {
 
 function afterMerge(task: AtLand, reading: Reading): readonly Owe[] {
   const pull = task.pull.number === null ? 'the pull request' : `pull request #${String(task.pull.number)}`;
-  const ticket = ticketKey.test(task.key);
-  const comment = ticket ? [owe(actionKinds.ticketComment, { ticket: task.key, text: `AutoWorker merged ${pull} at ${reading.state.head}.`, linkPullRequest: true })] : [];
-  const ended = ticket && task.statuses.end !== null ? [owe(actionKinds.ticketTransition, { ticket: task.key, status: task.statuses.end, from: task.statuses.start })] : [];
+  const isTicket = ticket.safeParse(task.key).success;
+  const comment = isTicket ? [owe(actionKinds.ticketComment, { ticket: task.key, text: `AutoWorker merged ${pull} at ${reading.state.head}.`, linkPullRequest: true })] : [];
+  const ended = isTicket && task.statuses.end !== null ? [owe(actionKinds.ticketTransition, { ticket: task.key, status: task.statuses.end, from: task.statuses.start })] : [];
   return [...comment, ...ended, owe(actionKinds.branchDelete, { repository: task.pull.repository, branch: task.pull.branch })];
 }
 

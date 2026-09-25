@@ -6,7 +6,7 @@ import type { Transacting } from './transaction.ts';
 const repository = z.string().regex(/^[\w.-]+\/[\w.-]+$/);
 const branch = z.string().min(1).max(255);
 const commit = z.string().regex(/^[0-9a-f]{40}$/);
-export const ticket = z.string().regex(/^[A-Z][A-Z0-9_]*-\d+$/);
+export const ticket = z.string().regex(/^[A-Z][A-Z0-9_]*-\d+$/, { error: 'must be a ticket key such as ABC-12' });
 
 export const marker = z.string().regex(/^[A-Za-z0-9_-]{22,}$/).brand<'Marker'>();
 
