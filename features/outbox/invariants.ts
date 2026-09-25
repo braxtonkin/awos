@@ -18,6 +18,7 @@ export const simTables: readonly Statement[] = [
   sql`create table sim_effect (id bigint generated always as identity primary key, marker text not null, at timestamptz not null)`,
   sql`create table sim_claim (id bigint generated always as identity primary key, row_id bigint not null, performer text not null,
                               claimed_at timestamptz not null, lease_until timestamptz not null, released_at timestamptz)`,
+  sql`create table sim_review (attempt_id bigint primary key, task_id bigint not null, decided_at timestamptz)`,
 ];
 
 export const worldOf = (tasks: number): readonly Statement[] => [
@@ -43,6 +44,13 @@ const owedRow = (position: number) =>
       values (1, ${sql.lit(position)}, 'sim.unkeyed', jsonb_build_object('owing', ${owing(position)}::text, 'text', 'Planted.'), 1, ${plantedMarker(position)}, ${t0})`;
 
 const owedWithState = (position: number): readonly Statement[] => [owedRow(position), sql`insert into sim_owing (token, task_id) values (${owing(position)}, 1)`];
+
+const reviewOpen: readonly Statement[] = [
+  sql`insert into attempt (task_id, routine_id, routine_version, step, epoch, run_as_id, started_at, lease_until, finished_at, verdict, output)
+      values (1, 1, 1, 's1', 0, 1, ${t0}, ${t0} + interval '30 seconds', ${t0} + interval '1 second', 'pass', '{"outcome": "done", "summary": "Planted.", "blocks": []}')`,
+  sql`update task set state = 'waiting', waiting_on = 'approval', waiting_reason = 'Approve s1 to go on.', review_attempt = 1 where id = 1`,
+  sql`insert into sim_review (attempt_id, task_id) values (1, 1)`,
+];
 
 const effectOf = (position: number) => sql`insert into sim_effect (marker, at) values (${plantedMarker(position)}, ${t0} + interval '1 second')`;
 
@@ -105,6 +113,13 @@ export const properties = {
         violation: sql`insert into sim_claim (row_id, performer, claimed_at, lease_until) values (1, 'p2', ${t0} + interval '1 second', ${t0} + interval '6 seconds')`,
       },
     ],
+  },
+  ReviewKeptUntilDecided: {
+    moment: 'each-step',
+    breaks: sql`select r.attempt_id, r.task_id, t.state, t.waiting_on from sim_review r join task t on t.id = r.task_id
+                where r.decided_at is null
+                  and not (t.state = 'waiting' and t.waiting_on = 'approval' and t.review_attempt = r.attempt_id)`,
+    plants: [{ setup: reviewOpen, violation: sql`update task set waiting_on = 'retry', review_attempt = null where id = 1` }],
   },
   EveryOwedActionSettles: {
     moment: 'after-quiet-phase',
