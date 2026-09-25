@@ -643,6 +643,27 @@ async function lostAnswerLane(world: World): Promise<readonly Check[]> {
   }
 }
 
+async function latePushLane(world: World): Promise<readonly Check[]> {
+  await sendCommand(world.db, world.attempt, { kind: 'turn.start', prompt: tickPrompt(2), outputSchema: null }, new Date());
+  const commit = 'c'.repeat(40);
+  let pushed = 0;
+  const run = startBridge(world, async () => {
+    await world.db.updateTable('attempt').set({ finished_at: new Date(), verdict: 'stopped' }).where('id', '=', world.attempt).execute();
+    pushed += 1;
+    return [{ kind: 'pushed', commit, branch: 'autoworker/LANE-1-attempt-1' }];
+  });
+  const ended = await endingCheck(run, 1, 'ended');
+  const row = await world.db.selectFrom('attempt').select(['verdict', 'last_pushed']).where('id', '=', world.attempt).executeTakeFirstOrThrow();
+  const pushedLines = await storedWhere(world, sql<boolean>`body ? 'commit'`);
+  const recordName = "the engine refuses the late push's line, so the attempt's record never names the late commit";
+  return [
+    row.verdict === 'stopped' && row.last_pushed === null && pushedLines === 0
+      ? pass(recordName, `the push step ran ${String(pushed)} time after the stop; verdict stopped, last_pushed null, ${String(pushedLines)} pushed lines stored`)
+      : fail(recordName, `verdict ${String(row.verdict)}, last_pushed ${String(row.last_pushed)}, ${String(pushedLines)} pushed lines stored`),
+    ended,
+  ];
+}
+
 const lanes: Readonly<Record<string, Lane>> = {
   outage: {
     summary: 'one real turn with the engine stopped for 8 s mid-turn; every line stored once, no fragment left, and the stored lines replay into the live items',
@@ -656,6 +677,7 @@ const lanes: Readonly<Record<string, Lane>> = {
   planted: { summary: 'a planted .codex/config.toml changes nothing the bridge pins', usesCodex: true, run: plantedLane },
   fence: { summary: 'an attempt marked lost mid-turn stores nothing more, pushes nothing, and its Job side exits non-zero', usesCodex: true, run: fenceLane },
   finishing: { summary: 'a steer sent while the bridge runs its step after the turn is never counted as received', usesCodex: true, run: finishingLane },
+  'late-push': { summary: 'a stop between the last acknowledgement and the push: the Job pushes, and the engine records nothing of it', usesCodex: true, run: latePushLane },
   'lost-answer': { summary: "the engine's answer to the end line is lost, and the command stream closes as ended before a post gets through; the bridge still exits 0", usesCodex: true, run: lostAnswerLane },
 };
 
