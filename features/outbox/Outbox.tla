@@ -37,7 +37,7 @@ Rows == Tasks \X (1..RowsPerTask)
 
 TaskStates == {"working", "owing", "review", "rolledBack", "next", "waiting"}
 
-ReviewStates == {"none", "open", "decided"}
+ReviewStates == {"none", "open"}
 
 RowStates == {"absent", "owed", "done", "failed"}
 
@@ -120,7 +120,7 @@ ClaimNextStage(t) ==
 Approve(t) ==
     /\ task[t] = "review"
     /\ task' = [task EXCEPT ![t] = "owing"]
-    /\ review' = [review EXCEPT ![t] = "decided"]
+    /\ review' = [review EXCEPT ![t] = "none"]
     /\ row' = IF RetryReowesFailedRows THEN Reowed(t) ELSE row
     /\ UNCHANGED <<effects, pending, perf, crashes, stalls, retries>>
 

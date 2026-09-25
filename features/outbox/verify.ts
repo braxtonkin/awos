@@ -310,7 +310,7 @@ function doneChecks(profile: ProfileName, runs: readonly Run[]): Check {
   return idle.length === 0 ? pass(name, `${String(Math.min(...done))} to ${String(Math.max(...done))} tasks done per seed`) : fail(name, `seeds with no task done: ${idle.slice(0, 10).join(', ')}`);
 }
 
-const finishingProfiles: ReadonlySet<ProfileName> = new Set<ProfileName>(['mixed', 'two-engines']);
+const finishingProfiles: ReadonlySet<ProfileName> = new Set<ProfileName>(['mixed', 'two-engines', 'skewed']);
 
 async function profileChecks(postgres: TestPostgres, profile: ProfileName, options: SimulationOptions): Promise<readonly Check[]> {
   const started = performance.now();

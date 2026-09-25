@@ -48,7 +48,8 @@ The TLA+ model in `features/outbox/` settled this. It runs two engine copies ove
 
 The model rests on two assumptions that the outbox's code and its connectors must make true:
 
-- A request reaches its target, or is lost, before the lease it was sent under ends by the database's clock. A pause between the lease check and the send, a retry inside the client, or clock skew beyond the margin breaks this.
+- A request reaches its target, or is lost, before the lease it was sent under ends by the database's clock. The model names this `TargetSettlesWithinMargin`, and its mutant posts a comment twice when a failed call's request lands after the lease. The call's deadline is the lease's end less the margin, and `performer()` stops waiting for a call or a lookup at that deadline even when the connector ignores its signal. So the margin (`OUTBOX_MARGIN_MS`) must exceed the longest time any target can take to settle a request after its sender gave up on it. A pause between the lease check and the send, or a retry inside the client, breaks this.
+- Every lease is written and judged by the database's clock. The outbox reads the time from Postgres, never from the engine's host, so clock skew between engine copies cannot free a live claim. The model names this `LeasesOnOneClock`, and the simulator's `skewed` profile runs one engine 6 s ahead to prove it: with each engine's own clock, the fast engine expires a live claim and the same comment is posted twice.
 - Each action kind's target either catches a duplicate or lets the performer look for the marker. Catching a duplicate means that a repeat is refused or changes nothing, whatever happened since, and the performer reads the refusal as its own earlier success and fetches the result. An action that sets state, such as moving a ticket or a branch, qualifies only when it names the state it expects to replace. A marker qualifies only when the action's own request writes it, nothing removes it, it cannot be guessed, it counts only when the row's own identity wrote it, and the lookup reads every page and every earlier write. A lookup that fails counts as a failed call. A kind whose target meets neither condition, such as a message that cannot be looked up afterwards, cannot be performed at most once across a crash, so it needs its own rule before it is added.
 
 Rejected options:
@@ -64,13 +65,24 @@ Decided 24 Sep 2026 while building the outbox (P4), for the Land model, now in `
 - A performer can end a row as refused when the target declines the action for a reason a retry cannot change, such as a merge refused because the head moved. The row records the refusal and the head it named as its result, so Land reads why. A refused row settles without an effect, and the rows its task owed after it are dropped in the same statement, because they assumed its effect.
 - A merge that finds the pull request already merged, already queued, or ejected in a way Land has not answered reports that as the row's result. It is never a reason to act again.
 - The claim statement re-checks that the row's task still stands. A stopped task, or a kind's own predicate, drops its unclaimed rows in the statement that claims, together with the rows its task owed after them.
-- A row that fails at the cap parks its task when the task is ready or already waiting, and a parked task waits on Retry. A done task cannot wait for a person, so the rows it owed after the failed row are dropped instead.
+- A row that fails at the cap parks its task when the task is ready or waits on anything but a person's review, and a parked task waits on Retry. A task that waits on a review keeps it, as the next entry says. A done task cannot wait for a person, so the rows it owed after the failed row are dropped instead.
 - Each task counts its unsettled rows, and its generated `ready` column is true only when that count is zero. The foreign key that ties a live attempt to a ready task then refuses a claim while the task owes an action, and the row lock on the task serializes that claim with the transaction that owes the rows. `owesAction` in `shared/actions.ts` reads the same count, for Land.
 - A failed row is claimable again whenever its task is ready, and the claim resets its tries. A person's Retry makes the task ready, so the Retry owes the failed rows again in its own transaction.
 
 Rejected options:
 
 - **Refuse the claim and re-owe on Retry in the task feature's statements.** Each claim path and each Retry would need the same edit, and a fork's claim could miss it. The count on the task puts the rule in the store, where every claim meets it.
+
+### A failed outbox row keeps a person's open review
+
+Decided 25 Sep 2026 (FX3e). A step can pass, owe an action such as a ticket comment, and wait for a person to approve it in one transaction. When that action fails at the cap while the review is open, the task keeps waiting on the same review, and the review's note gains a sentence that names the failed action and its last error. Approve or Send back then makes the task ready, and a ready task owes its failed rows again, so the action is tried again with its tries reset. If it fails again, the task parks on Retry at its new step.
+
+The earlier trigger parked the task on Retry over the review. The review was lost, Retry was the only way on, and Retry ran the step that had already passed. The outbox model now has a review state that only Approve ends, and its invariant `ReviewKeptUntilDecided` fails when the guard `FailureKeepsReview` is off. The simulator checks the same invariant after every step, and its `park-over-review` mutant restores the old trigger and breaks it. The outbox-sim check of a Jira comment that fails while specify waits for approval shows that the review and its note outlive the failure, that Retry changes nothing, and that Approve posts the comment once without running specify again.
+
+Rejected options:
+
+- **Keep the review, and record the retry need in a column beside it.** Approve already makes the task ready, and a ready task already owes its failed rows again, so the column would hold state that the store derives. Every decision path would also need to read and clear it.
+- **Park only ready tasks.** A task that waits on something outside, such as an approval on GitHub, may wait for the very action that failed, so it still needs a person to press Retry.
 
 ### A lapsed lease cannot be renewed
 

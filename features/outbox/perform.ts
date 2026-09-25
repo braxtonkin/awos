@@ -2,8 +2,9 @@ import { randomUUID } from 'node:crypto';
 import { sql, type Expression, type ExpressionBuilder, type SqlBool } from 'kysely';
 import { marker, type Limits, type Owed, type Performer, type Refusal } from '../../shared/actions.ts';
 import type { Database } from '../../shared/db/client.ts';
+import { postgresNow, type Now } from '../../shared/db/now.ts';
 import type { DB, OutboxState } from '../../shared/db/types.ts';
-import type { Clock, Loop } from '../../shared/loop.ts';
+import type { Loop } from '../../shared/loop.ts';
 
 export type Guards = {
   readonly ClaimIsExclusive: boolean;
@@ -28,6 +29,10 @@ export const guarded: Guards = {
   RetriesAreCapped: true,
   RetryReowesFailedRows: true,
 };
+
+export type Time = { readonly now: Now; readonly timeout: (ms: number) => AbortSignal };
+
+export const databaseTime: Time = { now: postgresNow, timeout: ms => AbortSignal.timeout(ms) };
 
 export type Lease = { readonly leaseMs: number; readonly marginMs: number; readonly maxTries: number };
 
@@ -229,45 +234,45 @@ const neverAborts = new AbortController().signal;
 
 const farFuture = new Date(8.64e15);
 
-function limitsWithin(guards: Guards, claimed: Claimed, now: Date, lease: Lease): Limits | undefined {
+async function limitsWithin(db: Database, guards: Guards, claimed: Claimed, time: Time, lease: Lease): Promise<Limits | undefined> {
   if (!guards.EffectWithinLease) return { deadline: farFuture, signal: neverAborts };
   const deadline = new Date(claimed.leaseUntil.getTime() - lease.marginMs);
-  const left = deadline.getTime() - now.getTime();
-  return left > 0 ? { deadline, signal: AbortSignal.timeout(left) } : undefined;
+  const left = deadline.getTime() - (await time.now(db)).getTime();
+  return left > 0 ? { deadline, signal: time.timeout(left) } : undefined;
 }
 
-export async function performClaimed(db: Database, guards: Guards, performer: Performer, claimed: Claimed, clock: Clock, lease: Lease): Promise<Performed> {
-  const checking = limitsWithin(guards, claimed, clock.now(), lease);
+export async function performClaimed(db: Database, guards: Guards, performer: Performer, claimed: Claimed, time: Time, lease: Lease): Promise<Performed> {
+  const checking = await limitsWithin(db, guards, claimed, time, lease);
   if (checking === undefined) return 'abandoned';
   if (guards.MarkerCheckedBeforeWrite && performer.find !== null) {
     const lookup = await performer.find(claimed, checking);
-    if ('failed' in lookup) return recordFailure(db, guards, claimed, lookup.failed, clock.now(), lease);
-    if ('found' in lookup) return (await settle(db, claimed, 'done', lookup.found, clock.now())) ? 'found' : 'lost';
+    if ('failed' in lookup) return recordFailure(db, guards, claimed, lookup.failed, await time.now(db), lease);
+    if ('found' in lookup) return (await settle(db, claimed, 'done', lookup.found, await time.now(db))) ? 'found' : 'lost';
   }
-  const limits = limitsWithin(guards, claimed, clock.now(), lease);
+  const limits = await limitsWithin(db, guards, claimed, time, lease);
   if (limits === undefined) return 'abandoned';
   const outcome = await performer.call(claimed, limits);
-  if ('failed' in outcome) return recordFailure(db, guards, claimed, outcome.failed, clock.now(), lease);
-  if ('refused' in outcome) return (await refuse(db, claimed, outcome.refused, clock.now())) ? 'refused' : 'lost';
-  return (await settle(db, claimed, 'done', outcome.done, clock.now())) ? 'done' : 'lost';
+  if ('failed' in outcome) return recordFailure(db, guards, claimed, outcome.failed, await time.now(db), lease);
+  if ('refused' in outcome) return (await refuse(db, claimed, outcome.refused, await time.now(db))) ? 'refused' : 'lost';
+  return (await settle(db, claimed, 'done', outcome.done, await time.now(db))) ? 'done' : 'lost';
 }
 
-export type OutboxSettings = Lease & { readonly everyMs: number; readonly clock: Clock; readonly registry: Registry };
+export type OutboxSettings = Lease & { readonly everyMs: number; readonly time: Time; readonly registry: Registry };
 
 const lapsedLine = (entry: Lapsed): string =>
   entry.state === 'failed'
-    ? `row ${entry.row} (${entry.kind}) of task ${entry.task} failed after ${String(entry.tries)} tries, and its task waits for a person if it was ready`
+    ? `row ${entry.row} (${entry.kind}) of task ${entry.task} failed after ${String(entry.tries)} tries, and its task waits for a person unless it is done`
     : `the lease on row ${entry.row} (${entry.kind}) of task ${entry.task} ran out, which counts as try ${String(entry.tries)}`;
 
-export function outbox({ everyMs, clock, registry, ...lease }: OutboxSettings, guards: Guards = guarded): Loop {
+export function outbox({ everyMs, time, registry, ...lease }: OutboxSettings, guards: Guards = guarded): Loop {
   if (lease.marginMs >= lease.leaseMs) throw new Error(`The outbox's call margin of ${String(lease.marginMs)} ms must be shorter than its lease of ${String(lease.leaseMs)} ms, or no call would have time to run.`);
   return {
     name: 'outbox',
     everyMs,
     pass: async (db, { late }) => {
-      const lines = (await expire(db, guards, clock.now(), lease)).map(lapsedLine);
+      const lines = (await expire(db, guards, await time.now(db), lease)).map(lapsedLine);
       while (!late()) {
-        const { claimed, dropped } = await claimNext(db, guards, registry, clock.now(), lease);
+        const { claimed, dropped } = await claimNext(db, guards, registry, await time.now(db), lease);
         if (dropped > 0) lines.push(`dropped ${String(dropped)} rows, because their tasks no longer stand where the rows were owed`);
         if (claimed === undefined) {
           if (dropped === 0) break;
@@ -275,7 +280,7 @@ export function outbox({ everyMs, clock, registry, ...lease }: OutboxSettings, g
         }
         const performer = registry.get(claimed.kind);
         if (performer === undefined) throw new Error(`Row ${claimed.row} was claimed for ${claimed.kind}, which no connector registers.`);
-        const performed = await performClaimed(db, guards, performer, claimed, clock, lease);
+        const performed = await performClaimed(db, guards, performer, claimed, time, lease);
         lines.push(`row ${claimed.row} (${claimed.kind}) of task ${claimed.task}: ${performed}`);
       }
       return lines;
