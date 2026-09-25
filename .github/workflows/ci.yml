@@ -69,3 +69,4 @@ jobs:
       - run: docker compose run --rm verify npm run verify -- setup
       - run: docker compose run --rm verify npm run verify -- code-change
       - run: docker compose run --rm verify npm run verify -- jira
+      - run: docker compose run --rm verify npm run verify -- e2e-report
