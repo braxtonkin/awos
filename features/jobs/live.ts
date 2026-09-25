@@ -162,7 +162,7 @@ async function finish(world: World, attempt: string): Promise<void> {
   await world.db.updateTable('attempt').set({ finished_at: new Date(), verdict: 'lost' }).where('id', '=', attempt).where('finished_at', 'is', null).execute();
 }
 
-type Started = { readonly attempt: string; readonly key: string; readonly branch: string };
+type Started = { readonly attempt: string; readonly key: string; readonly branch: string; readonly token: string };
 
 type Options = {
   readonly key?: string;
@@ -180,6 +180,7 @@ async function start(world: World, options: Options = {}): Promise<Started> {
   const key = options.key ?? `probe-${world.run}-${randomBytes(3).toString('hex')}`;
   const number = options.number ?? 1;
   const attempt = await newAttempt(world, `${key}#${String(number)}`);
+  const token = randomBytes(24).toString('hex');
   const input = {
     attempt,
     taskKey: key,
@@ -189,7 +190,7 @@ async function start(world: World, options: Options = {}): Promise<Started> {
     repositoryUrl: options.repositoryUrl ?? thisRepository,
     startCommit: options.startCommit ?? pinnedCommit,
     afterTurn: options.afterTurn ?? { kind: 'push' as const },
-    attemptToken: randomBytes(24).toString('hex'),
+    attemptToken: token,
     engineUrl: `http://${world.address}:9`,
     runAs: { name: 'Probe Person', email: 'probe@example.com', githubToken: world.githubToken, codexLogin: world.login },
   };
@@ -198,7 +199,7 @@ async function start(world: World, options: Options = {}): Promise<Started> {
   const container = job.spec?.template.spec?.containers[0];
   if (options.script !== undefined && container !== undefined) container.command = ['tini', '--', 'sh', '-c', options.script];
   await launch(world.cluster, { secret: made.secret, job });
-  return { attempt, key, branch: attemptBranch(key, number) };
+  return { attempt, key, branch: attemptBranch(key, number), token };
 }
 
 async function settled(world: World, attempt: string, ms = doneWaitMs): Promise<JobState & { readonly ms: number }> {
@@ -214,6 +215,22 @@ async function settled(world: World, attempt: string, ms = doneWaitMs): Promise<
 const secretShapes = /github_pat_\w+|ghp_\w+|eyJ[\w.-]*/g;
 
 const redact = (text: string): string => text.replace(secretShapes, '[redacted]');
+
+const loginTokens = z.object({ tokens: z.record(z.string(), z.unknown()) });
+
+type Issued = { readonly name: string; readonly value: string };
+
+function issuedTo(world: World, started: Started): readonly Issued[] {
+  const { tokens } = loginTokens.parse(JSON.parse(world.login));
+  return [
+    { name: 'the attempt token', value: started.token },
+    { name: 'the GitHub token', value: world.githubToken },
+    { name: 'the Codex login', value: world.login },
+    ...Object.entries(tokens).flatMap(([name, value]) => (typeof value === 'string' && value.length >= 16 ? [{ name: `the Codex login's ${name}`, value }] : [])),
+  ];
+}
+
+const leaksIn = (log: string, issued: readonly Issued[]): readonly string[] => issued.filter(secret => log.includes(secret.value)).map(secret => secret.name);
 
 async function rawLogOf(world: World, attempt: string): Promise<string> {
   const { items } = await world.cluster.core.listNamespacedPod({ namespace: world.cluster.namespace, labelSelector: `${labels.attempt}=${attempt}` });
@@ -346,12 +363,25 @@ async function envNames(world: World): Promise<readonly Check[]> {
   const log = await rawLogOf(world, started.attempt);
   await finish(world, started.attempt);
   const names = redact(log.split('\n').at(-1) ?? '');
+  const issued = issuedTo(world, started);
+  const leaked = [...leaksIn(log, issued), ...(redact(log) === log ? [] : ['a token shape'])];
+  const plant = await start(world, { script: 'echo "planted $ATTEMPT_TOKEN"' });
+  await settled(world, plant.attempt);
+  const plantedLog = await rawLogOf(world, plant.attempt);
+  await finish(world, plant.attempt);
+  const plantedLeaks = leaksIn(plantedLog, issuedTo(world, plant));
+  const planted = 'the log check finds the exact attempt token a Job printed, which no token shape matches';
   const forbidden = ['DATABASE_URL', 'KUBECONFIG', 'CREDENTIAL_KEY', 'REFRESH', 'SERVICEACCOUNT'].filter(word => names.includes(word));
   return [
     done.state === 'succeeded' && forbidden.length === 0 && names.includes('ATTEMPT_TOKEN')
       ? pass('the Job holds its Secret keys and no database, Kubernetes, or sealing setting', names)
       : fail('the Job holds its Secret keys and no database, Kubernetes, or sealing setting', `${done.state}; found ${forbidden.join(', ') || 'none'}: ${names}`),
-    redact(log) !== log ? fail('the Job log holds no token or login', 'a token shape appeared') : pass('the Job log holds no token or login', `searched ${String(log.length)} characters for the GitHub token and JWT prefixes`),
+    leaked.length > 0
+      ? fail('the Job log holds no token or login', `found ${leaked.join(', ')}`)
+      : pass('the Job log holds no token or login', `searched ${String(log.length)} characters for ${issued.map(secret => secret.name).join(', ')}, and for the GitHub token and JWT prefixes`),
+    plantedLeaks.includes('the attempt token')
+      ? pass(planted, `found ${plantedLeaks.join(', ')}; the token shapes alone found ${redact(plantedLog) === plantedLog ? 'nothing' : 'a shape'}`)
+      : fail(planted, `found ${plantedLeaks.join(', ') || 'nothing'} in ${String(plantedLog.length)} characters`),
   ];
 }
 
@@ -668,7 +698,7 @@ async function reproduceLane(world: World): Promise<readonly Check[]> {
       [`git clone -q ${bare} ${work}`, `echo new > ${work}/src/value.txt`, `git -C ${work} -c user.name=Probe -c user.email=probe@example.com commit -qam change`, `git -C ${work} push -q origin main`, `git -C ${work} rev-parse HEAD`].join(' && '),
     );
     await rm(work, { recursive: true, force: true });
-    const runOne = async (script: string, leftovers = ''): Promise<{ readonly log: string; readonly got: Reproduced | undefined; readonly branch: string }> => {
+    const runOne = async (script: string, leftovers = ''): Promise<{ readonly log: string; readonly got: Reproduced | undefined; readonly branch: string; readonly leaked: readonly string[] }> => {
       const started = await start(world, {
         step: 'verify',
         repositoryUrl: server.url('reproduce.git'),
@@ -681,12 +711,12 @@ async function reproduceLane(world: World): Promise<readonly Check[]> {
       await finish(world, started.attempt);
       const line = log.split('\n').find(entry => entry.startsWith('REPRODUCED '));
       const got = line === undefined ? undefined : reproduced.safeParse(JSON.parse(line.slice('REPRODUCED '.length))).data;
-      return { log, got, branch: started.branch };
+      return { log, got, branch: started.branch, leaked: leaksIn(log, issuedTo(world, started)) };
     };
     const fixing = await runOne(fixingScript);
     const probe = await runOne(secretProbe);
     const probeOutput = `${probe.got?.base.run?.output ?? ''}${probe.got?.change.run?.output ?? ''}`;
-    const leaked = [world.githubToken, world.login].filter(secret => probe.log.includes(secret));
+    const leaked = probe.leaked;
     const refusals = ['whoami reproduce', 'environment clean', 'pid 1 environ refused', 'bridge folder refused', 'bridge git refused', 'codex login refused', 'probe done'];
     const probeGood = probe.got !== undefined && refusals.every(marker => probeOutput.includes(marker)) && !probeOutput.includes('token readable') && leaked.length === 0;
     const editing = await runOne(editingScript, tamperer);
