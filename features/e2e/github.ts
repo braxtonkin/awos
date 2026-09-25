@@ -87,7 +87,9 @@ export function githubTokenFromEnvironment(env: NodeJS.ProcessEnv): string {
   return keys.data.GITHUB_TOKEN;
 }
 
-export const githubFromEnvironment = (env: NodeJS.ProcessEnv, repository: string): GitHub => githubWithToken(githubTokenFromEnvironment(env), repository);
+export function githubFromEnvironment(env: NodeJS.ProcessEnv, repository: string): GitHub {
+  return githubWithToken(githubTokenFromEnvironment(env), repository);
+}
 
 export function githubWithToken(token: string, repository: string): GitHub {
   return githubAt({
