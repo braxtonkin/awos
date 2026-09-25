@@ -137,7 +137,7 @@ type Plant = {
   readonly name: string;
   readonly world: World;
   readonly cluster?: (cluster: Cluster, attempts: readonly string[]) => Promise<unknown>;
-  readonly expect: (attempts: readonly string[]) => { readonly place: Place; readonly name: string };
+  readonly expect: (attempts: readonly string[]) => readonly { readonly place: Place; readonly name: string }[];
 };
 
 const verifyAttempt = (attempts: readonly string[]): string => attempts[2] ?? 'missing';
@@ -151,7 +151,7 @@ const plants: readonly Plant[] = [
         namespace: cluster.namespace,
         body: { metadata: { name: `autoworker-attempt-${verifyAttempt(attempts)}`, labels: { [labels.attempt]: verifyAttempt(attempts) } }, stringData: { PLANTED: 'yes' } },
       }),
-    expect: attempts => ({ place: 'cluster', name: `Secret autoworker-attempt-${verifyAttempt(attempts)}` }),
+    expect: attempts => [{ place: 'cluster', name: `Secret autoworker-attempt-${verifyAttempt(attempts)}` }],
   },
   {
     name: 'an owed outbox action',
@@ -160,17 +160,17 @@ const plants: readonly Plant[] = [
       after: db =>
         db.insertInto('outbox').values({ task_id: '1', position: 3, kind: 'ticket.transition', payload: JSON.stringify({}), acts_as: '1', idempotency_key: 'clean-world-planted-owed-row', owed_at: at(600) }).execute(),
     },
-    expect: () => ({ place: 'outbox', name: 'outbox row 3 (ticket.transition)' }),
+    expect: () => [{ place: 'outbox', name: 'outbox row 3 (ticket.transition)' }],
   },
   {
     name: 'a gap in the stored events',
     world: { ...cleanWorld, after: (db, attempts) => db.deleteFrom('attempt_event').where('attempt_id', '=', verifyAttempt(attempts)).where('seq', '=', '1').execute() },
-    expect: attempts => ({ place: 'events', name: `attempt ${verifyAttempt(attempts)} events 1` }),
+    expect: attempts => [{ place: 'events', name: `attempt ${verifyAttempt(attempts)} events 1` }],
   },
   {
     name: 'an item completed twice',
     world: { ...cleanWorld, lines: plan => (plan.step === 'verify' ? transcript(plan).flatMap(line => (line.method === 'item/completed' && line.itemId === 'a-1' ? [line, line] : [line])) : transcript(plan)) },
-    expect: attempts => ({ place: 'events', name: `attempt ${verifyAttempt(attempts)} item a-1` }),
+    expect: attempts => [{ place: 'events', name: `attempt ${verifyAttempt(attempts)} item a-1` }],
   },
   {
     name: 'a fragment left after its item completed',
@@ -179,27 +179,45 @@ const plants: readonly Plant[] = [
       prune: false,
       after: (db, attempts) => db.deleteFrom('attempt_event').where('attempt_id', '<>', verifyAttempt(attempts)).where('fragment', '=', true).execute(),
     },
-    expect: attempts => ({ place: 'fragments', name: `attempt ${verifyAttempt(attempts)} item a-1` }),
+    expect: attempts => [{ place: 'fragments', name: `attempt ${verifyAttempt(attempts)} item a-1` }],
   },
   {
-    name: 'an item that never completed in a passed attempt',
-    world: { ...cleanWorld, lines: plan => (plan.step === 'verify' ? transcript(plan).filter(line => !(line.method === 'item/completed' && line.itemId === 'a-1')) : transcript(plan)) },
-    expect: attempts => ({ place: 'replay', name: `attempt ${verifyAttempt(attempts)} item a-1` }),
+    name: 'an item left open in a passed attempt whose turn never completed',
+    world: { ...cleanWorld, lines: plan => (plan.step === 'verify' ? transcript(plan).filter(line => !(line.method === 'turn/completed' || (line.method === 'item/completed' && line.itemId === 'a-1'))) : transcript(plan)) },
+    expect: attempts => [
+      { place: 'replay', name: `attempt ${verifyAttempt(attempts)} item a-1` },
+      { place: 'replay', name: `attempt ${verifyAttempt(attempts)} turn turn-verify` },
+    ],
   },
   {
     name: 'a Verify environment never stopped',
     world: { ...cleanWorld, after: db => db.updateTable('verify_environment').set({ stopped_at: null }).execute() },
-    expect: () => ({ place: 'environments', name: 'Verify environment 1 (tests-only)' }),
+    expect: () => [{ place: 'environments', name: 'Verify environment 1 (tests-only)' }],
   },
   {
     name: "an attempt's branch left on GitHub",
     world: { ...cleanWorld, onGitHub: [...cleanWorld.onGitHub, attemptBranch(1)] },
-    expect: () => ({ place: 'github', name: `branch ${attemptBranch(1)}` }),
+    expect: () => [{ place: 'github', name: `branch ${attemptBranch(1)}` }],
   },
   {
     name: "the pull request's branch left on GitHub",
     world: { ...cleanWorld, onGitHub: [...cleanWorld.onGitHub, taskBranch] },
-    expect: () => ({ place: 'github', name: `branch ${taskBranch}` }),
+    expect: () => [{ place: 'github', name: `branch ${taskBranch}` }],
+  },
+];
+
+type Allowance = { readonly name: string; readonly world: World };
+
+const allowances: readonly Allowance[] = [
+  {
+    name: 'a reasoning item Codex left open in a turn that completed',
+    world: {
+      ...cleanWorld,
+      lines: plan =>
+        plan.step === 'verify'
+          ? transcript(plan).flatMap(line => (line.method === 'item/started' && line.itemId === 'a-1' ? [app('item/started', { turnId: `turn-${plan.step}`, item: { id: 'rs-1', type: 'reasoning', summary: [], content: [] } }, 'rs-1'), line] : [line]))
+          : transcript(plan),
+    },
   },
 ];
 
@@ -244,14 +262,19 @@ async function cleanLane(args: readonly string[]): Promise<readonly Check[]> {
           try {
             const found = await leftovers(sourcesFor(db, plant.world), ticket);
             const expected = plant.expect(attempts);
-            const named = found.length === 1 && found[0]?.place === expected.place && found[0].name === expected.name;
-            return named ? pass(`the clean check fails on ${plant.name} and names it`, describe(found)) : fail(`the clean check fails on ${plant.name} and names it`, `expected ${expected.place}: ${expected.name}, found ${describe(found)}`);
+            const named = found.length === expected.length && expected.every(entry => found.some(each => each.place === entry.place && each.name === entry.name));
+            return named ? pass(`the clean check fails on ${plant.name} and names it`, describe(found)) : fail(`the clean check fails on ${plant.name} and names it`, `expected ${expected.map(entry => `${entry.place}: ${entry.name}`).join('; ')}, found ${describe(found)}`);
           } finally {
             const { items } = await cluster.core.listNamespacedSecret({ namespace: cluster.namespace, labelSelector: labels.attempt });
             await Promise.all(items.map(secret => cluster.core.deleteNamespacedSecret({ namespace: cluster.namespace, name: secret.metadata?.name ?? '' })));
           }
         });
         checks.push(check);
+      }
+      for (const allowance of allowances) {
+        const found = await inWorld(postgres, allowance.world, db => leftovers(sourcesFor(db, allowance.world), ticket));
+        const name = `the clean check accepts ${allowance.name}`;
+        checks.push(found.length === 0 ? pass(name, describe(found)) : fail(name, describe(found)));
       }
       return checks;
     });
@@ -350,7 +373,7 @@ async function reportLane(): Promise<readonly Check[]> {
 export const cleanScenarios: readonly Scenario[] = [
   {
     name: 'e2e-clean',
-    summary: 'checks a finished world for leftovers against Postgres, kind, and GitHub, then plants a labeled Secret, an owed outbox row, an event gap, a twice-completed item, a left fragment, and an unstopped environment, and passes only when each is named',
+    summary: 'checks a finished world for leftovers against Postgres, kind, and GitHub, then plants a labeled Secret, an owed outbox row, an event gap, a twice-completed item, a left fragment, an item left open in a turn that never completed, an unstopped environment, and two branches left on GitHub, and passes only when each is named and a reasoning item Codex left open in a turn that completed is accepted',
     run: cleanLane,
   },
   {

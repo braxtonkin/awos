@@ -29,7 +29,7 @@ async function replayed(db: Database, attempt: string): Promise<{ readonly store
   const rows = await db.selectFrom('attempt_event').select(['seq', 'kind', 'method', 'item_id', 'body']).where('attempt_id', '=', attempt).orderBy('seq').execute();
   const stored = rows.filter(row => row.method === 'item/completed' && row.item_id !== null).flatMap(row => (row.item_id === null ? [] : [row.item_id]));
   const transcript = reduce(rows.map(row => ({ kind: row.kind, method: row.method, body: row.body })));
-  return { stored, replayed: transcript.items.filter(item => item.completed).map(item => item.id) };
+  return { stored, replayed: transcript.items.filter(item => item.status === 'completed').map(item => item.id) };
 }
 
 export async function recordChecks(db: Database, ticket: string, runAs: string, description: string): Promise<readonly Check[]> {
