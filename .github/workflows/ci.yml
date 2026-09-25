@@ -72,3 +72,4 @@ jobs:
       - run: docker compose run --rm verify npm run verify -- e2e-report
       - run: docker compose run --rm verify npm run verify -- launch-faults
       - run: docker compose run --rm verify npm run verify -- e2e-payload
+      - run: docker compose run --rm verify npm run verify -- stand-in-solutions
