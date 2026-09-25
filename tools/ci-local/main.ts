@@ -129,8 +129,8 @@ const runStep = z.strictObject({ name: z.string().optional(), run: z.string() })
 const workflowSchema = z.strictObject({
   name: z.string().optional(),
   on: z.unknown(),
-  concurrency: z.unknown(),
-  permissions: z.unknown(),
+  concurrency: z.unknown().optional(),
+  permissions: z.unknown().optional(),
   jobs: z.record(z.string(), z.strictObject({ 'runs-on': z.string(), 'timeout-minutes': z.string().optional(), steps: z.array(z.unknown()).min(1) })),
 });
 
