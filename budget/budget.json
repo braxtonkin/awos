@@ -7,7 +7,19 @@
     "**/package-lock.json",
     "shared/db/types.ts"
   ],
+  "breakable": [
+    "**/*.{ts,tsx,mts,cts,js,mjs,cjs,sql,tla,cfg}"
+  ],
   "roles": [
+    {
+      "name": "fixtures",
+      "why": "Snapshots and test data under a fixtures folder, such as the dashboard screens' HTML and JSON, are copied or captured rather than written, so no line of them can be broken. They count lines and characters so a growing snapshot is still a reviewed decision, but no longest-line ceiling.",
+      "files": [
+        "**/fixtures/**"
+      ],
+      "lines": 0,
+      "characters": 0
+    },
     {
       "name": "e2e-harness",
       "why": "The end-to-end harness takes a sandbox ticket to a merged pull request. It proves one path through every feature, so it grows with each connector, and each growth should name what it proves that the feature simulations do not.",
@@ -71,8 +83,7 @@
         "*.md"
       ],
       "lines": 554,
-      "characters": 153281,
-      "longest-line": 4553
+      "characters": 153281
     },
     {
       "name": "product",
