@@ -1,0 +1,29 @@
+{
+  "why": "Dashboard waves 0 and 1. U2 puts a browser in the verify tool with screen gates, contrast checks, and reviewed screen fixtures (tools, fixtures, and the Geist font notice in docs). U0 and U1 model and build the person-request loop (Requests.tla, features/requests, shared/requests.ts, act.ts, the person_request migration). U3's local engine is the world every browser lane runs in (e2e harness). U1c publishes the engine's workflow steps and Verify providers at start (product, engine-start checks, two tables).",
+  "raise": {
+    "characters/docs": 18913,
+    "characters/e2e-harness": 35966,
+    "characters/feature-verification": 60092,
+    "characters/fixtures": 71256,
+    "characters/migrations": 2873,
+    "characters/product": 21349,
+    "characters/tla-models": 5065,
+    "characters/tools": 76010,
+    "lines/docs": 130,
+    "lines/e2e-harness": 708,
+    "lines/feature-verification": 1324,
+    "lines/fixtures": 434,
+    "lines/migrations": 65,
+    "lines/product": 427,
+    "lines/tla-models": 166,
+    "lines/tools": 1516,
+    "structure/ci-steps": 1,
+    "structure/dev-dependencies": 1,
+    "structure/features": 1,
+    "structure/migrations": 2,
+    "structure/named-constraints-indexes-triggers": 19,
+    "structure/tables": 3,
+    "structure/tla-models": 1,
+    "structure/verify-scenarios": 8
+  }
+}
