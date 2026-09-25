@@ -244,16 +244,16 @@ const configOf = (parsed: ParsedConfig, lines: readonly string[], value: (name: 
 
 const listing = (section: Section, properties: readonly string[]): readonly string[] => (properties.length === 0 ? [] : [section, ...properties.map(property => `    ${property}`)]);
 
-function checkHolds(model: Model, file: string, text: string): Check {
+function checkHolds(model: Model, file: string, text: string, sized: Pick<TlcOptions, 'heap'> = {}): Check {
   const name = `${file} holds every property`;
   const parsed = parseConfig(text);
   const liveness = [...parsed.listed.PROPERTIES].filter(property => isLiveness(model, property));
   if (liveness.length === 0) {
-    const run = runTlc(model.module, text);
+    const run = runTlc(model.module, text, sized);
     return run.clean ? pass(name, `No error has been found in ${String(run.distinctStates)} distinct states, checked in ${run.seconds.toFixed(1)} s`) : fail(name, failure(run));
   }
-  const safety = runTlc(model.module, configOf(parsed, [...listing('INVARIANTS', [...parsed.listed.INVARIANTS]), ...listing('PROPERTIES', [...parsed.listed.PROPERTIES].filter(property => !isLiveness(model, property)))]));
-  const settles = runTlc(model.module, configOf(parsed, listing('PROPERTIES', liveness)), holdsLiveness);
+  const safety = runTlc(model.module, configOf(parsed, [...listing('INVARIANTS', [...parsed.listed.INVARIANTS]), ...listing('PROPERTIES', [...parsed.listed.PROPERTIES].filter(property => !isLiveness(model, property)))]), sized);
+  const settles = runTlc(model.module, configOf(parsed, listing('PROPERTIES', liveness)), { ...holdsLiveness, ...sized });
   const failed = [safety, settles].find(run => !run.clean);
   if (failed !== undefined) return fail(name, failure(failed));
   return pass(
@@ -297,7 +297,7 @@ function runModel(model: Model, args: readonly string[]): readonly Check[] {
   }
   const nightlyText = readConfig(model.module, configs.nightly);
   const nightlyReview = [checkConfig(model, configs.nightly, nightlyText), checkPlants(model, configs.nightly, nightlyText)];
-  if (nightly) return [...nightlyReview, checkHolds(model, configs.nightly.file, nightlyText)];
+  if (nightly) return [...nightlyReview, checkHolds(model, configs.nightly.file, nightlyText, { heap: 'nightly' })];
   return [
     checkConfig(model, configs.pr, prText),
     checkPlants(model, configs.pr, prText),
