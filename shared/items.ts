@@ -8,12 +8,14 @@ export const isFragmentMethod = (method: string | undefined): method is Fragment
 
 export type TurnStatus = 'inProgress' | 'completed' | 'interrupted' | 'failed';
 
+export type ItemStatus = 'inProgress' | 'completed' | 'abandoned';
+
 export type Item = {
   readonly id: string;
   readonly turnId: string;
   readonly type: string;
   readonly text: string;
-  readonly completed: boolean;
+  readonly status: ItemStatus;
   readonly clientId: string | null;
 };
 
@@ -57,7 +59,9 @@ function finalText(item: ThreadItem): string | undefined {
   }
 }
 
-type Draft = { readonly turns: Map<string, { status: TurnStatus; readonly items: string[] }>; readonly items: Map<string, Item> };
+type DraftItem = Omit<Item, 'status'> & { readonly completed: boolean };
+
+type Draft = { readonly turns: Map<string, { status: TurnStatus; readonly items: string[] }>; readonly items: Map<string, DraftItem> };
 
 function turnOf(draft: Draft, turnId: string): { status: TurnStatus; readonly items: string[] } {
   const known = draft.turns.get(turnId);
@@ -67,7 +71,7 @@ function turnOf(draft: Draft, turnId: string): { status: TurnStatus; readonly it
   return made;
 }
 
-function place(draft: Draft, item: Item): void {
+function place(draft: Draft, item: DraftItem): void {
   const turn = turnOf(draft, item.turnId);
   if (!draft.items.has(item.id)) turn.items.push(item.id);
   draft.items.set(item.id, item);
@@ -110,10 +114,15 @@ function step(draft: Draft, body: unknown): void {
   }
 }
 
+const statusOf = (completed: boolean, turn: TurnStatus | undefined): ItemStatus => (completed ? 'completed' : turn === 'inProgress' ? 'inProgress' : 'abandoned');
+
 export function reduce(lines: Iterable<{ readonly body: unknown }>): Transcript {
   const draft: Draft = { turns: new Map(), items: new Map() };
   for (const line of lines) step(draft, line.body);
-  return { turns: [...draft.turns].map(([id, turn]) => ({ id, status: turn.status, items: [...turn.items] })), items: [...draft.items.values()] };
+  return {
+    turns: [...draft.turns].map(([id, turn]) => ({ id, status: turn.status, items: [...turn.items] })),
+    items: [...draft.items.values()].map(({ completed, ...item }) => ({ ...item, status: statusOf(completed, draft.turns.get(item.turnId)?.status) })),
+  };
 }
 
 export function finalMessage(transcript: Transcript): string | undefined {
@@ -122,5 +131,5 @@ export function finalMessage(transcript: Transcript): string | undefined {
   const byId = new Map(transcript.items.map(item => [item.id, item]));
   return turn.items
     .map(id => byId.get(id))
-    .findLast(item => item?.type === 'agentMessage' && item.completed)?.text;
+    .findLast(item => item?.type === 'agentMessage' && item.status === 'completed')?.text;
 }

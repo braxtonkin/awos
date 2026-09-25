@@ -181,7 +181,7 @@ async function lostSummary(db: Database, step: Step): Promise<readonly string[]>
     .executeTakeFirst();
   if (lost?.verdict !== 'lost') return [];
   const lines = await db.selectFrom('attempt_event').select('body').where('attempt_id', '=', lost.id).where('kind', '=', 'app').orderBy('seq').execute();
-  const finished = reduce(lines).items.filter(item => item.completed && item.type !== 'userMessage' && item.type !== 'reasoning');
+  const finished = reduce(lines).items.filter(item => item.status === 'completed' && item.type !== 'userMessage' && item.type !== 'reasoning');
   const listed = finished.map(item => `- ${item.type}: ${item.text.trim().split('\n')[0]?.slice(0, 200) ?? ''}`);
   const pushed = lost.last_pushed === null ? 'It pushed nothing, so this attempt starts where it started.' : `It pushed ${lost.last_pushed}, and this attempt starts from that commit.`;
   return [section(`What lost attempt ${lost.id} finished`, [pushed, ...(listed.length === 0 ? ['It finished no step.'] : listed)].join('\n'))];
