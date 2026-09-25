@@ -38,8 +38,8 @@
         "{features,services,shared}/**/*-model.ts",
         "{features,services,shared}/**/*.test.ts"
       ],
-      "lines": 16402,
-      "characters": 785527,
+      "lines": 16423,
+      "characters": 786847,
       "longest-line": 504
     },
     {
@@ -59,8 +59,8 @@
         "tools/**",
         "eslint.config.ts"
       ],
-      "lines": 4898,
-      "characters": 213603,
+      "lines": 4900,
+      "characters": 213705,
       "longest-line": 547
     },
     {

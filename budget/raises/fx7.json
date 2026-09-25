@@ -1,9 +1,0 @@
-{
-  "why": "The setup, engine-checks, and engine-start checks now wait on the engine's own lines and exit under one shared hang ceiling, and say why each wait stopped, so load cannot fail them.",
-  "raise": {
-    "characters/feature-verification": 1320,
-    "characters/tools": 102,
-    "lines/feature-verification": 21,
-    "lines/tools": 2
-  }
-}
