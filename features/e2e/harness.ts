@@ -1,8 +1,7 @@
 import { randomBytes } from 'node:crypto';
-import { mkdir, readdir, readFile, rm } from 'node:fs/promises';
+import { mkdir, rm } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { join, relative } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
 import { connectCluster } from '../../shared/cluster.ts';
 import { connect, type Database } from '../../shared/db/client.ts';
 import { evidenceText } from '../../shared/reproduction.ts';
@@ -14,10 +13,11 @@ import type { Entry } from './catalog.ts';
 import type { CleanSources } from './clean.ts';
 import { drivers, type DriverName } from './driver.ts';
 import { steps, walk, type DriverEnd, type Reached, type Walk } from './frontier.ts';
-import type { GitHub, SeedFile } from './github.ts';
+import type { GitHub } from './github.ts';
 import type { Comment, Jira } from './jira.ts';
 import { agentTurnMs, plantedSecretCheck, recordChecks } from './record-checks.ts';
 import { linksFrom, renderReport, seconds, stepRuns, type StepRun } from './report.ts';
+import { sandboxSeed } from './sandbox-seed.ts';
 import type { World } from './world.ts';
 
 export type Inspect = (scope: { readonly database: Database; readonly clean: CleanSources; readonly ticket: string }) => Promise<readonly Check[]>;
@@ -44,25 +44,12 @@ export type RunResult = {
   readonly steps: readonly StepRun[];
 };
 
-const sandboxFolder = fileURLToPath(new URL('sandbox/', import.meta.url));
-const skipped = new Set(['node_modules']);
 const overheadBudgetMs = 60_000;
 const timeoutGraceMs = 15_000;
 const filedToMergedBudgetMs = 45 * 60_000;
 const filedToCleanBudgetMs = 45 * 60_000;
 const autoworkerOverheadBudgetMs = 10 * 60_000;
 const driverStopWaitMs = 30_000;
-
-async function sandboxFiles(folder: string): Promise<readonly SeedFile[]> {
-  const files: SeedFile[] = [];
-  for (const entry of await readdir(folder, { withFileTypes: true, recursive: true })) {
-    const path = join(entry.parentPath, entry.name);
-    const inside = relative(folder, path).split('\\').join('/');
-    if (!entry.isFile() || inside.split('/').some(part => skipped.has(part))) continue;
-    files.push({ path: inside, content: await readFile(path, 'utf8') });
-  }
-  return files;
-}
 
 const runPrefix = 'e2e/run-';
 
@@ -71,7 +58,7 @@ const newRunId = (): string => `${new Date().toISOString().replace(/[-:]/g, '').
 export async function createRunBranch(github: GitHub): Promise<{ readonly id: string; readonly branch: string; readonly seed: string }> {
   const id = newRunId();
   const branch = `${runPrefix}${id}`;
-  const seed = await github.seedBranch(branch, await sandboxFiles(sandboxFolder), `Seed ${branch} from the sandbox folder`);
+  const seed = await github.seedBranch(branch, await sandboxSeed(), `Seed ${branch} from the sandbox folder`);
   return { id, branch, seed };
 }
 

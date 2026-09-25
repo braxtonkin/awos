@@ -37,6 +37,22 @@ jobs:
       - run: docker compose run --rm verify npm ci
       - run: docker compose run --rm verify npm run verify -- models
 
+  sims:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - run: docker compose build verify
+      - run: docker compose run --rm verify npm ci
+      - run: docker compose run --rm verify npm run verify -- sims --mutant all
+      - run: docker compose run --rm verify npm run verify -- environments-sim --mutant all --profile crashes
+      - run: docker compose run --rm verify npm run verify -- environments-sim --profile all
+      - run: docker compose run --rm verify npm run verify -- outbox-sim --profile all
+      - run: docker compose run --rm verify npm run verify -- routines-sim --profile all
+      - run: docker compose run --rm verify npm run verify -- bridge-sim --seeds 20
+
   simulation:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -48,11 +64,12 @@ jobs:
       - run: docker compose run --rm verify npm ci
       - run: docker compose run --rm verify npm run verify -- migrations
       - run: docker compose run --rm verify npm test
-      - run: docker compose run --rm verify npm run verify -- tasks-sim --mutant all
-      - run: docker compose run --rm verify npm run verify -- credentials-sim --mutant all
       - run: docker compose run --rm verify npm run verify -- engine-checks
-      - run: docker compose run --rm verify npm run verify -- github-sim --mutant all
       - run: docker compose run --rm verify npm run verify -- engine-start
+      - run: docker compose run --rm verify npm run verify -- setup
       - run: docker compose run --rm verify npm run verify -- code-change
-      - run: docker compose run --rm verify npm run verify -- land-sim --seeds 200 --mutant all
       - run: docker compose run --rm verify npm run verify -- jira
+      - run: docker compose run --rm verify npm run verify -- e2e-report
+      - run: docker compose run --rm verify npm run verify -- launch-faults
+      - run: docker compose run --rm verify npm run verify -- e2e-payload
+      - run: docker compose run --rm verify npm run verify -- stand-in-solutions

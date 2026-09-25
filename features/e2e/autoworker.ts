@@ -13,6 +13,7 @@ import { connect, type Database } from '../../shared/db/client.ts';
 import { checksOf, fail, pass, type Check } from '../../tools/verify/check.ts';
 import { buildAttemptImage, ensureRegistry, jobNamespace, kindAddress, kubernetes, pushByDigest, registry, repositoryRoot, sh } from '../../tools/verify/cluster.ts';
 import { kind } from '../../tools/verify/kind.ts';
+import { sandboxCommands } from './sandbox-seed.ts';
 import type { EngineWorld } from './world.ts';
 
 const run = promisify(execFile);
@@ -244,7 +245,7 @@ function setupFile(drive: Drive, login: string, accountId: string): object {
   return {
     admin: owner,
     people,
-    repositories: [{ github: drive.github.repository, branch: drive.branch, fastTestCommand: 'npm ci && npm test', setupCommand: 'npm ci' }],
+    repositories: [{ github: drive.github.repository, branch: drive.branch, fastTestCommand: sandboxCommands.fastTest, setupCommand: sandboxCommands.setup }],
     routines: [
       {
         name: 'End to end',

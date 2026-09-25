@@ -1,29 +1,24 @@
 import { spawn } from 'node:child_process';
-import { cp, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
+import { behaviorOf, outputLimit, reproductionPath, type Behavior, type RanScript, type Reproduction, type Side } from '../../shared/reproduction.ts';
 import { review as reviewSchema } from '../../shared/review.ts';
 import { fail, pass, type Check, type Scenario } from '../../tools/verify/check.ts';
 import { catalog, type Entry } from './catalog.ts';
 import { standInPlan } from './codex-stand-in.ts';
 import { execute, type Exit } from './process.ts';
 import { tokenUsageMethod } from './report.ts';
+import { sandboxCommands, writeSandbox } from './sandbox-seed.ts';
 import { identity, reproductionScript, solutions, type Solution } from './solutions.ts';
 
 const standIn = fileURLToPath(new URL('codex-stand-in.ts', import.meta.url));
-const sandbox = fileURLToPath(new URL('sandbox/', import.meta.url));
 const prompts = new URL('../code-change/prompts/', import.meta.url);
 const workspace = '/workspace';
-const baseFolder = '/tmp/autoworker-base';
 const sessionTimeoutMs = 120_000;
-const expected = {
-  show: "sh -c 'cat /tmp/autoworker-reproduce.sh'",
-  before: "sh -c 'cd /tmp/autoworker-base && sh /tmp/autoworker-reproduce.sh'",
-  after: "sh -c 'cd /workspace && sh /tmp/autoworker-reproduce.sh'",
-} as const;
 
 const environment = (): Readonly<Record<string, string>> => ({
   ...Object.fromEntries(Object.entries(process.env).flatMap(([key, value]) => (value === undefined || key === 'FORCE_COLOR' ? [] : [[key, value]]))),
@@ -37,8 +32,6 @@ async function shellOk(command: string, cwd: string): Promise<string> {
   if (exit.code !== 0) throw new Error(`${command} exited ${String(exit.code)}: ${exit.output.slice(-1500)}`);
   return exit.output.trim();
 }
-
-const copySandbox = (to: string): Promise<void> => cp(sandbox, to, { recursive: true, filter: source => !source.includes('node_modules') });
 
 const line = z.looseObject({ method: z.string().optional(), params: z.unknown().optional() });
 
@@ -110,15 +103,15 @@ const planOf = (run: Session): string => reviewOf(run)?.blocks.flatMap(block => 
 async function promptFor(step: 'specify' | 'implement' | 'verify', input: string): Promise<string> {
   const head = await readFile(new URL(`${step}.md`, prompts), 'utf8');
   const section = (title: string, body: string): string => `## ${title}\n\n${body.trim()}`;
-  return `${[head.trim(), section('Goal', 'Take each sandbox ticket to a merged pull request.'), section('Fast test command', '`npm ci && npm test`'), section('Input', input)].join('\n\n')}\n`;
+  return `${[head.trim(), section('Goal', 'Take each sandbox ticket to a merged pull request.'), section('Fast test command', `\`${sandboxCommands.fastTest}\``), section('Input', input)].join('\n\n')}\n`;
 }
 
 const ticketOf = (entry: Entry): string => `Ticket SBX-1: ${entry.summary}\n\n${entry.description.trim()}`;
 
 async function freshWorkspace(): Promise<string> {
   await rm(workspace, { recursive: true, force: true });
-  await rm(baseFolder, { recursive: true, force: true });
-  await copySandbox(workspace);
+  await rm(reproductionPath, { force: true });
+  await writeSandbox(workspace);
   await shellOk('git init -q -b main && git config user.name Sandbox && git config user.email sandbox@example.com && git add -A && git commit -q -m "Seed the sandbox"', workspace);
   return shellOk('git rev-parse HEAD', workspace);
 }
@@ -130,24 +123,49 @@ const turnChecks = (label: string, run: Session): readonly Check[] => [
   run.usage.length === 1 ? pass(`${label}: one token usage update`, `${String(run.usage[0] ?? 0)} input tokens`) : fail(`${label}: one token usage update`, `${String(run.usage.length)} updates`),
 ];
 
-function verifyChecks(label: string, run: Session, before: number, after: number, behavior: 'fixed' | 'still_wrong'): readonly Check[] {
-  const commands = commandsOf(run);
-  const at = (text: string): number => commands.findIndex(ran => ran.command === text);
-  const [show, beforeAt, afterAt] = [at(expected.show), at(expected.before), at(expected.after)];
-  const [beforeRan, afterRan] = [commands[beforeAt], commands[afterAt]];
-  const ran = commands.map(entry => `${entry.command} exited ${String(entry.exitCode)}`).join('; ');
+const ranScript = (exit: Exit): RanScript => ({ exitCode: exit.code, timedOut: false, output: exit.output.slice(-outputLimit) });
+
+async function side(at: string, script: string, npmCache: string): Promise<Side> {
+  const folder = await mkdtemp(join(tmpdir(), 'stand-in-side-'));
+  try {
+    const [tree, home, temporary] = [join(folder, 'tree'), join(folder, 'home'), join(folder, 'tmp')];
+    for (const made of [tree, home, temporary]) await mkdir(made);
+    const checkout = await shell(`git archive --format=tar -o "${folder}/tree.tar" ${at} && tar -x -C "${tree}" -f "${folder}/tree.tar"`, workspace);
+    if (checkout.code !== 0) return { commit: at, checkout: checkout.output.slice(-outputLimit), setup: null, run: null };
+    await writeFile(join(folder, 'reproduce.sh'), script);
+    const env = { PATH: process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin', HOME: home, TMPDIR: temporary, LANG: 'C.UTF-8', CI: 'true', npm_config_cache: npmCache };
+    const given = { cwd: tree, env, timeoutMs: 300_000, signal: new AbortController().signal };
+    const setup = await execute('sh', ['-c', sandboxCommands.setup], given);
+    const ran = setup.code === 0 ? await execute('sh', [join(folder, 'reproduce.sh')], given) : null;
+    return { commit: at, checkout: null, setup: ranScript(setup), run: ran === null ? null : ranScript(ran) };
+  } finally {
+    await rm(folder, { recursive: true, force: true });
+  }
+}
+
+async function reproduce(base: string, change: string, npmCache: string): Promise<Reproduction> {
+  const script = await readFile(reproductionPath, 'utf8').catch(() => '');
+  if (script.trim() === '') return { state: 'no_script', reason: `the agent left no script at ${reproductionPath}` };
+  return { state: 'ran', script, base: await side(base, script, npmCache), change: await side(change, script, npmCache) };
+}
+
+const sideLine = (where: string, given: Side): string =>
+  `${where} ${given.commit.slice(0, 7)}: ${given.checkout === null ? `setup exited ${String(given.setup?.exitCode ?? 'never')}, script exited ${String(given.run?.exitCode ?? 'never')}` : 'checkout failed'}`;
+
+async function verifyChecks(label: string, run: Session, base: string, npmCache: string, behavior: Exclude<Behavior, null>): Promise<readonly Check[]> {
+  const change = await shellOk('git rev-parse HEAD', workspace);
   const found = reviewOf(run);
+  const reproduction = await reproduce(base, change, npmCache);
+  const ran = reproduction.state === 'ran' ? `${sideLine('base', reproduction.base)}; ${sideLine('change', reproduction.change)}` : reproduction.reason;
+  const settled = behaviorOf(reproduction);
   return [
     ...turnChecks(label, run),
-    show >= 0 && show < beforeAt && beforeAt < afterAt ? pass(`${label}: the three runs come in order`, ran) : fail(`${label}: the three runs come in order`, ran),
-    beforeRan?.exitCode === before && afterRan?.exitCode === after
-      ? pass(`${label}: before exits ${String(before)} and after exits ${String(after)}`, afterRan.aggregatedOutput.trim().slice(0, 300))
-      : fail(`${label}: before exits ${String(before)} and after exits ${String(after)}`, ran),
-    found?.behavior === behavior ? pass(`${label}: the review says ${behavior}`, found.summary) : fail(`${label}: the review says ${behavior}`, JSON.stringify(found ?? messagesOf(run).at(-1) ?? null).slice(0, 500)),
+    found?.outcome === 'done' && found.behavior === null ? pass(`${label}: the review is done and leaves behavior to AutoWorker`, found.summary) : fail(`${label}: the review is done and leaves behavior to AutoWorker`, JSON.stringify(found ?? messagesOf(run).at(-1) ?? null).slice(0, 500)),
+    settled === behavior ? pass(`${label}: the script on fresh base and change checkouts settles ${behavior}`, ran) : fail(`${label}: the script on fresh base and change checkouts settles ${behavior}`, `settled ${String(settled)}: ${ran}`),
   ];
 }
 
-async function drive(entry: Entry, solution: Solution): Promise<readonly Check[]> {
+async function drive(entry: Entry, solution: Solution, npmCache: string): Promise<readonly Check[]> {
   const base = await freshWorkspace();
   const specify = await session(await promptFor('specify', ticketOf(entry)));
   const plan = planOf(specify);
@@ -171,15 +189,14 @@ async function drive(entry: Entry, solution: Solution): Promise<readonly Check[]
   await commit(`AutoWorker implements ${entry.name}`);
   const verifyPrompt = await promptFor('verify', `${ticketOf(entry)}\n\nPlan:\n\n${plan}\n\nBase commit: ${base}`);
   const verify = await session(verifyPrompt);
-  const baseHead = await shellOk('git rev-parse HEAD', baseFolder).catch((error: unknown) => String(error));
   checks.push(
-    ...verifyChecks(`${entry.name} Verify`, verify, 1, 0, 'fixed'),
-    baseHead === base ? pass(`${entry.name} Verify: ${baseFolder} is a worktree at the base commit`, base) : fail(`${entry.name} Verify: ${baseFolder} is a worktree at the base commit`, baseHead),
+    ...(await verifyChecks(`${entry.name} Verify`, verify, base, npmCache, 'fixed')),
     (await shellOk('git status --porcelain', workspace)) === '' ? pass(`${entry.name} Verify: changes no file in the repository`, 'clean') : fail(`${entry.name} Verify: changes no file in the repository`, await shellOk('git status --porcelain', workspace)),
   );
   await writeFile(join(workspace, entry.file), identity(entry));
   await commit(`Plant an identity ${entry.name}`);
-  checks.push(...verifyChecks(`${entry.name} Verify of an identity`, await session(verifyPrompt), 1, 1, 'still_wrong'));
+  await rm(reproductionPath, { force: true });
+  checks.push(...(await verifyChecks(`${entry.name} Verify of an identity`, await session(verifyPrompt), base, npmCache, 'still_wrong')));
   return checks;
 }
 
@@ -198,8 +215,10 @@ async function solutionChecks(): Promise<readonly Check[]> {
   ];
   const folder = await mkdtemp(join(tmpdir(), 'stand-in-sandbox-'));
   try {
-    await copySandbox(folder);
+    await writeSandbox(folder);
     await shellOk('npm ci --no-audit --no-fund', folder);
+    const typecheck = await shell('npm run typecheck', folder);
+    checks.push(typecheck.code === 0 ? pass("the seeded sandbox passes its own CI's typecheck", 'tsc --noEmit exit 0') : fail("the seeded sandbox passes its own CI's typecheck", typecheck.output.slice(-1500)));
     for (const entry of catalog) {
       const solution = solutions[entry.name];
       if (solution === undefined) continue;
@@ -232,13 +251,18 @@ async function solutionChecks(): Promise<readonly Check[]> {
 
 export const standInSolutionsScenario: Scenario = {
   name: 'stand-in-solutions',
-  summary: "proves the Codex stand-in's solution for every catalog entry with the sandbox's vitest, then drives the stand-in over stdio through Specify, Implement, and Verify in a sandbox repository at /workspace",
+  summary: "proves the Codex stand-in's solution for every catalog entry with the sandbox's vitest, then drives the stand-in over stdio through Specify, Implement, and Verify in a sandbox repository at /workspace, and runs Verify's script on fresh base and change checkouts as the Job does",
   run: async () => {
     const checks: Check[] = [...(await solutionChecks())];
     checks.push(await roundTripPlan());
-    for (const entry of catalog) {
-      const solution = solutions[entry.name];
-      if (solution !== undefined) checks.push(...(await drive(entry, solution)));
+    const npmCache = await mkdtemp(join(tmpdir(), 'stand-in-npm-'));
+    try {
+      for (const entry of catalog) {
+        const solution = solutions[entry.name];
+        if (solution !== undefined) checks.push(...(await drive(entry, solution, npmCache)));
+      }
+    } finally {
+      await rm(npmCache, { recursive: true, force: true });
     }
     return checks;
   },

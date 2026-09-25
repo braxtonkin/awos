@@ -163,7 +163,7 @@ export async function unlaunched(db: Database, workflows: Workflows): Promise<re
     .select('attempt.id')
     .where('attempt.finished_at', 'is', null)
     .where('attempt.job_created_at', 'is', null)
-    .where('attempt.bridge_pid', 'is', null)
+    .where('attempt.bridge_process', 'is', null)
     .where(eb => eb.or(pairs.map(([workflow, step]) => eb.and([eb('task.workflow', '=', workflow), eb('attempt.step', '=', step)]))))
     .orderBy('attempt.id')
     .execute();

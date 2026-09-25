@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { reproduction } from '../../shared/reproduction.ts';
 
-export const protocolVersion = 1;
+export const protocolVersion = 2;
 
 export const batchLimit = 256;
 
@@ -19,7 +19,7 @@ export const commandRequestId = (seq: number): string => `command-${String(seq)}
 export const headers = {
   attempt: 'x-autoworker-attempt',
   protocol: 'x-autoworker-protocol',
-  pid: 'x-autoworker-pid',
+  process: 'x-autoworker-process',
   image: 'x-autoworker-image',
 } as const;
 
@@ -35,7 +35,7 @@ export const caller = z.object({
   attempt: attemptId,
   token: z.string().min(32).max(200),
   protocol: z.coerce.number().pipe(z.int()),
-  pid: z.coerce.number().pipe(number),
+  process: z.uuid(),
   image: z.string().min(1).max(500),
 });
 

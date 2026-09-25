@@ -5,7 +5,7 @@ import { basename, dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { fail, pass, type Check, type Scenario } from './check.ts';
 
-type Tool = 'tsc' | 'node' | 'eslint' | 'depcruise' | 'check' | 'shape' | 'sql-comments' | 'model-names' | 'step-names' | 'strict-schemas' | 'ci-plan' | 'db-types' | 'models';
+type Tool = 'tsc' | 'node' | 'eslint' | 'depcruise' | 'check' | 'shape' | 'sql-comments' | 'model-names' | 'step-names' | 'strict-schemas' | 'ci-plan' | 'db-types' | 'models' | 'migration-versions';
 
 type Edit = { readonly from: string; readonly to: string };
 
@@ -62,6 +62,17 @@ const explainedComment = `${plantedMigration}:2 holds the SQL comment "-- explai
 const hiddenComment = `${plantedMigration}:2 holds the SQL comment "-- hidden"`;
 
 const plantedConfig = 'features/planted/Planted.cfg';
+
+const clashingMigration = 'db/migrations/20260923220000_planted.sql';
+
+const clash = `${clashingMigration} shares version 20260923220000 with db/migrations/20260923220000_tasks.sql`;
+
+const owing = "import type { Enqueue } from '../../shared/actions.ts';\nimport type { Database } from '../../shared/db/client.ts';\n\nconst owed = { task: 't1', actsAs: 'p1', now: new Date() };\n\n";
+
+const livenessModel = (section: string): string =>
+  `import { defineModel } from '../../tools/verify/models.ts';\n\nconst floors = { Limit: 2 };\n\nexport const scenarios = [\n  defineModel({\n    name: 'planted',\n    module: new URL('Planted.tla', import.meta.url),\n    configs: { pr: { file: 'Planted.cfg', floors }, nightly: { file: 'Planted.cfg', floors } },\n    guards: ['Fair'],\n    properties: { Settles: '${section}' },\n    liveness: ['Settles'],\n    mutants: [{ guard: 'Fair', property: 'Settles' }],\n  }),\n];\n`;
+
+const plantedSpec = '---- MODULE Planted ----\nEXTENDS Naturals\nCONSTANTS Limit, Fair\nVARIABLE x\nTypeOK == x \\in 0..Limit\nInit == x = 0\nNext == x < Limit /\\ x\' = x + 1\nSpec == Init /\\ [][Next]_x /\\ (Fair => WF_x(Next))\nSettles == <>(x = Limit)\n====\n';
 
 const plantedInvariants = 'features/planted/invariants.ts';
 
@@ -768,6 +779,42 @@ const violations: readonly Violation[] = [
     expect: ['.claude/skills/linked is a symbolic link'],
   },
   {
+    name: 'the shape check rejects a nested tsconfig that turns on skipLibCheck',
+    file: 'features/alpha/tsconfig.json',
+    source: '{\n  "compilerOptions": {\n    "skipLibCheck": true\n  }\n}\n',
+    tool: 'shape',
+    expect: ['features/alpha/tsconfig.json names skipLibCheck'],
+  },
+  {
+    name: 'the shape check rejects a tsconfig that inherits skipLibCheck from a base under .claude/',
+    file: 'features/alpha/tsconfig.json',
+    source: '{\n  "extends": "../../.claude/base.json"\n}\n',
+    tool: 'shape',
+    expect: ['features/alpha/tsconfig.json names skipLibCheck or extends a config that turns it on'],
+    companions: [{ file: '.claude/base.json', source: '{\n  // agent tooling\n  "compilerOptions": { "skipLibCheck": true, },\n}\n' }],
+  },
+  {
+    name: 'the shape check rejects a tsconfig under a .claude folder below the root',
+    file: 'features/alpha/.claude/tsconfig.json',
+    source: '{\n  "compilerOptions": {\n    "skipLibCheck": true\n  }\n}\n',
+    tool: 'shape',
+    expect: ['features/alpha/.claude/tsconfig.json names skipLibCheck'],
+  },
+  {
+    name: 'the shape check rejects skipLibCheck passed to tsc in a package script, in any case',
+    file: 'lib/package.json',
+    source: '{\n  "scripts": {\n    "typecheck": "tsc --noEmit --SKIPLIBCHECK"\n  }\n}\n',
+    tool: 'shape',
+    expect: ['lib/package.json names skipLibCheck'],
+  },
+  {
+    name: 'the shape check rejects skipLibCheck passed to tsc in a workflow',
+    file: 'features/alpha/.github/workflows/typecheck.yml',
+    source: 'jobs:\n  typecheck:\n    steps:\n      - run: npx tsc --noEmit --skipLibCheck\n',
+    tool: 'shape',
+    expect: ['features/alpha/.github/workflows/typecheck.yml names skipLibCheck'],
+  },
+  {
     name: 'npm run check runs the shape check',
     file: 'docs/guide.md',
     linkTo: '../README.md',
@@ -921,6 +968,27 @@ const violations: readonly Violation[] = [
     source: migration("create table planted (price€$$ int, note text default 'it''s $$'); -- why", 'drop table planted;'),
     tool: 'sql-comments',
     expect: [`${plantedMigration}:2 holds the SQL comment "-- why"`],
+  },
+  {
+    name: 'migration-versions rejects two migrations that share a version',
+    file: clashingMigration,
+    source: markedMigration,
+    tool: 'migration-versions',
+    expect: [clash],
+  },
+  {
+    name: 'migration-versions rejects a migration with no version prefix',
+    file: 'db/migrations/planted.sql',
+    source: markedMigration,
+    tool: 'migration-versions',
+    expect: ['db/migrations/planted.sql has no version prefix'],
+  },
+  {
+    name: 'npm run check runs the migration-versions check',
+    file: clashingMigration,
+    source: markedMigration,
+    tool: 'check',
+    expect: ['shares version 20260923220000'],
   },
   {
     name: 'npm run check runs the SQL comment check',
@@ -1112,6 +1180,27 @@ const violations: readonly Violation[] = [
     expect: ['TS2345'],
   },
   {
+    name: 'tsc rejects owing an action on the database outside a transaction, so the owed row commits with the state that owes it',
+    file: 'features/planted/owe-outside.ts',
+    source: `${owing}export const oweOutside = (enqueue: Enqueue, db: Database): Promise<readonly string[]> => enqueue(db, owed, []);\n`,
+    tool: 'tsc',
+    expect: ['TS2345'],
+  },
+  {
+    name: 'tsc rejects owing an action in a transaction that inTransaction did not open',
+    file: 'features/planted/owe-own-transaction.ts',
+    source: `${owing}export const oweInOwnTransaction = (enqueue: Enqueue, db: Database): Promise<readonly string[]> => db.transaction().execute(tx => enqueue(tx, owed, []));\n`,
+    tool: 'tsc',
+    expect: ['TS2345'],
+  },
+  {
+    name: 'tsc rejects a model that declares a liveness property under INVARIANTS',
+    file: 'features/planted/verify.ts',
+    source: livenessModel('INVARIANTS'),
+    tool: 'tsc',
+    expect: ['TS2322'],
+  },
+  {
     name: 'eslint rejects a type assertion that makes an AccessOnlyLogin',
     file: 'features/credentials/planted-assertion.ts',
     source: "import type { AccessOnlyLogin } from '../../shared/codex-login.ts';\n\nexport const login = '{}' as AccessOnlyLogin;\n",
@@ -1212,6 +1301,15 @@ const plantedModel: Violation = {
   expect: ['FAIL  planted-model: the planted model holds'],
 };
 
+const plantedLiveness: Violation = {
+  name: 'npm run verify -- models refuses a config that files a liveness property under INVARIANTS',
+  file: 'features/planted/Planted.cfg',
+  source: 'SPECIFICATION Spec\n\nCONSTANTS\n    Limit = 2\n    Fair = TRUE\n\nINVARIANTS\n    TypeOK\n    Settles\n',
+  tool: 'models',
+  expect: ['Settles is a liveness property, so TLC checks it only under PROPERTIES'],
+  companions: [{ file: 'features/planted/verify.ts', source: livenessModel('PROPERTIES') }, { file: 'features/planted/Planted.tla', source: plantedSpec }],
+};
+
 const allowances: readonly Allowance[] = [
   {
     name: 'strict-schemas accepts a $ref that the schema defines',
@@ -1252,6 +1350,12 @@ const allowances: readonly Allowance[] = [
     name: 'tsc accepts a login that accessOnly made where AccessOnlyLogin is required',
     file: 'features/credentials/planted-job.ts',
     source: `${accessOnlyLoginFrom}\nconst copy = accessOnly('{}');\nexport const planted = 'login' in copy ? launch(copy.login) : copy.reason;\n`,
+    tool: 'tsc',
+  },
+  {
+    name: 'tsc accepts owing an action in the transaction inTransaction opened',
+    file: 'features/planted/owe-inside.ts',
+    source: `import { inTransaction } from '../../shared/transaction.ts';\n${owing}export const oweInside = (enqueue: Enqueue, db: Database): Promise<readonly string[]> => inTransaction(db, tx => enqueue(tx, owed, []));\n`,
     tool: 'tsc',
   },
   {
@@ -1303,6 +1407,12 @@ const allowances: readonly Allowance[] = [
     name: 'the shape check accepts the packages that agent tooling installs under .claude/',
     file: '.claude/skills/poteto-mode/scripts/node_modules/.bin/tsc',
     linkTo: '../typescript/bin/tsc',
+    tool: 'shape',
+  },
+  {
+    name: 'the shape check accepts skipLibCheck in a tsconfig of agent tooling under .claude/',
+    file: '.claude/skills/planted/scripts/tsconfig.json',
+    source: '{\n  "compilerOptions": {\n    "skipLibCheck": true\n  }\n}\n',
     tool: 'shape',
   },
   {
@@ -1480,6 +1590,10 @@ const tools: Record<
     command: () => ['npm', 'run', '--silent', 'db-types'],
     caught: startsALine,
   },
+  'migration-versions': {
+    command: () => ['npm', 'run', '--silent', 'migration-versions'],
+    caught: startsALine,
+  },
   models: {
     command: () => ['npm', 'run', '--silent', 'verify', '--', 'models'],
     caught: (outcome, _file, code) => outcome.output.includes(code),
@@ -1555,7 +1669,7 @@ export const guardrails: Scenario = {
   summary: 'plants each violation a check must reject and each line it must accept, and proves both',
   run: async () => [
     ...(await withCopy(async copy => {
-      const checks: Check[] = (['tsc', 'eslint', 'depcruise', 'shape', 'sql-comments', 'model-names', 'step-names', 'strict-schemas', 'ci-plan', 'db-types'] as const).map(tool => {
+      const checks: Check[] = (['tsc', 'eslint', 'depcruise', 'shape', 'sql-comments', 'migration-versions', 'model-names', 'step-names', 'strict-schemas', 'ci-plan', 'db-types'] as const).map(tool => {
         const clean = run(tool, copy, '.');
         const name = `the unplanted copy passes ${tool}`;
         const problem = clean.status === 0 ? tools[tool].unclean?.(clean) : (tools[tool].summary ?? firstLines)(clean);
@@ -1565,6 +1679,6 @@ export const guardrails: Scenario = {
       for (const allowance of allowances) checks.push(await accept(copy, allowance));
       return checks;
     })),
-    ...(await withCopy(async copy => [await reject(copy, plantedModel)], ['features'])),
+    ...(await withCopy(async copy => [await reject(copy, plantedModel), await reject(copy, plantedLiveness)], ['features'])),
   ],
 };

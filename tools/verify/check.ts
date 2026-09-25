@@ -18,6 +18,7 @@ export type Scenario = {
   readonly name: string;
   readonly summary: string;
   readonly run: (args: readonly string[]) => Promise<readonly Line[]>;
+  readonly nightly?: (day: number) => readonly (readonly string[])[];
 };
 
 export const pass = (name: string, detail: string): Check => ({ name, passed: true, detail });

@@ -78,8 +78,9 @@ async function profileChecks(postgres: TestPostgres, profile: ProfileName, optio
 
 async function mutantCheck(postgres: TestPostgres, mutant: MutantName, options: SimulationOptions): Promise<Check> {
   const property = mutants[mutant];
-  const name = `${property} fails without ${mutant}`;
-  const plan: Plan = { profile: 'default', seeds: seedsOf(options), steps: options.steps, mutant };
+  const profile = options.profile === 'all' ? 'default' : options.profile;
+  const name = `${property} fails without ${mutant} in the ${profile} profile`;
+  const plan: Plan = { profile, seeds: seedsOf(options), steps: options.steps, mutant };
   const runs = await simulate(postgres, [plan]);
   const first = runs.find(run => run.failure !== undefined);
   if (first === undefined) return fail(name, `no violation in ${String(runs.length)} seeds of ${String(options.steps)} steps`);
@@ -282,6 +283,7 @@ export const scenarios: readonly Scenario[] = [
       const options = parseSimulationOptions(args);
       return withPostgres(postgres => simulationChecks(postgres, options));
     },
+    nightly: () => profileName.options.map(profile => ['--profile', profile, '--seeds', '200']),
   },
   {
     name: 'environments-live',
