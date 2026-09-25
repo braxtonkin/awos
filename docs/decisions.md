@@ -550,6 +550,16 @@ Rejected options:
 
 - **Model them now.** It is the stronger check, and the next change to these rows should add it. It needs a guard per row, a mutant per guard in `verify.ts`, and matching moves in `land-sim`.
 
+### The engine stores a NUL character from the bridge as U+FFFD
+
+Decided 25 Sep 2026. Postgres can't hold the NUL character (`\u0000`) in `jsonb` or `text`, and the app server can write one, for example in a command's output. Before this decision, one NUL in one line made the engine refuse the whole batch. The bridge resent it until the lease ran out, and the reaper marked the attempt lost. The engine now replaces every NUL with U+FFFD, the Unicode replacement character, where it parses a line and before it stores it. The replacement covers every string and every object key in an app-server line, the text of a line that isn't JSON, a reproduced line, and a pushed line's branch. The stored line then differs from what the app server wrote only where a NUL was, and it shows a visible mark there. `bridge-sim` checks this directly, and its fake app server writes NUL into every step it streams.
+
+Rejected options:
+
+- **Refuse a line that carries NUL.** The attempt would still die, only with a clearer reason.
+- **Drop the NUL character.** It hides that anything was there, and it can join two words.
+- **Store the escaped text `\u0000` as six characters.** A reader can't tell it from an app server that wrote those six characters.
+
 ## Open
 
 Each open question names the current lean or default. A lean is not a decision.

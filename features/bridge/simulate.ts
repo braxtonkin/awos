@@ -26,7 +26,15 @@ import {
 
 type Drop = { readonly kind: 'trigger' | 'constraint'; readonly table: 'attempt' | 'attempt_event' | 'attempt_command'; readonly name: string };
 
-type SimBreak = 'ack-inside-commit' | 'drop-failed-batch' | 'replay-every-command' | 'no-lease-grace' | 'engine-stays-down';
+export const harnessBreaks = {
+  'ack-inside-commit': 'receive hands back its answer only as the return value of its committed transaction, and postEvents writes that answer as the HTTP response after receive returns, so no rule inside receive can acknowledge early and the simulator, which calls receive, hears the answer inside the commit instead',
+  'drop-failed-batch': "the Job drops lines only when runBridge's post loop in job.ts hears a stored answer, and the simulator drives the Job's outbox but not that loop, so it drops the failed batch itself",
+  'replay-every-command': "only the Job's applier guards CommandAppliedOnce, because the engine already resends from whatever cursor the bridge names, so an engine that ignored the cursor breaks nothing while the applier holds, and the applier has no rules seam, so the simulator bypasses it",
+  'no-lease-grace': 'the grace is freshenLeases in features/tasks/reaper.ts, which the engine runs each time it resumes, and a feature may not import another (A5), so the simulator runs a copy and skips it',
+  'engine-stays-down': 'fairness is the platform restarting a crashed engine, and no AutoWorker code decides it, so the simulator keeps the engine down itself',
+} as const satisfies Readonly<Record<string, string>>;
+
+type SimBreak = keyof typeof harnessBreaks;
 
 type Faults = 'all' | 'late-only';
 
@@ -216,7 +224,7 @@ function scriptFor(next: () => number): Step[] {
   const count = 1 + Math.floor(next() * 4);
   const steps = Array.from({ length: count }, (_, index): Step => {
     const kind = kinds[Math.floor(next() * kinds.length)] ?? 'reasoning';
-    return { kind, deltas: Array.from({ length: 1 + Math.floor(next() * 3) }, (_unused, part) => `${kind} ${String(index)}.${String(part)} `) };
+    return { kind, deltas: Array.from({ length: 1 + Math.floor(next() * 3) }, (_unused, part) => `${kind} ${String(index)}.${String(part)}\u0000 `) };
   });
   return [...steps, { kind: 'agentMessage', deltas: ['All ', 'done.'] }];
 }

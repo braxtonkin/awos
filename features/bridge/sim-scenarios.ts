@@ -6,10 +6,10 @@ import { z } from 'zod';
 import { connect } from '../../shared/db/client.ts';
 import { fail, pass, type Check, type Scenario } from '../../tools/verify/check.ts';
 import { withPostgres, type TestPostgres } from '../../tools/verify/postgres.ts';
-import { issueToken, pollCommands, receive, rules, sendCommand, type BridgeEngine } from './engine.ts';
+import { issueToken, nulStandIn, numberCommand, pollCommands, receive, rules, sendCommand, type BridgeEngine } from './engine.ts';
 import { provePlants, world, worldStartsAt } from './invariants.ts';
-import { attemptId, bridgeRequestIds, protocolVersion, type Caller, type EventsPost } from './protocol.ts';
-import { droppedBy, mutantName, mutants, noMutantYet, simulate, type MutantName, type Plan, type Run } from './simulate.ts';
+import { attemptId, bridgeRequestIds, commandRequestId, protocolVersion, type Caller, type EventsPost } from './protocol.ts';
+import { droppedBy, harnessBreaks, mutantName, mutants, noMutantYet, simulate, type MutantName, type Plan, type Run } from './simulate.ts';
 
 const flags = { seeds: { type: 'string' }, seed: { type: 'string' }, steps: { type: 'string' }, mutant: { type: 'string' }, trace: { type: 'string' } } as const;
 
@@ -74,14 +74,15 @@ async function cleanSeeds(postgres: TestPostgres, options: Options): Promise<rea
 }
 
 async function mutantCheck(postgres: TestPostgres, mutant: MutantName, options: Options): Promise<Check> {
-  const { breaks: expected, shape } = mutants[mutant];
+  const { breaks: expected, shape, sim } = mutants[mutant];
+  const where = sim === undefined ? 'in the engine or the schema' : `in the harness, because ${harnessBreaks[sim]}`;
   const runs = await simulate(postgres, [{ seeds: seedList(options, Math.min(options.seeds, mutantSeeds)), steps: options.steps, mutant }], tracer(options));
   const breaking = runs.filter(run => run.failure !== undefined && run.failure.broken.some(found => expected.includes(found.property)) && (shape?.holds(run.failure) ?? true));
   const name = `${expected.join(' or ')} fails under the ${mutant} mutant${shape === undefined ? '' : `, ${shape.label}`}`;
   const first = breaking[0];
   return first === undefined
     ? fail(name, `no seed of ${String(runs.length)} broke it; ${runs.filter(run => run.failure !== undefined).slice(0, 2).map(failureOf).join('; ')}`)
-    : pass(name, `${String(breaking.length)} of ${String(runs.length)} seeds; first: ${failureOf(first)}`);
+    : pass(name, `${String(breaking.length)} of ${String(runs.length)} seeds, mutated ${where}; first: ${failureOf(first)}`);
 }
 
 async function plantChecks(postgres: TestPostgres): Promise<Check> {
@@ -170,6 +171,69 @@ async function refusalChecks(postgres: TestPostgres): Promise<readonly Check[]> 
   }
 }
 
+const afterEndName = 'once an attempt has ended, its command stream carries only the turn.stop frames that directly follow what the bridge applied';
+
+async function afterEndCheck(postgres: TestPostgres): Promise<Check> {
+  const scratch = await postgres.scratch();
+  const db = connect(scratch.url, 2);
+  try {
+    for (const statement of world) await statement.execute(db);
+    const attempt = attemptId.parse('1');
+    const token = await issueToken(db, attempt);
+    if (token === undefined) throw new Error('the world attempt took no token');
+    const caller: Caller = { attempt, token, protocol: protocolVersion, pid: 7001, image: 'autoworker-job:current' };
+    const now = new Date(worldStartsAt);
+    await sendCommand(db, attempt, { kind: 'turn.start', prompt: 'Do the work.', outputSchema: null }, now);
+    const answers = [JSON.stringify({ id: bridgeRequestIds.threadStart, result: { thread: { id: 'thread-1' } } }), JSON.stringify({ id: commandRequestId(1), result: { turn: { id: 'turn-1' } } })];
+    await receive(db, engine, caller, { received: 1, lines: answers.map((text, index) => ({ kind: 'app', seq: index + 1, text })) });
+    await sendCommand(db, attempt, { kind: 'turn.steer', message: 'Also check the edge case.' }, now);
+    await db.transaction().execute(async writer => {
+      await numberCommand(writer, attempt, { kind: 'turn.stop' }, now);
+      await writer.updateTable('attempt').set({ finished_at: now, verdict: 'stopped' }).where('id', '=', attempt).execute();
+    });
+    const seqs = async (after: number): Promise<string> => {
+      const polled = await pollCommands(db, attempt, after);
+      return `${polled.frames.map(frame => `${String(frame.seq)} ${frame.request.method}`).join(', ') || 'nothing'}${polled.ended ? ', then the end' : ''}`;
+    };
+    const afterStart = await seqs(1);
+    const afterSteer = await seqs(2);
+    const said = `after the start the stream sends ${afterStart}; after the steer it sends ${afterSteer}`;
+    return afterStart === 'nothing, then the end' && afterSteer === '3 turn/interrupt, then the end' ? pass(afterEndName, said) : fail(afterEndName, said);
+  } finally {
+    await db.destroy();
+    await scratch.drop();
+  }
+}
+
+const nulName ='a line whose text carries NUL is stored with U+FFFD in its place, in app lines, lines that are not JSON, and reproduced lines';
+
+async function nulCheck(postgres: TestPostgres): Promise<Check> {
+  const scratch = await postgres.scratch();
+  const db = connect(scratch.url, 2);
+  try {
+    for (const statement of world) await statement.execute(db);
+    const attempt = attemptId.parse('1');
+    const token = await issueToken(db, attempt);
+    if (token === undefined) throw new Error('the world attempt took no token');
+    const caller: Caller = { attempt, token, protocol: protocolVersion, pid: 7001, image: 'autoworker-job:current' };
+    const lines: EventsPost['lines'] = [
+      { kind: 'app', seq: 1, text: JSON.stringify({ method: 'item/commandExecution/outputDelta', params: { itemId: 'item-\u0000-1', delta: 'binary \u0000 output', ['key\u0000']: true } }) },
+      { kind: 'app', seq: 2, text: 'not json \u0000 at all' },
+      { kind: 'reproduced', seq: 3, reproduction: { state: 'no_script', reason: 'the log held \u0000' } },
+    ];
+    const answer = await receive(db, engine, caller, { received: 0, lines });
+    const rows = await db.selectFrom('attempt_event').select(['seq', 'item_id', sql<string>`body::text`.as('body')]).where('attempt_id', '=', attempt).orderBy('seq').execute();
+    const standIns = rows.filter(row => row.body.includes(nulStandIn) && !row.body.includes('\\u0000')).length;
+    const said = `answer ${JSON.stringify(answer)}; ${String(rows.length)} rows, ${String(standIns)} with U+FFFD; item id ${JSON.stringify(rows[0]?.item_id ?? null)}`;
+    return 'stored' in answer && answer.stored === 3 && rows.length === 3 && standIns === 3 && rows[0]?.item_id === `item-${nulStandIn}-1` ? pass(nulName, said) : fail(nulName, said);
+  } catch (error) {
+    return fail(nulName, error instanceof Error ? error.message : String(error));
+  } finally {
+    await db.destroy();
+    await scratch.drop();
+  }
+}
+
 const textBlock = {
   type: 'object',
   additionalProperties: false,
@@ -211,12 +275,12 @@ async function schemaOrderCheck(postgres: TestPostgres): Promise<Check> {
 
 async function simulationChecks(postgres: TestPostgres, options: Options): Promise<readonly Check[]> {
   if (options.mutant === 'all') {
-    const checks: Check[] = [await plantChecks(postgres), await catalogCheck(postgres), ...(await refusalChecks(postgres)), await schemaOrderCheck(postgres)];
+    const checks: Check[] = [await plantChecks(postgres), await catalogCheck(postgres), ...(await refusalChecks(postgres)), await schemaOrderCheck(postgres), await nulCheck(postgres), await afterEndCheck(postgres)];
     for (const mutant of mutantName.options) checks.push(await mutantCheck(postgres, mutant, options));
     return checks;
   }
   if (options.mutant !== undefined) return [await mutantCheck(postgres, options.mutant, options)];
-  return [...(await cleanSeeds(postgres, options)), await plantChecks(postgres), ...(await refusalChecks(postgres)), await schemaOrderCheck(postgres)];
+  return [...(await cleanSeeds(postgres, options)), await plantChecks(postgres), ...(await refusalChecks(postgres)), await schemaOrderCheck(postgres), await nulCheck(postgres), await afterEndCheck(postgres)];
 }
 
 function parseOptions(args: readonly string[]): Options {

@@ -49,6 +49,13 @@ export const simulatorSchema: readonly Statement[] = [
   sql`create trigger sim_end after update of finished_at on attempt for each row when (old.finished_at is null and new.finished_at is not null) execute function sim_end()`,
   sql`create table sim_ack (id bigint generated always as identity primary key, attempt_id bigint not null, stored bigint not null)`,
   sql`create table sim_applied (id bigint generated always as identity primary key, attempt_id bigint not null, seq bigint not null)`,
+  sql`create function sim_apply() returns trigger language plpgsql as $$
+      begin
+        insert into sim_history (attempt_id, what, seq) values (new.attempt_id, 'applied', new.seq);
+        return new;
+      end
+      $$`,
+  sql`create trigger sim_apply after insert on sim_applied for each row execute function sim_apply()`,
   sql`create table sim_bridge (attempt_id bigint primary key, state text not null, emitted bigint not null)`,
   sql`create table sim_outage (id bigint generated always as identity primary key, down_at timestamptz not null, up_at timestamptz)`,
 ];
@@ -86,6 +93,11 @@ const highWater = (seq: number): Statement => sql`update attempt set high_water 
 
 const stopCommand = (seq: number): Statement =>
   sql`insert into attempt_command (attempt_id, seq, kind, sent_at) values (1, ${sql.lit(seq)}, 'turn.stop', ${t0})`;
+
+const steerCommand = (seq: number): Statement =>
+  sql`insert into attempt_command (attempt_id, seq, kind, input, client_message_id, sent_at) values (1, ${sql.lit(seq)}, 'turn.steer', 'Also check the edge case.', gen_random_uuid(), ${t0})`;
+
+const applied = (seq: number): Statement => sql`insert into sim_applied (attempt_id, seq) values (1, ${sql.lit(seq)})`;
 
 const eventsOf = sql`select h.attempt_id, h.seq from sim_history h where h.what = 'event'`;
 
@@ -194,7 +206,8 @@ export const properties = {
     moment: 'each-step',
     breaks: sql`select h.attempt_id, h.what, h.seq from sim_history h
       join sim_history e on e.attempt_id = h.attempt_id and e.what = 'end' and e.id < h.id
-      where h.what in ('event', 'prune', 'command')`,
+      where h.what in ('event', 'prune', 'command')
+        or (h.what = 'applied' and exists (select 1 from attempt_command c where c.attempt_id = h.attempt_id and c.seq = h.seq and c.kind <> 'turn.stop'))`,
     plants: [
       {
         setup: [sql`drop trigger event_needs_live_attempt on attempt_event`, sql`update attempt set finished_at = ${t0} + interval '40 seconds', verdict = 'lost' where id = 1`],
@@ -203,6 +216,10 @@ export const properties = {
       {
         setup: [sql`drop trigger command_needs_live_attempt on attempt_command`, sql`update attempt set finished_at = ${t0} + interval '40 seconds', verdict = 'stopped' where id = 1`],
         violation: stopCommand(1),
+      },
+      {
+        setup: [steerCommand(1), applied(1), stopCommand(2), sql`update attempt set finished_at = ${t0} + interval '40 seconds', verdict = 'stopped' where id = 1`, applied(2)],
+        violation: applied(1),
       },
     ],
   },

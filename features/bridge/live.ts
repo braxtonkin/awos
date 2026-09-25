@@ -420,9 +420,25 @@ async function steerLane(world: World): Promise<readonly Check[]> {
   ];
 }
 
+type Pushes = { readonly afterTurn: AfterTurn; readonly count: () => number };
+
+function pushes(): Pushes {
+  let count = 0;
+  return {
+    afterTurn: () => {
+      count += 1;
+      return Promise.resolve([]);
+    },
+    count: () => count,
+  };
+}
+
+const noPushCheck = (name: string, pushed: Pushes): Check => (pushed.count() === 0 ? pass(name, 'the step after the turn never ran') : fail(name, `the step after the turn ran ${String(pushed.count())} times`));
+
 async function stopLane(world: World): Promise<readonly Check[]> {
   await sendCommand(world.db, world.attempt, { kind: 'turn.start', prompt: tickPrompt(40), outputSchema: null }, new Date());
-  const run = startBridge(world);
+  const pushed = pushes();
+  const run = startBridge(world, pushed.afterTurn);
   if (!(await until(120_000, () => commandStarted(world)))) return [fail('the turn starts a shell command', run.log.join(' | '))];
   const stoppedAt = Date.now();
   const stopped = await world.db.transaction().execute(async writer => {
@@ -440,12 +456,14 @@ async function stopLane(world: World): Promise<readonly Check[]> {
     interrupted !== undefined && interrupted.at - stoppedAt <= 1000 ? pass(withinName, `${String(interrupted.at - stoppedAt)} ms`) : fail(withinName, interrupted === undefined ? 'no interrupted turn/completed' : `${String(interrupted.at - stoppedAt)} ms`),
     row.verdict === 'stopped' ? pass('the attempt ends stopped', 'verdict stopped') : fail('the attempt ends stopped', `verdict ${String(row.verdict)}`),
     ended,
+    noPushCheck('a stopped attempt pushes nothing, though its turn completed as interrupted', pushed),
   ];
 }
 
 async function fenceLane(world: World): Promise<readonly Check[]> {
   await sendCommand(world.db, world.attempt, { kind: 'turn.start', prompt: tickPrompt(30), outputSchema: null }, new Date());
-  const run = startBridge(world);
+  const pushed = pushes();
+  const run = startBridge(world, pushed.afterTurn);
   if (!(await until(120_000, () => commandStarted(world)))) return [fail('the turn starts a shell command', run.log.join(' | '))];
   await world.db.updateTable('attempt').set({ finished_at: new Date(), verdict: 'lost' }).where('id', '=', world.attempt).execute();
   const storedAtLoss = await storedWhere(world, sql<boolean>`true`);
@@ -458,7 +476,23 @@ async function fenceLane(world: World): Promise<readonly Check[]> {
     storedLater === storedAtLoss
       ? pass('nothing more is stored once the attempt is lost', `${String(storedAtLoss)} lines stored, of ${String(written)} the app server wrote`)
       : fail('nothing more is stored once the attempt is lost', `${String(storedAtLoss)} at the loss, ${String(storedLater)} later`),
+    noPushCheck('a lost attempt pushes nothing', pushed),
   ];
+}
+
+async function finishingLane(world: World): Promise<readonly Check[]> {
+  await sendCommand(world.db, world.attempt, { kind: 'turn.start', prompt: tickPrompt(2), outputSchema: null }, new Date());
+  let steer: number | undefined;
+  const run = startBridge(world, async () => {
+    const sent = await sendCommand(world.db, world.attempt, { kind: 'turn.steer', message: 'Also check the edge case.' }, new Date());
+    steer = sent === 'ended' ? undefined : sent.seq;
+    await wait(3000);
+    return [];
+  });
+  const ended = await endingCheck(run, 0);
+  const delivery = (await deliveries(world.db, world.attempt)).find(command => command.seq === steer)?.delivery;
+  const name = 'a steer that arrives after the turn completed stays sent, because the bridge never gives it to the app server';
+  return [ended, delivery === 'sent' ? pass(name, `command ${String(steer)} is ${delivery}`) : fail(name, `command ${String(steer)} is ${String(delivery)}; log: ${run.log.join(' | ')}`)];
 }
 
 async function post(world: World, lines: readonly Line[], overrides: Partial<Record<'token' | 'protocol' | 'pid' | 'image', string>> = {}): Promise<{ readonly status: number; readonly body: unknown }> {
@@ -550,10 +584,11 @@ const lanes: Readonly<Record<string, Lane>> = {
   },
   'long-outage': { summary: 'the engine and its reaper stopped for longer than two lease periods mid-turn', usesCodex: true, run: longOutageLane },
   steer: { summary: 'a steering message mid-turn goes sent, received, acted on', usesCodex: true, run: steerLane },
-  stop: { summary: 'a stop mid-turn sends turn.stop and the turn ends interrupted', usesCodex: true, run: stopLane },
+  stop: { summary: 'a stop mid-turn sends turn.stop, the turn ends interrupted, and nothing is pushed', usesCodex: true, run: stopLane },
   wire: { summary: 'a replayed batch, a gap, a second process, a wrong token, and a protocol mismatch, over HTTP', usesCodex: false, run: wireLane },
   planted: { summary: 'a planted .codex/config.toml changes nothing the bridge pins', usesCodex: true, run: plantedLane },
-  fence: { summary: 'an attempt marked lost mid-turn stores nothing more, and its Job side exits non-zero', usesCodex: true, run: fenceLane },
+  fence: { summary: 'an attempt marked lost mid-turn stores nothing more, pushes nothing, and its Job side exits non-zero', usesCodex: true, run: fenceLane },
+  finishing: { summary: 'a steer sent while the bridge runs its step after the turn is never counted as received', usesCodex: true, run: finishingLane },
 };
 
 export const liveScenarios: readonly Scenario[] = [
