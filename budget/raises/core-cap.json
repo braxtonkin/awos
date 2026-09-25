@@ -1,0 +1,9 @@
+{
+  "why": "The owner capped verification at 8 of 16 cores on 25 Sep, and the seeded time ceilings were twice runs measured without the cap. These raise each time ceiling to about four times its slowest uncapped run, a guess at twice the capped time, until runs under the cap are measured.",
+  "raise": {
+    "seconds/check": 3500,
+    "seconds/models": 4600,
+    "seconds/sims": 2600,
+    "seconds/simulation": 2000
+  }
+}
