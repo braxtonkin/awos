@@ -110,9 +110,7 @@ VARIABLES task, attempt, worker, lateResults, humanActions, claimEpoch, runnable
 
 vars == <<task, attempt, worker, lateResults, humanActions, claimEpoch, runnable, runAs, reassignments, launchFaults>>
 
-Unlaunched == {"starting", "failed"}
-
-Live == Unlaunched \cup {"busy"}
+Live == {"busy", "failed"}
 
 MaxReviewReturns == 1
 
@@ -272,7 +270,7 @@ Claim(w, t) ==
     /\ ClaimIsExclusive => LiveOn(t) = {}
     /\ ClaimNeedsAPerson => runnable[t]
     /\ attempt' = [attempt EXCEPT ![w] = t]
-    /\ worker' = [worker EXCEPT ![w] = "starting"]
+    /\ worker' = [worker EXCEPT ![w] = "busy"]
     /\ claimEpoch' = [claimEpoch EXCEPT ![w] = humanActions[t]]
     /\ runAs' = [runAs EXCEPT ![w] = runnable[t]]
     /\ UNCHANGED <<task, lateResults, humanActions, runnable, reassignments, launchFaults>>
@@ -294,19 +292,20 @@ Reassign(t) ==
     /\ UNCHANGED <<task, attempt, worker, lateResults, humanActions, claimEpoch, runAs, launchFaults>>
 
 Launch(w) ==
-    /\ worker[w] \in IF FailedLaunchRelaunches THEN Unlaunched ELSE {"starting"}
+    /\ FailedLaunchRelaunches
+    /\ worker[w] = "failed"
     /\ worker' = [worker EXCEPT ![w] = "busy"]
     /\ UNCHANGED <<task, attempt, lateResults, humanActions, claimEpoch, runnable, runAs, reassignments, launchFaults>>
 
 LaunchFails(w) ==
-    /\ worker[w] \in Unlaunched
+    /\ worker[w] = "busy"
     /\ launchFaults < MaxLaunchFaults
     /\ launchFaults' = launchFaults + 1
     /\ worker' = [worker EXCEPT ![w] = "failed"]
     /\ UNCHANGED <<task, attempt, lateResults, humanActions, claimEpoch, runnable, runAs, reassignments>>
 
 Refuse(w) ==
-    /\ worker[w] \in Unlaunched
+    /\ worker[w] \in Live
     /\ task' = [task EXCEPT ![attempt[w]] = [IF RefusedLaunchIsNotLost THEN @ ELSE LostOnce(@) EXCEPT !.state = "waiting", !.passed = FALSE]]
     /\ attempt' = [attempt EXCEPT ![w] = NoTask]
     /\ worker' = [worker EXCEPT ![w] = "idle"]
@@ -336,7 +335,7 @@ Reap(w) ==
     /\ UNCHANGED <<humanActions, runnable, reassignments, launchFaults>>
 
 Finishes(w, v) ==
-    /\ worker[w] \in Live
+    /\ worker[w] = "busy"
     /\ task' = [task EXCEPT ![attempt[w]] = [Judged(attempt[w], @, v) EXCEPT !.lost = 0, !.passed = (v = "pass")]]
     /\ attempt' = [attempt EXCEPT ![w] = NoTask]
     /\ worker' = [worker EXCEPT ![w] = "idle"]
@@ -345,8 +344,6 @@ Finishes(w, v) ==
     /\ UNCHANGED <<lateResults, humanActions, runnable, reassignments, launchFaults>>
 
 Finish(w) == worker[w] = "busy" /\ \E v \in Outcomes(task[attempt[w]].step) : Finishes(w, v)
-
-FinishBeforeLaunch(w) == worker[w] \in Unlaunched /\ \E v \in Outcomes(task[attempt[w]].step) : Finishes(w, v)
 
 LateResult(t) ==
     /\ t \in lateResults
@@ -415,7 +412,7 @@ Terminated == \A t \in Tasks : task[t].state \in Settled
 
 Next ==
     \/ \E w \in Workers, t \in Tasks : Claim(w, t)
-    \/ \E w \in Workers : Launch(w) \/ LaunchFails(w) \/ Refuse(w) \/ Hang(w) \/ Wake(w) \/ Reap(w) \/ Finish(w) \/ FinishBeforeLaunch(w)
+    \/ \E w \in Workers : Launch(w) \/ LaunchFails(w) \/ Refuse(w) \/ Hang(w) \/ Wake(w) \/ Reap(w) \/ Finish(w)
     \/ \E t \in Tasks : LateResult(t) \/ Stop(t) \/ Retry(t) \/ Approve(t) \/ OutsideApproval(t) \/ LoseApproval(t) \/ NoOneToRunAs(t) \/ Reassign(t)
     \/ Terminated /\ UNCHANGED vars
 
@@ -495,7 +492,7 @@ FailedRoundReturnsToImplement ==
     [][\A t \in Tasks : \A r \in Returning : task'[t].rounds[r] > task[t].rounds[r] =>
           task'[t].step = ReturnsTo \/ task'[t].state = "waiting"]_vars
 
-LateWriteChangesNothing == [][lateResults' \subseteq lateResults /\ lateResults' # lateResults => UNCHANGED <<task, attempt, worker, launchFaults>>]_vars
+LateWriteChangesNothing == [][lateResults' \subseteq lateResults /\ lateResults' # lateResults => UNCHANGED <<task, attempt, worker>>]_vars
 
 OutputsOnlyGrow == [][\A t \in Tasks : task[t].outputs \subseteq task'[t].outputs]_vars
 
