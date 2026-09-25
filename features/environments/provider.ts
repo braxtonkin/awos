@@ -1,4 +1,6 @@
+import { sql } from 'kysely';
 import { z } from 'zod';
+import type { Database } from '../../shared/db/client.ts';
 import { testsOnly } from './tests-only.ts';
 
 export const environment = z.discriminatedUnion('kind', [
@@ -34,6 +36,18 @@ export function providersByName(forks: readonly Provider[]): Providers {
   ];
   if (problems.length > 0) throw new Error(problems.join('\n'));
   return new Map(list.map(provider => [provider.name, provider]));
+}
+
+export async function publishProviders(db: Database, providers: Providers): Promise<void> {
+  const given = [...providers.keys()];
+  await db.transaction().execute(async tx => {
+    await sql`lock table published_provider in share row exclusive mode`.execute(tx);
+    const held = (await tx.selectFrom('published_provider').select('name').execute()).map(row => row.name);
+    const stale = held.filter(name => !given.includes(name));
+    const missing = given.filter(name => !held.includes(name));
+    if (stale.length > 0) await tx.deleteFrom('published_provider').where('name', 'in', stale).execute();
+    if (missing.length > 0) await tx.insertInto('published_provider').values(missing.map(name => ({ name }))).execute();
+  });
 }
 
 export function describe(given: Environment): string {

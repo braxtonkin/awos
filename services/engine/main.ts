@@ -16,6 +16,7 @@ import { openJiraLogin } from '../../features/credentials/jira-login.ts';
 import { sealingKey, type SealingKey } from '../../features/credentials/seal.ts';
 import { open, writeBack } from '../../features/credentials/store.ts';
 import { providerProblems, reconcile } from '../../features/environments/lifecycle.ts';
+import { publishProviders } from '../../features/environments/provider.ts';
 import { clientsFrom, type OpenToken } from '../../features/github/client.ts';
 import { mergeStateReader } from '../../features/github/merge-state.ts';
 import { githubPerformers, outboxMergeRow } from '../../features/github/performers.ts';
@@ -36,7 +37,7 @@ import { claim, renew } from '../../features/tasks/claim.ts';
 import { reaper } from '../../features/tasks/reaper.ts';
 import { coreRunAs, type RunAsRule } from '../../features/tasks/run-as.ts';
 import { finishStep, type StepRunner } from '../../features/tasks/step-runner.ts';
-import { startProblems } from '../../features/tasks/start.ts';
+import { publishWorkflows, startProblems } from '../../features/tasks/start.ts';
 import type { Performers } from '../../shared/actions.ts';
 import { connectCluster } from '../../shared/cluster.ts';
 import { connect, type Database } from '../../shared/db/client.ts';
@@ -245,6 +246,8 @@ async function run(given: Settings, key: SealingKey | undefined): Promise<void> 
       process.exitCode = 1;
       return;
     }
+    await publishWorkflows(db, workflows);
+    await publishProviders(db, providers);
     const bridge = createServer(
       bridgeListener(
         db,

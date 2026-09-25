@@ -196,6 +196,19 @@ export interface PersonRequest {
   task_id: Int8 | null;
 }
 
+export interface PublishedProvider {
+  name: string;
+}
+
+export interface PublishedWorkflowStep {
+  failures: Json;
+  name: string;
+  position: number;
+  requires: string[];
+  run_by: string;
+  workflow: string;
+}
+
 export interface Repository {
   branch: string;
   draft_leaves: Generated<DraftLeaves>;
@@ -319,6 +332,8 @@ export interface DB {
   outbox: Outbox;
   person: Person;
   person_request: PersonRequest;
+  published_provider: PublishedProvider;
+  published_workflow_step: PublishedWorkflowStep;
   repository: Repository;
   routine: Routine;
   routine_overlap: RoutineOverlap;

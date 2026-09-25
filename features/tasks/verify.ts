@@ -4,7 +4,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as wait } from 'node:timers/promises';
-import { parseArgs } from 'node:util';
+import { isDeepStrictEqual, parseArgs } from 'node:util';
 import { sql } from 'kysely';
 import { z } from 'zod';
 import { connect, type Database } from '../../shared/db/client.ts';
@@ -681,6 +681,7 @@ type RunningEngine = {
   readonly running: () => boolean;
   readonly waitFor: (text: string) => Promise<boolean>;
   readonly terminate: () => Promise<number | null>;
+  readonly kill: () => Promise<number | null>;
 };
 
 function runEngine(url: string, settings: Readonly<Record<string, string>>): RunningEngine {
@@ -722,6 +723,10 @@ function runEngine(url: string, settings: Readonly<Record<string, string>>): Run
         return status;
       });
     },
+    kill: () => {
+      child.kill('SIGKILL');
+      return exited;
+    },
   };
 }
 
@@ -735,6 +740,111 @@ async function until(ms: number, done: () => Promise<boolean>): Promise<boolean>
 }
 
 const passesIn = (said: string): number => Number(/reaper: stopped after (\d+) passes, 0 of them failed/.exec(said)?.[1] ?? '-1');
+
+type LiteralStep = { readonly workflow: string; readonly position: number; readonly name: string; readonly run_by: string; readonly requires: readonly string[]; readonly failures: object };
+
+const ends = { fail: { kind: 'fail', to: null }, needs_input: { kind: 'ask', to: null } };
+
+const declaredSteps: readonly LiteralStep[] = [
+  { workflow: 'code-change', position: 1, name: 'specify', run_by: 'agent', requires: ['text'], failures: ends },
+  { workflow: 'code-change', position: 2, name: 'implement', run_by: 'agent', requires: ['text'], failures: ends },
+  {
+    workflow: 'code-change',
+    position: 3,
+    name: 'verify',
+    run_by: 'agent',
+    requires: ['text'],
+    failures: { needs_input: { kind: 'ask', to: null }, behavior_fail: { kind: 'return', to: 'implement' }, environment_fail: { kind: 'rerun', to: 'verify' } },
+  },
+  {
+    workflow: 'code-change',
+    position: 4,
+    name: 'land',
+    run_by: 'engine',
+    requires: ['text'],
+    failures: { ...ends, red_check: { kind: 'return', to: 'implement' }, changes_requested: { kind: 'review', to: 'implement' }, review_required: { kind: 'await', to: null } },
+  },
+];
+
+const retiredSteps: readonly LiteralStep[] = ['gather', 'draft', 'post'].map((name, index) => ({ workflow: 'retired-flow', position: index + 1, name, run_by: 'agent', requires: ['text'], failures: ends }));
+
+const publishedRows = (db: Database): Promise<readonly unknown[]> => db.selectFrom('published_workflow_step').selectAll().orderBy('workflow').orderBy('position').execute();
+
+const publishedProviders = async (db: Database): Promise<readonly string[]> => (await db.selectFrom('published_provider').select('name').orderBy('name').execute()).map(row => row.name);
+
+const publishedDrift = (rows: readonly unknown[], providers: readonly string[]): string | null =>
+  isDeepStrictEqual(rows, declaredSteps) && isDeepStrictEqual(providers, ['tests-only'])
+    ? null
+    : `published ${JSON.stringify(rows)} and the providers ${providers.join(', ') || 'none'}, where code-change declares ${JSON.stringify(declaredSteps)} and the engine is given tests-only`;
+
+const rowVersions = async (db: Database): Promise<readonly string[]> => {
+  const { rows } = await sql<{ version: string }>`
+    select format('%s/%s@%s', workflow, position, xmin) as version from published_workflow_step
+    union all
+    select format('%s@%s', name, xmin) from published_provider
+    order by 1`.execute(db);
+  return rows.map(row => row.version);
+};
+
+const insertSteps = (db: Database, steps: readonly LiteralStep[]): Promise<unknown> =>
+  db
+    .insertInto('published_workflow_step')
+    .values(steps.map(step => ({ ...step, requires: [...step.requires], failures: JSON.stringify(step.failures) })))
+    .execute();
+
+async function publishCrashCheck(postgres: TestPostgres): Promise<Check> {
+  const name = 'an engine killed inside its publish transaction leaves the old published rows whole, and the next start replaces them with the new set';
+  const scratch = await postgres.scratch();
+  const db = connect(scratch.stableUrl, 3);
+  try {
+    await insertSteps(db, [...declaredSteps, ...retiredSteps]);
+    const before = await publishedRows(db);
+    const writing = async (): Promise<boolean> =>
+      Number(
+        (
+          await sql<{ writing: string }>`
+            select count(*) as writing from pg_stat_activity
+            where datname = current_database() and pid <> pg_backend_pid() and backend_xid is not null and wait_event_type = 'Lock'`.execute(db)
+        ).rows[0]?.writing ?? '0',
+      ) > 0;
+    const openWrites = async (): Promise<boolean> =>
+      Number(
+        (
+          await sql<{ open: string }>`select count(*) as open from pg_stat_activity where datname = current_database() and pid <> pg_backend_pid() and backend_xid is not null`.execute(db)
+        ).rows[0]?.open ?? '0',
+      ) === 0;
+    let release = (): void => undefined;
+    const released = new Promise<void>(resolve => {
+      release = resolve;
+    });
+    const blocking = db.connection().execute(async connection => {
+      await sql`begin`.execute(connection);
+      await sql`select name from published_workflow_step where workflow = 'retired-flow' and position = 3 for update`.execute(connection);
+      await released;
+      await sql`commit`.execute(connection);
+    });
+    const doomed = runEngine(scratch.stableUrl, quickEngine);
+    const caught = await until(10_000, writing);
+    await doomed.kill();
+    release();
+    await blocking;
+    const settled = await until(10_000, openWrites);
+    const afterKill = await publishedRows(db);
+    const restarted = runEngine(scratch.stableUrl, quickEngine);
+    const restartedUp = await restarted.waitFor(startLine);
+    const restartedStatus = await restarted.terminate();
+    const replaced = publishedDrift(await publishedRows(db), await publishedProviders(db));
+    return caught && settled && isDeepStrictEqual(afterKill, before) && restartedUp && restartedStatus === 0 && replaced === null
+      ? pass(name, `the engine had deleted part of retired-flow and waited on its last step when it was killed; afterwards all ${String(afterKill.length)} old rows stood, and the restart published the ${String(declaredSteps.length)} steps of code-change alone`)
+      : fail(
+          name,
+          `caught mid-write ${String(caught)}, settled ${String(settled)}, old rows whole ${String(isDeepStrictEqual(afterKill, before))} (${JSON.stringify(afterKill)}), restarted ${String(restartedUp)} with exit ${String(restartedStatus)}, ${replaced ?? 'new set published'}: ${doomed.said()} ${doomed.errors()} ${restarted.said()} ${restarted.errors()}`,
+        );
+  } finally {
+    await db.destroy();
+    await scratch.drop();
+  }
+}
 
 async function engineStartChecks(postgres: TestPostgres): Promise<readonly Check[]> {
   const scratch = await postgres.scratch();
@@ -755,17 +865,36 @@ async function engineStartChecks(postgres: TestPostgres): Promise<readonly Check
     const knownStatus = await known.terminate();
     const line = known.said().split('\n').find(said => said.startsWith(startLine)) ?? '';
     const named = ['the workflows code-change', 'reaper every 200 ms'].every(part => line.includes(part));
+    const published = publishedDrift(await publishedRows(db), await publishedProviders(db));
+    const firstVersions = await rowVersions(db);
+    const again = runEngine(scratch.stableUrl, quickEngine);
+    const againStarted = await again.waitFor(startLine);
+    const againStatus = await again.terminate();
+    const secondVersions = await rowVersions(db);
+    await db.deleteFrom('published_workflow_step').where('position', '=', 2).execute();
+    const planted = publishedDrift(await publishedRows(db), await publishedProviders(db));
+    await db.deleteFrom('published_workflow_step').execute();
+    await db.deleteFrom('published_provider').execute();
     const stranger = await saveRoutine(db, person.id, repository.id, 'no-such-flow');
     const unknown = startEngine({ ...process.env, DATABASE_URL: scratch.stableUrl });
+    const afterRefusal = [...(await publishedRows(db)), ...(await publishedProviders(db))];
     const knownName = 'the engine starts when every routine uses a workflow it was given, and exits 0 on SIGTERM';
-    const unknownName = 'the engine refuses to start and names the routine whose workflow it was not given';
+    const publishedName = 'the engine publishes each step of code-change in order with its runner, required blocks, and failure targets, and tests-only as its Verify provider, and the check fails once a planted delete drops one step';
+    const twiceName = 'a second start with the same code changes no published row';
+    const unknownName = 'the engine refuses to start, names the routine whose workflow it was not given, and publishes nothing';
     return [
       started && named && knownStatus === 0
         ? pass(knownName, known.said().replaceAll('\n', ' '))
         : fail(knownName, `started ${String(started)}, named code-change and the reaper ${String(named)}, exit ${String(knownStatus)}: ${known.said()} ${known.errors()}`),
-      unknown.status === 1 && unknown.said.includes(`Routine ${stranger} version 1 uses the workflow no-such-flow, which this engine was not given.`)
+      published === null && planted !== null
+        ? pass(publishedName, `${JSON.stringify(declaredSteps)}; with implement deleted the check reports: ${planted}`)
+        : fail(publishedName, published ?? 'the check passed with implement deleted from the published rows'),
+      againStarted && againStatus === 0 && firstVersions.length > 0 && isDeepStrictEqual(firstVersions, secondVersions)
+        ? pass(twiceName, `${String(secondVersions.length)} rows kept their row versions: ${secondVersions.join(', ')}`)
+        : fail(twiceName, `started ${String(againStarted)}, exit ${String(againStatus)}, row versions ${firstVersions.join(', ')} then ${secondVersions.join(', ')}: ${again.said()} ${again.errors()}`),
+      unknown.status === 1 && unknown.said.includes(`Routine ${stranger} version 1 uses the workflow no-such-flow, which this engine was not given.`) && afterRefusal.length === 0
         ? pass(unknownName, unknown.said.replaceAll('\n', ' '))
-        : fail(unknownName, `exit ${String(unknown.status)}: ${unknown.said}`),
+        : fail(unknownName, `exit ${String(unknown.status)}, ${String(afterRefusal.length)} published rows: ${unknown.said}`),
     ];
   } finally {
     await db.destroy();
@@ -1021,9 +1150,9 @@ export const scenarios: readonly Scenario[] = [
   {
     name: 'engine-start',
     summary:
-      "starts the engine's entry point against Postgres: it refuses a routine's unknown workflow and a missing DATABASE_URL, idles on an empty database, and on SIGTERM finishes its reaper pass and exits 0",
+      "starts the engine's entry point against Postgres: it publishes its workflows' steps and its Verify providers once and atomically, refuses a routine's unknown workflow and a missing DATABASE_URL, idles on an empty database, and on SIGTERM finishes its reaper pass and exits 0",
     run: () =>
-      withPostgres(async postgres => [...(await engineStartChecks(postgres)), await loopNamesCheck(postgres), noUrlCheck(), await idleCheck(postgres), ...(await sigtermChecks(postgres)), await restartCheck(postgres)]),
+      withPostgres(async postgres => [...(await engineStartChecks(postgres)), await publishCrashCheck(postgres), await loopNamesCheck(postgres), noUrlCheck(), await idleCheck(postgres), ...(await sigtermChecks(postgres)), await restartCheck(postgres)]),
   },
   {
     name: 'tasks-seed',

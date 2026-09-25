@@ -1,5 +1,7 @@
+import { isDeepStrictEqual } from 'node:util';
+import { sql } from 'kysely';
 import type { Database } from '../../shared/db/client.ts';
-import { builtByStep, type StepKind, type Workflow } from '../../shared/workflow.ts';
+import { builtByStep, type Failure, type StepKind, type Workflow } from '../../shared/workflow.ts';
 
 export type Workflows = ReadonlyMap<string, Workflow>;
 
@@ -64,4 +66,39 @@ export async function startProblems(db: Database, workflows: Workflows): Promise
       version =>
         `Routine ${version.routine_id} version ${String(version.version)} uses the workflow ${version.workflow}, which this engine was not given. Add its feature folder to services/engine/workflows.ts, or save the routine with one of: ${[...workflows.keys()].join(', ')}.`,
     );
+}
+
+export type PublishedStep = {
+  readonly workflow: string;
+  readonly position: number;
+  readonly name: string;
+  readonly run_by: StepKind['runBy'];
+  readonly requires: readonly string[];
+  readonly failures: Readonly<Record<string, { readonly kind: Failure['kind']; readonly to: string | null }>>;
+};
+
+const targetOf = (kind: StepKind, failure: Failure): string | null => ('to' in failure ? failure.to : failure.kind === 'rerun' ? kind.name : null);
+
+export const publishedSteps = (workflows: Workflows): readonly PublishedStep[] =>
+  [...workflows.values()].flatMap(workflow =>
+    workflow.steps.map((kind, index) => ({
+      workflow: workflow.name,
+      position: index + 1,
+      name: kind.name,
+      run_by: kind.runBy,
+      requires: [...kind.requires],
+      failures: Object.fromEntries(Object.entries(kind.failures).map(([verdict, failure]) => [verdict, { kind: failure.kind, to: targetOf(kind, failure) }])),
+    })),
+  );
+
+export async function publishWorkflows(db: Database, workflows: Workflows): Promise<void> {
+  const given = publishedSteps(workflows);
+  await db.transaction().execute(async tx => {
+    await sql`lock table published_workflow_step in share row exclusive mode`.execute(tx);
+    const held = await tx.selectFrom('published_workflow_step').selectAll().execute();
+    const stale = held.filter(row => !given.some(step => isDeepStrictEqual(step, row)));
+    const missing = given.filter(step => !held.some(row => isDeepStrictEqual(step, row)));
+    if (stale.length > 0) await tx.deleteFrom('published_workflow_step').where(eb => eb.or(stale.map(row => eb.and({ workflow: row.workflow, position: row.position })))).execute();
+    if (missing.length > 0) await tx.insertInto('published_workflow_step').values(missing.map(step => ({ ...step, requires: [...step.requires], failures: JSON.stringify(step.failures) }))).execute();
+  });
 }
