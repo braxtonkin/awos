@@ -109,9 +109,10 @@ const probes: Readonly<Record<Exclude<Place, 'task'>, (scope: Scope) => Promise<
     if (attempts.length === 0) return [];
     const { namespace } = sources.cluster;
     const labelSelector = `${labels.attempt} in (${attempts.map(attempt => attempt.id).join(',')})`;
-    const [jobs, secrets] = await Promise.all([sources.cluster.batch.listNamespacedJob({ namespace, labelSelector }), sources.cluster.core.listNamespacedSecret({ namespace, labelSelector })]);
+    const [jobs, pods, secrets] = await Promise.all([sources.cluster.batch.listNamespacedJob({ namespace, labelSelector }), sources.cluster.core.listNamespacedPod({ namespace, labelSelector }), sources.cluster.core.listNamespacedSecret({ namespace, labelSelector })]);
     return [
       ...jobs.items.map(job => ({ kind: 'Job', metadata: job.metadata })),
+      ...pods.items.map(pod => ({ kind: 'Pod', metadata: pod.metadata })),
       ...secrets.items.map(secret => ({ kind: 'Secret', metadata: secret.metadata })),
     ].map(({ kind, metadata }) => leftover('cluster', `${kind} ${metadata?.name ?? 'without a name'}`, `in namespace ${namespace}, labeled for attempt ${metadata?.labels?.[labels.attempt] ?? 'unknown'}`));
   },
@@ -127,8 +128,13 @@ const probes: Readonly<Record<Exclude<Place, 'task'>, (scope: Scope) => Promise<
   },
   github: async ({ sources, ticket, task }) => {
     const recorded = [...new Set([...(await attemptBranches(sources.database, task)).map(found => found.branch), ...(await pullRequestBranches(sources.database, task))])];
-    const listed = new Set((await Promise.all(recorded.map(branch => sources.branchesStartingWith(branch)))).flat());
-    return recorded.filter(branch => listed.has(branch)).map(branch => leftover('github', `branch ${branch}`, `is still on GitHub for ${ticket}`));
+    const ticketBranch = `autoworker/${ticket}`;
+    const forTicket = (branch: string): boolean => branch === ticketBranch || branch.startsWith(`${ticketBranch}-`) || branch.startsWith(`${ticketBranch}/`);
+    const listed = new Set((await Promise.all([ticketBranch, ...recorded].map(prefix => sources.branchesStartingWith(prefix)))).flat());
+    return [...listed]
+      .filter(branch => recorded.includes(branch) || forTicket(branch))
+      .sort()
+      .map(branch => leftover('github', `branch ${branch}`, `is still on GitHub for ${ticket}${recorded.includes(branch) ? '' : ', and the record does not name it'}`));
   },
 };
 

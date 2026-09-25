@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { setTimeout as wait } from 'node:timers/promises';
 import { sql } from 'kysely';
 import { z } from 'zod';
-import { checksOf, fail, pass, type Check, type Scenario } from '../../tools/verify/check.ts';
+import { checksOf, fail, info, pass, type Check, type Line, type Scenario } from '../../tools/verify/check.ts';
 import { buildAttemptImage, ensureRegistry, gitServer, jobNamespace, kindAddress, kubernetes, registry, seedRepository, type GitServer } from '../../tools/verify/cluster.ts';
 import { kind } from '../../tools/verify/kind.ts';
 import { withPostgres } from '../../tools/verify/postgres.ts';
@@ -337,60 +337,73 @@ type Lane = (typeof lanes)[number];
 
 const isLane = (name: string): name is Lane => lanes.some(lane => lane === name);
 
-async function roundTripLive(args: readonly string[], out: (line: string) => void): Promise<readonly Check[]> {
+async function roundTripLive(args: readonly string[], out: (line: string) => void): Promise<readonly Line[]> {
   const chosen = args.length === 0 || args.includes('all') ? [...lanes] : args;
   const unknown = chosen.filter(name => !isLane(name));
   if (unknown.length > 0) return [fail('round-trip names known parts', `unknown ${unknown.join(', ')}; name any of ${lanes.join(', ')}, or all`)];
-  const checks: Check[] = [...(checksOf(await kind.run(['up'])))];
-  if (!checks.every(check => check.passed)) return checks;
-  checks.push(pass('1: registry ready', await ensureRegistry()));
+  const up = checksOf(await kind.run(['up']));
+  if (!up.every(check => check.passed)) return up;
+  const checks: Line[] = [...up, info('1: registry ready', 'passed', await ensureRegistry())];
   const attemptImage = await buildAttemptImage(`${registry.host}/autoworker-job:round-trip`);
   const standIn = await standInImage(attemptImage);
-  checks.push(pass('1: attempt images built', `${attemptImage}; stand-in ${standIn}`));
+  checks.push(info('1: attempt images built', 'passed', `${attemptImage}; stand-in ${standIn}`));
   const address = await kindAddress();
   const core = kubernetes();
   const namespace = `round-trip-${randomBytes(3).toString('hex')}`;
   await jobNamespace(core, namespace, serviceAccount);
-  const git = await gitServer(address);
-  const head = await seedRepository(git, repository, { 'README.md': 'A sandbox for the round trip.\n', 'src/words.ts': 'export const titleCase = (text: string): string => text;\n' });
-  checks.push(pass('1: kind, a namespace, and a git server ready', `${namespace}, ${git.base}${repository}.git at ${head}`));
   try {
-    return await withPostgres(async postgres => {
-      const scratch = await postgres.scratch();
-      const store = await openStore(scratch.stableUrl);
-      try {
-        const routine = await seedWorld(store, fakeCodexLogin());
-        await trustLogins(store);
-        const world: World = { store, git, address, namespace, core, routine, out };
-        checks.push(pass('1: Postgres and the setup file ready', `routine ${routine} with a gate after Specify`));
-        for (const name of chosen.filter(isLane)) {
-          const began = performance.now();
-          try {
-            if (name === 'stand-in') checks.push(...(await roundTrip(world, standIn, 'stand-in', stored => stored === standInPlan)));
-            if (name === 'send-back') checks.push(...(await sendBack(world, standIn)));
-            if (name === 'outage') checks.push(...(await outage(world, standIn)));
-            if (name === 'stop') checks.push(...(await stopMidTurn(world, standIn)));
-            if (name === 'retry') checks.push(...(await stopThenRetry(world, standIn)));
-            if (name === 'real') {
-              const reseeded = await seedWorld(store, await accessCopy());
-              await store.db.updateTable('credential').set({ state: 'valid', checked_at: new Date() }).where('connector', '=', 'github').execute();
-              checks.push(...(await roundTrip({ ...world, routine: reseeded }, attemptImage, 'real', stored => stored.trim().length > 0)));
-            }
-          } catch (error) {
-            checks.push(fail(`${name}: runs to completion`, error instanceof Error ? error.message : String(error)));
-          }
-          checks.push(pass(`${name}: took`, `${((performance.now() - began) / 1000).toFixed(1)} s`));
-        }
-        return checks;
-      } finally {
-        await closeStore(store);
-        await scratch.drop();
-      }
-    });
+    const git = await gitServer(address);
+    try {
+      const head = await seedRepository(git, repository, { 'README.md': 'A sandbox for the round trip.\n', 'src/words.ts': 'export const titleCase = (text: string): string => text;\n' });
+      checks.push(info('1: kind, a namespace, and a git server ready', 'passed', `${namespace}, ${git.base}${repository}.git at ${head}`));
+      return [...checks, ...(await withRoundTripWorld({ git, address, namespace, core, out }, chosen.filter(isLane), attemptImage, standIn))];
+    } finally {
+      await git.stop();
+    }
   } finally {
-    await git.stop();
     await core.deleteNamespace({ name: namespace });
   }
+}
+
+async function withRoundTripWorld(
+  setting: Pick<World, 'git' | 'address' | 'namespace' | 'core' | 'out'>,
+  chosen: readonly Lane[],
+  attemptImage: string,
+  standIn: string,
+): Promise<readonly Line[]> {
+  return withPostgres(async postgres => {
+    const checks: Line[] = [];
+    const scratch = await postgres.scratch();
+    const store = await openStore(scratch.stableUrl);
+    try {
+      const routine = await seedWorld(store, fakeCodexLogin());
+      await trustLogins(store);
+      const world: World = { ...setting, store, routine };
+      checks.push(info('1: Postgres and the setup file ready', 'passed', `routine ${routine} with a gate after Specify`));
+      for (const name of chosen) {
+        const began = performance.now();
+        try {
+          if (name === 'stand-in') checks.push(...(await roundTrip(world, standIn, 'stand-in', stored => stored === standInPlan)));
+          if (name === 'send-back') checks.push(...(await sendBack(world, standIn)));
+          if (name === 'outage') checks.push(...(await outage(world, standIn)));
+          if (name === 'stop') checks.push(...(await stopMidTurn(world, standIn)));
+          if (name === 'retry') checks.push(...(await stopThenRetry(world, standIn)));
+          if (name === 'real') {
+            const reseeded = await seedWorld(store, await accessCopy());
+            await store.db.updateTable('credential').set({ state: 'valid', checked_at: new Date() }).where('connector', '=', 'github').execute();
+            checks.push(...(await roundTrip({ ...world, routine: reseeded }, attemptImage, 'real', stored => stored.trim().length > 0)));
+          }
+        } catch (error) {
+          checks.push(fail(`${name}: runs to completion`, error instanceof Error ? error.message : String(error)));
+        }
+        checks.push(info(`${name}: took`, 'n/a', `${((performance.now() - began) / 1000).toFixed(1)} s`));
+      }
+      return checks;
+    } finally {
+      await closeStore(store);
+      await scratch.drop();
+    }
+  });
 }
 
 export const roundTripScenario: Scenario = {

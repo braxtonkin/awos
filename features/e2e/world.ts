@@ -1,5 +1,5 @@
-import { githubFromEnvironment, type GitHub } from './github.ts';
-import { jiraFromEnvironment, type Jira } from './jira.ts';
+import { githubTokenFromEnvironment, githubWithToken, type GitHub } from './github.ts';
+import { jiraAt, jiraLoginFromEnvironment, type Jira } from './jira.ts';
 
 export const worldNames = ['sandbox', 'local'] as const;
 
@@ -22,14 +22,16 @@ export type World = {
 };
 
 export function sandboxWorld(repository: string, codexLogin: () => Promise<string>): World {
-  const jira = jiraFromEnvironment(process.env);
+  const login = jiraLoginFromEnvironment(process.env);
+  const githubToken = githubTokenFromEnvironment(process.env);
+  const jira = jiraAt(login.site, login.email, login.token);
   return {
     name: 'sandbox',
     jira,
-    github: githubFromEnvironment(process.env, repository),
+    github: githubWithToken(githubToken, repository),
     engine: {
       settings: { JIRA_SITE: jira.site },
-      secrets: { github: process.env['GITHUB_TOKEN'] ?? '', jiraLogin: `${jira.email}:${process.env['JIRA_API_TOKEN'] ?? ''}` },
+      secrets: { github: githubToken, jiraLogin: `${login.email}:${login.token}` },
       codexLogin,
       image: attemptImage => Promise.resolve(attemptImage),
       trustLogins: false,
