@@ -9,7 +9,7 @@ import { withPostgres, type TestPostgres } from '../../tools/verify/postgres.ts'
 import { issueToken, nulStandIn, numberCommand, pollCommands, receive, rules, sendCommand, type BridgeEngine } from './engine.ts';
 import { provePlants, world, worldStartsAt } from './invariants.ts';
 import { attemptId, bridgeRequestIds, commandRequestId, protocolVersion, type Caller, type EventsPost } from './protocol.ts';
-import { droppedBy, mutantName, mutants, noMutantYet, simulate, type MutantName, type Plan, type Run } from './simulate.ts';
+import { droppedBy, harnessBreaks, mutantName, mutants, noMutantYet, simulate, type MutantName, type Plan, type Run } from './simulate.ts';
 
 const flags = { seeds: { type: 'string' }, seed: { type: 'string' }, steps: { type: 'string' }, mutant: { type: 'string' }, trace: { type: 'string' } } as const;
 
@@ -74,14 +74,15 @@ async function cleanSeeds(postgres: TestPostgres, options: Options): Promise<rea
 }
 
 async function mutantCheck(postgres: TestPostgres, mutant: MutantName, options: Options): Promise<Check> {
-  const { breaks: expected, shape } = mutants[mutant];
+  const { breaks: expected, shape, sim } = mutants[mutant];
+  const where = sim === undefined ? 'in the engine or the schema' : `in the harness, because ${harnessBreaks[sim]}`;
   const runs = await simulate(postgres, [{ seeds: seedList(options, Math.min(options.seeds, mutantSeeds)), steps: options.steps, mutant }], tracer(options));
   const breaking = runs.filter(run => run.failure !== undefined && run.failure.broken.some(found => expected.includes(found.property)) && (shape?.holds(run.failure) ?? true));
   const name = `${expected.join(' or ')} fails under the ${mutant} mutant${shape === undefined ? '' : `, ${shape.label}`}`;
   const first = breaking[0];
   return first === undefined
     ? fail(name, `no seed of ${String(runs.length)} broke it; ${runs.filter(run => run.failure !== undefined).slice(0, 2).map(failureOf).join('; ')}`)
-    : pass(name, `${String(breaking.length)} of ${String(runs.length)} seeds; first: ${failureOf(first)}`);
+    : pass(name, `${String(breaking.length)} of ${String(runs.length)} seeds, mutated ${where}; first: ${failureOf(first)}`);
 }
 
 async function plantChecks(postgres: TestPostgres): Promise<Check> {
