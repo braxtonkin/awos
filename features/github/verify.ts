@@ -1,6 +1,8 @@
 import { parseArgs } from 'node:util';
 import { z } from 'zod';
 import { fail, pass, type Check, type Scenario } from '../../tools/verify/check.ts';
+import { withPostgres } from '../../tools/verify/postgres.ts';
+import { schemaChecks } from './catalog.ts';
 import { githubClient } from './client.ts';
 import { liveScenario } from './live.ts';
 import { mutantName, mutants, simulate, type MutantName, type Run } from './simulate.ts';
@@ -82,7 +84,7 @@ async function parseCheck(): Promise<Check> {
 
 async function simulationChecks(options: SimulationOptions): Promise<readonly Check[]> {
   if (options.mutant === 'all') {
-    const checks: Check[] = [await parseCheck()];
+    const checks: Check[] = [await parseCheck(), ...(await withPostgres(schemaChecks))];
     for (const mutant of mutantName.options) checks.push(await mutantCheck(mutant, options));
     return checks;
   }
@@ -94,7 +96,7 @@ export const scenarios: readonly Scenario[] = [
   {
     name: 'github-sim',
     summary:
-      'reads merge states and performs pull request actions through the real client against a seeded fake GitHub with pushes, late checks, reviews from ignored and other reviewers, conflicts, queue ejections, and lost replies, and checks every Land property after each step; --mutant all proves each guard the connector holds can fail',
+      'reads merge states and performs pull request actions through the real client against a seeded fake GitHub with pushes, late checks, reviews from ignored and other reviewers, conflicts, queue ejections, and lost replies, and checks every Land property after each step; --mutant all proves each guard the connector holds can fail, and each schema check named github_ refuses its plant',
     run: args => {
       const parsed = simulationOptions.safeParse(parseArgs({ args: [...args], options: simulationFlags, strict: true, allowPositionals: false }).values);
       if (!parsed.success) throw new Error(z.prettifyError(parsed.error));

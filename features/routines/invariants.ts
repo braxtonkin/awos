@@ -97,7 +97,7 @@ export const properties = {
       select 'a task moved to another routine', t.key, p.routine_id, t.routine_id from task t join prior_tasks p on p.id = t.id where p.routine_id <> t.routine_id`,
     plants: [
       { setup: [sql`alter table task drop constraint one_task_per_key`, task(1)], violation: task(2) },
-      { setup: [sql`drop trigger task_keeps_its_routine on task`, task(1)], violation: sql`update task set routine_id = 2 where key = 'T-1'` },
+      { setup: [sql`drop trigger routines_task_keeps_its_routine on task`, task(1)], violation: sql`update task set routine_id = 2 where key = 'T-1'` },
     ],
   },
   AssigneeFollowsTicket: {
@@ -142,6 +142,16 @@ export const properties = {
         and (not exists (select 1 from routine_run x where x.routine_id = r.id and x.slot = due.slot and x.outcome in ('done', 'failed'))
              or exists (select 1 from routine_run x where x.routine_id = r.id and x.finished_at is null))`,
     plants: [{ setup: [doneRun(1, 0), doneRun(2, 0, '00000000-0000-4000-8000-00000000bbbb')], violation: liveRun(60) }],
+  },
+  RunFinishesWithinItsLease: {
+    moment: 'each-step',
+    breaks: sql`select id, routine_id, outcome, lease_until, finished_at from routine_run where outcome <> 'lost' and finished_at > lease_until`,
+    plants: [
+      {
+        setup: [sql`alter table routine_run drop constraint run_finishes_within_its_lease`, liveRun(0)],
+        violation: sql`update routine_run set finished_at = ${t0} + interval '91 seconds', finished_by = claim, outcome = 'done' where id = 1`,
+      },
+    ],
   },
 } satisfies Readonly<Record<string, Property>>;
 

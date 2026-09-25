@@ -5,6 +5,7 @@ import { sql } from 'kysely';
 import { z } from 'zod';
 import { connect } from '../../shared/db/client.ts';
 import { fail, pass, type Check, type Scenario } from '../../tools/verify/check.ts';
+import { auditCatalog, catalogProblems } from '../../tools/verify/catalog.ts';
 import { withPostgres, type TestPostgres } from '../../tools/verify/postgres.ts';
 import { issueToken, nulStandIn, numberCommand, pollCommands, receive, rules, sendCommand, type BridgeEngine } from './engine.ts';
 import { provePlants, world, worldStartsAt } from './invariants.ts';
@@ -93,33 +94,10 @@ async function plantChecks(postgres: TestPostgres): Promise<Check> {
 }
 
 async function catalogCheck(postgres: TestPostgres): Promise<Check> {
-  const scratch = await postgres.scratch();
-  const db = connect(scratch.url, 1);
-  try {
-    const { rows: scoped } = await sql<{ name: string }>`
-      select c.conname as name from pg_constraint c join pg_class t on t.oid = c.conrelid left join pg_attribute a on a.attrelid = c.conrelid and a.attnum = c.conkey[1]
-      where c.conrelid in ('attempt_event'::regclass, 'attempt_command'::regclass)
-        and not (c.contype = 'p' and c.conname = t.relname || '_pkey') and not (c.contype = 'n' and c.conname = t.relname || '_' || a.attname || '_not_null')
-      union all
-      select i.relname from pg_index x join pg_class i on i.oid = x.indexrelid
-      where x.indrelid in ('attempt_event'::regclass, 'attempt_command'::regclass) and not exists (select 1 from pg_constraint c where c.conindid = x.indexrelid and c.contype in ('p', 'u', 'x'))
-      union all
-      select tgname from pg_trigger where tgrelid in ('attempt_event'::regclass, 'attempt_command'::regclass) and not tgisinternal`.execute(db);
-    const { rows: everywhere } = await sql<{ name: string }>`
-      select conname as name from pg_constraint union select tgname from pg_trigger where not tgisinternal union select relname from pg_class where relkind = 'i'`.execute(db);
-    const guards = scoped.map(row => row.name);
-    const known = new Set(everywhere.map(row => row.name));
-    const listed = [...mutantName.options.flatMap(droppedBy), ...Object.values(noMutantYet).flat()];
-    const problems = [
-      ...guards.filter(guard => !listed.includes(guard)).map(guard => `${guard} is in neither list`),
-      ...listed.filter(listedName => !known.has(listedName)).map(listedName => `${listedName} is listed, but the schema has no such guard`),
-    ];
-    const name = 'every named constraint, index, and trigger on attempt_event and attempt_command has a mutant or a reason in noMutantYet';
-    return problems.length === 0 ? pass(name, guards.join(', ')) : fail(name, problems.join('; '));
-  } finally {
-    await db.destroy();
-    await scratch.drop();
-  }
+  const audit = await auditCatalog(postgres, { tables: ['attempt_event', 'attempt_command'], owner: 'bridge' }, { mutated: mutantName.options.flatMap(droppedBy), reasoned: Object.values(noMutantYet).flat() });
+  const problems = catalogProblems(audit);
+  const name = 'every named constraint, index, and trigger on attempt_event and attempt_command, and every one named bridge_ on any table, has a mutant or a reason in noMutantYet';
+  return problems.length === 0 ? pass(name, audit.guards.join(', ')) : fail(name, problems.join('; '));
 }
 
 const engine: BridgeEngine = {
