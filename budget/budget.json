@@ -50,8 +50,8 @@
         "{features,services,shared}/**/*-model.ts",
         "{features,services,shared}/**/*.test.ts"
       ],
-      "lines": 16423,
-      "characters": 786847,
+      "lines": 16448,
+      "characters": 788516,
       "longest-line": 504
     },
     {
