@@ -76,6 +76,8 @@ const attemptsIn = (state: TraceState): readonly AttemptView[] =>
 
 const hungIn = (state: TraceState): readonly string[] => [...state.text.matchAll(/(w\d+) :> "hung"/g)].map(([, worker = '']) => worker);
 
+const failedIn = (state: TraceState): readonly string[] => [...state.text.matchAll(/(w\d+) :> "failed"/g)].map(([, worker = '']) => worker);
+
 const lastRealState = (run: TlcRun): TraceState | undefined => run.trace.filter(state => state.action !== 'Stuttering').at(-1);
 
 const loopedTask = (run: TlcRun, looping: (views: readonly TaskView[]) => boolean): boolean =>
@@ -177,6 +179,16 @@ const renewsLapsedLeaseForever: Shape = {
   holds: run => run.loopActions.includes('Hang') && run.loopActions.includes('Wake') && !run.loopActions.includes('Reap'),
 };
 
+const failedLaunchHoldsItsTask: Shape = {
+  label: 'by a worker whose launch failed holding its task forever',
+  holds: run => {
+    const last = lastRealState(run);
+    const ending = run.stutters ? (last === undefined ? [] : [last]) : run.loop;
+    const first = ending[0];
+    return first !== undefined && attemptsIn(first).some(held => holdsThroughout(ending, held) && ending.every(state => failedIn(state).includes(held.worker)));
+  },
+};
+
 const invariant = (guard: string, without: string, property: string, shape?: Shape): Mutant => ({
   guard,
   without,
@@ -238,6 +250,8 @@ const mutants: readonly Mutant[] = [
   unsettled('ReaperIsFair', 'the reaper has no fairness', hungWorkerHoldsItsTask),
   action('LapsedLeaseCannotRenew', 'a worker renews a lease that has lapsed', 'LapsedLeaseNeverRenews'),
   unsettled('LapsedLeaseCannotRenew', 'a worker renews a lease that has lapsed', renewsLapsedLeaseForever),
+  action('RefusedLaunchIsNotLost', 'a refused launch counts as a lost attempt', 'ReleasedOnlyAfterItsLease'),
+  unsettled('FailedLaunchRelaunches', 'a launch that failed is never tried again', failedLaunchHoldsItsTask),
   invariant('EndStageIsFinal', "passing a routine's end stage does not end the task", 'StopsAtItsEndStage'),
   action('GateBlocksUntilApproved', 'a gated stage passes straight to the next stage', 'GatePassesOnlyOnApprove'),
   action('ReturnClearsApprovals', 'a return to Implement keeps the approval of a gate it must pass again', 'GatePassesOnlyOnApprove'),
@@ -261,13 +275,13 @@ const readConfig = (file: string): string => readFileSync(new URL(file, import.m
 
 const typeInvariant = 'TypeOK';
 
-const bounds = ['Tasks', 'Workers', 'MaxRounds', 'MaxEnvReruns', 'MaxLost', 'MaxStageRetries', 'MaxInputWaits', 'MaxHumanActions', 'MaxReassignments'] as const;
+const bounds = ['Tasks', 'Workers', 'MaxRounds', 'MaxEnvReruns', 'MaxLost', 'MaxStageRetries', 'MaxInputWaits', 'MaxHumanActions', 'MaxReassignments', 'MaxLaunchFaults'] as const;
 
 type Bound = (typeof bounds)[number];
 
 const floors: Readonly<Record<string, Readonly<Record<Bound, number>>>> = {
-  'Tasks.cfg': { Tasks: 2, Workers: 2, MaxRounds: 2, MaxEnvReruns: 2, MaxLost: 2, MaxStageRetries: 1, MaxInputWaits: 1, MaxHumanActions: 2, MaxReassignments: 1 },
-  'Tasks.nightly.cfg': { Tasks: 2, Workers: 2, MaxRounds: 3, MaxEnvReruns: 3, MaxLost: 3, MaxStageRetries: 2, MaxInputWaits: 2, MaxHumanActions: 3, MaxReassignments: 1 },
+  'Tasks.cfg': { Tasks: 2, Workers: 2, MaxRounds: 2, MaxEnvReruns: 2, MaxLost: 2, MaxStageRetries: 1, MaxInputWaits: 1, MaxHumanActions: 2, MaxReassignments: 1, MaxLaunchFaults: 1 },
+  'Tasks.nightly.cfg': { Tasks: 2, Workers: 2, MaxRounds: 3, MaxEnvReruns: 3, MaxLost: 3, MaxStageRetries: 2, MaxInputWaits: 2, MaxHumanActions: 3, MaxReassignments: 1, MaxLaunchFaults: 1 },
 };
 
 type Section = 'CONSTANTS' | 'INVARIANTS' | 'PROPERTIES';
