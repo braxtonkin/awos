@@ -86,11 +86,11 @@ const comment = (key: string, text: string, linkPullRequest: boolean): readonly 
 const deletions = ({ repository, branches }: Verdicted): readonly Owe<Kind>[] => branches.map(branch => owe(actionKinds.branchDelete, { repository: repository.github, branch }));
 
 function implemented(verdicted: Verdicted): readonly Owe<Kind>[] {
-  const { ticket: named, repository, taskBranch, attempt, pullRequestOwed, output } = verdicted;
+  const { ticket: named, repository, taskBranch, attempt, pullRequest, output } = verdicted;
   const head = attempt.lastPushed ?? taskBranch.head;
   if (head === null) return deletions(verdicted);
   const advanced = head === taskBranch.head ? [] : [owe(actionKinds.branchAdvance, { repository: repository.github, branch: taskBranch.name, from: taskBranch.head, to: head })];
-  const opened = pullRequestOwed
+  const opened = pullRequest.kind !== 'none'
     ? []
     : [owe(actionKinds.prOpenDraft, { repository: repository.github, head: taskBranch.name, base: repository.branch, title: `${named.key}: ${named.title}`, body: textOf(output) ?? named.title })];
   return [...advanced, ...opened, ...comment(named.key, 'AutoWorker pushed the change to its draft pull request.', true), ...deletions(verdicted)];
@@ -117,7 +117,7 @@ function stepOwes(verdicted: Verdicted): readonly Owe<Kind>[] {
       return verdict === 'pass' ? implemented(verdicted) : [];
     case 'verify': {
       const text = evidenceText(evidence);
-      const onPull = verdict === 'pass' && text !== null && verdicted.pullRequestOwed ? [owe(actionKinds.prEvidence, { repository: verdicted.repository.github, head: verdicted.taskBranch.name, evidence: text })] : [];
+      const onPull = verdict === 'pass' && text !== null && verdicted.pullRequest.kind === 'opened' ? [owe(actionKinds.prEvidence, { repository: verdicted.repository.github, number: verdicted.pullRequest.number, evidence: text })] : [];
       return [...(text === null ? [] : comment(named.key, `AutoWorker's evidence:\n\n${text}`, true)), ...onPull, ...(verdict === 'pass' ? deletions(verdicted) : [])];
     }
     default:

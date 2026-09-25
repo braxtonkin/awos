@@ -63,6 +63,8 @@ const attemptsIn = (state: TraceState): readonly AttemptView[] =>
 
 const hungIn = (state: TraceState): readonly string[] => [...state.text.matchAll(/(w\d+) :> "hung"/g)].map(([, worker = '']) => worker);
 
+const failedIn = (state: TraceState): readonly string[] => [...state.text.matchAll(/(w\d+) :> "failed"/g)].map(([, worker = '']) => worker);
+
 const loopedTask = (run: TlcRun, looping: (views: readonly TaskView[]) => boolean): boolean =>
   run.loop.length > 0 && [...new Set(run.loop.flatMap(tasksIn).map(view => view.id))].some(id => looping(run.loop.flatMap(tasksIn).filter(view => view.id === id)));
 
@@ -195,11 +197,23 @@ const guards = [
   'RetryKeepsApprovals',
   'LostApprovalStaysLost',
   'LapsedLeaseCannotRenew',
+  'RefusedLaunchIsNotLost',
+  'FailedLaunchRelaunches',
 ] as const;
 
 const renewsLapsedLeaseForever: Shape = {
   label: 'by a worker whose lease lapses and renews forever',
   holds: run => run.loopActions.includes('Hang') && run.loopActions.includes('Wake') && !run.loopActions.includes('Reap'),
+};
+
+const failedLaunchHoldsItsTask: Shape = {
+  label: 'by a worker whose launch failed holding its task forever',
+  holds: run => {
+    const last = lastRealState(run);
+    const ending = run.stutters ? (last === undefined ? [] : [last]) : run.loop;
+    const first = ending[0];
+    return first !== undefined && attemptsIn(first).some(held => holdsThroughout(ending, held) && ending.every(state => failedIn(state).includes(held.worker)));
+  },
 };
 
 const properties = {
@@ -233,6 +247,7 @@ const properties = {
   ReviewsOnlyGrow: 'PROPERTIES',
   LaterReviewWaitsForAPerson: 'PROPERTIES',
   EndStagePassIsDone: 'PROPERTIES',
+  ReleasedOnlyAfterItsLease: 'PROPERTIES',
   LapsedLeaseNeverRenews: 'PROPERTIES',
   EveryTaskSettles: 'PROPERTIES',
 } as const;
@@ -257,11 +272,11 @@ const tasksModel = defineModel({
   configs: {
     pr: {
       file: 'Tasks.cfg',
-      floors: { Tasks: 2, Workers: 2, MaxRounds: 2, MaxEnvReruns: 2, MaxLost: 2, MaxStageRetries: 1, MaxInputWaits: 1, MaxHumanActions: 2, MaxReassignments: 1 },
+      floors: { Tasks: 2, Workers: 2, MaxRounds: 2, MaxEnvReruns: 2, MaxLost: 2, MaxStageRetries: 1, MaxInputWaits: 1, MaxHumanActions: 2, MaxReassignments: 1, MaxLaunchFaults: 1 },
     },
     nightly: {
       file: 'Tasks.nightly.cfg',
-      floors: { Tasks: 2, Workers: 2, MaxRounds: 3, MaxEnvReruns: 3, MaxLost: 3, MaxStageRetries: 2, MaxInputWaits: 2, MaxHumanActions: 3, MaxReassignments: 1 },
+      floors: { Tasks: 2, Workers: 2, MaxRounds: 3, MaxEnvReruns: 3, MaxLost: 3, MaxStageRetries: 2, MaxInputWaits: 2, MaxHumanActions: 3, MaxReassignments: 1, MaxLaunchFaults: 1 },
     },
   },
   guards,
@@ -299,6 +314,8 @@ const tasksModel = defineModel({
     unsettled('ReaperIsFair', 'the reaper has no fairness', hungWorkerHoldsItsTask),
     breaks('LapsedLeaseCannotRenew', 'a worker renews a lease that has lapsed', 'LapsedLeaseNeverRenews'),
     unsettled('LapsedLeaseCannotRenew', 'a worker renews a lease that has lapsed', renewsLapsedLeaseForever),
+    breaks('RefusedLaunchIsNotLost', 'a refused launch counts as a lost attempt', 'ReleasedOnlyAfterItsLease'),
+    unsettled('FailedLaunchRelaunches', 'a launch that failed is never tried again', failedLaunchHoldsItsTask),
     breaks('EndStageIsFinal', "passing a routine's end stage does not end the task", 'StopsAtItsEndStage'),
     breaks('GateBlocksUntilApproved', 'a gated stage passes straight to the next stage', 'GatePassesOnlyOnApprove'),
     breaks('ReturnClearsApprovals', 'a return to Implement keeps the approval of a gate it must pass again', 'GatePassesOnlyOnApprove'),

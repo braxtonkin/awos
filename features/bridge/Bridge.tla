@@ -15,7 +15,8 @@ CONSTANTS
     LostAttemptIsFenced,
     RestartGraceForLeases,
     FinishWaitsForLastLine,
-    EngineIsFair
+    EngineIsFair,
+    LapsedLeaseStaysLapsed
 
 LinesPerStep == 3
 
@@ -157,11 +158,13 @@ Answered(range, heard, twice) ==
     /\ acked' = heard
     /\ posts' = (IF twice THEN posts ELSE posts \ {range}) \cup (IF bridge = "up" /\ heard < range[2] THEN ResendFrom(heard) ELSE {})
 
+Renewed == IF LapsedLeaseStaysLapsed /\ lease # "fresh" THEN lease ELSE "fresh"
+
 Commit(store) ==
     /\ rows' = store.rows
     /\ highest' = store.highest
     /\ timesStored' = store.timesStored
-    /\ lease' = "fresh"
+    /\ lease' = Renewed
 
 BridgeStops ==
     /\ bridge' = "down"
@@ -299,7 +302,7 @@ OpenStream ==
     /\ stream' = "open"
     /\ \E echo \in IF Replay = <<>> THEN {FALSE} ELSE BOOLEAN :
          frames' = IF echo THEN Append(Replay, commands) ELSE Replay
-    /\ lease' = "fresh"
+    /\ lease' = Renewed
     /\ UNCHANGED <<bridgeMemory, bridge, posts, engine, status, highest, tables, budgets, history>>
 
 RefuseStream ==
@@ -372,6 +375,8 @@ CommandAppliedOnce == \A k \in Commands : timesApplied[k] <= 1
 FinishedStepKeepsItsText == \A n \in Events : IsFinish(n) /\ timesStored[n] > 0 => n \in rows /\ FragmentsOf(n) \cap rows = {}
 
 ReconnectedBridgeKeepsItsAttempt == status = "lost" => lease = "lapsedInSilence"
+
+LapsedLeaseNeverRenews == [][lease # "fresh" /\ engine = "up" => lease' = lease]_vars
 
 CommandsAppliedInOrder == [][applied' # applied => applied' = applied + 1]_vars
 

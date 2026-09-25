@@ -88,6 +88,8 @@ Rejected options:
 
 Decided 24 Sep 2026. A renewal succeeds only while the attempt's lease has not yet lapsed, and one that comes later reports the attempt as lost. The reaper releases every lease that lapsed, so once a lease lapses the attempt stays releasable until the reaper takes it. A worker that keeps stalling therefore loses its task at its first lapse, and the reaper needs only to run on its schedule. The task model states this as weak fairness for the reaper, and its property `LapsedLeaseNeverRenews` fails when a guard lets a worker renew after a lapse. The simulation checks the same property after each step. The condition sits in the renew statement, because a store constraint would need the engine's clock, not the database's. When the engine starts, it gives every live attempt a fresh lease, lapsed or not, so attempts that could not renew while the engine or Postgres was away are not released at once. That grace runs once per start, so it cannot keep a lease alive forever, and the simulation's check skips the step where an engine starts. This closes AUTO-10.
 
+The bridge follows the same rule since 25 Sep 2026. Until then its `admit` renewed a lease on every post, lapsed or not, and `Bridge.tla`'s `Commit` did the same, so the two models disagreed. The audit asked which was right. The task model is, for the reason above: a bridge that stalls and posts again just before each reaper pass would keep its attempt forever. So `admit` renews only a lease that has not lapsed, through the `renewedLease` rule, and a lapsed attempt stays releasable while its bridge may still post. `Bridge.tla`'s guard `LapsedLeaseStaysLapsed` states this for `Commit` and `OpenStream`, and its property `LapsedLeaseNeverRenews` fails without the guard. bridge-sim checks a property of the same name after each step, and its mutant `LapsedLeaseStaysLapsed` renews every lease.
+
 Rejected options:
 
 - **Strong fairness for the reaper.** The model assumed that a lease that lapses again and again is reaped at one of its lapses. Nothing in the code guaranteed it, because a renewal could land between two reaper passes every time.
@@ -571,6 +573,22 @@ Rejected options:
 - **Refuse a line that carries NUL.** The attempt would still die, only with a clearer reason.
 - **Drop the NUL character.** It hides that anything was there, and it can join two words.
 - **Store the escaped text `\u0000` as six characters.** A reader can't tell it from an app server that wrote those six characters.
+
+### Setup keeps a stored login that expires later than the file's
+
+Decided 25 Sep 2026 after the audit before the merge of the end-to-end branch (FX3a). The engine refreshes a Codex login and writes the new one back, and a refresh token works only once. Before this decision, running setup again with the same file sealed the file's older login over the refreshed one, so the engine's next refresh presented a used token and lost the login. Now `applyLogins` in `features/credentials/setup.ts` locks the credential row and seals the file's login only when it expires later than the stored one, and setup prints how many logins it kept. `node services/engine/setup.ts --replace-logins <file>` seals the file's logins anyway. A login with no expiry, such as a GitHub token or a Jira login, is replaced whenever it differs. `ReapplyNeedsNewerLogin` in `features/credentials/Checks.tla` models the rule, and the `setup` scenario refreshes a login and then applies the same file again.
+
+Rejected options:
+
+- **The file always wins.** Setup stays a plain copy of the file, but every run after the engine's first refresh rolls the login back, and the next refresh presents a used token.
+
+### The attempt start lease outlasts the whole start instead of being renewed during it
+
+Decided 25 Sep 2026 after the audit before the merge of the end-to-end branch (FX3a). An attempt's start can run a Codex check for up to `CHECK_TIMEOUT_MS` and then wait for its Verify environment for up to `ENVIRONMENT_START_DEADLINE_MS`, and it renews its lease only after both. The old default lease, 300 s, was shorter than the default start deadline alone, 600 s, so the reaper could release a start that was still running. Now `services/engine/main.ts` refuses to start unless `ATTEMPT_START_LEASE_MS` is more than `ENVIRONMENT_START_DEADLINE_MS` plus `CHECK_TIMEOUT_MS` plus 60 s, and the default lease is 900 s. `npm run verify -- engine-checks` proves the refusal. The cost is recovery time: a start lost to a crashed engine waits up to 15 minutes before the reaper releases it, not 5.
+
+Rejected options:
+
+- **Renew the lease while `provider.start` runs.** Recovery would stay fast, but a heartbeat beside the start changes the task protocol, so `features/tasks/Tasks.tla` would have to model it first (C5), and `tasks-sim` would need matching moves.
 
 ## Open
 

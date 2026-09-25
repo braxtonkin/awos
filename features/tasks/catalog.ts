@@ -15,6 +15,7 @@ export const noMutantYet: Readonly<Record<string, readonly string[]>> = {
     'attempt_names_its_epoch',
   ],
   "it speeds finding a task's attempts and refuses nothing": ['attempts_by_task'],
+  'the task simulator launches no Job, so it never writes a token, a Job creation, or a not_launched verdict; npm run verify -- launch-faults runs the worker that writes them': ['job_created_after_its_token', 'not_launched_created_no_job'],
   "the task simulator never writes a repository's Job image, and npm run verify -- jobs plants a mutable tag that the column refuses": ['job_image_named_by_digest'],
   'the claim reads the task, its newest routine version, and the person it runs as from rows that exist, so no claim can name a missing row': [
     'attempt_of_task',

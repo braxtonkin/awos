@@ -23,6 +23,7 @@ CONSTANTS
     MaxInputWaits,
     MaxHumanActions,
     MaxReassignments,
+    MaxLaunchFaults,
     ClaimIsExclusive,
     ClaimNeedsReadyTask,
     ClaimNeedsAPerson,
@@ -59,7 +60,9 @@ CONSTANTS
     OutsideApprovalNeedsAWait,
     RetryKeepsApprovals,
     LostApprovalStaysLost,
-    LapsedLeaseCannotRenew
+    LapsedLeaseCannotRenew,
+    RefusedLaunchIsNotLost,
+    FailedLaunchRelaunches
 
 CodeChangeSteps == <<"specify", "implement", "verify", "land">>
 
@@ -101,10 +104,13 @@ ASSUME
     /\ MaxInputWaits \in Nat
     /\ MaxHumanActions \in Nat
     /\ MaxReassignments \in Nat
+    /\ MaxLaunchFaults \in Nat
 
-VARIABLES task, attempt, worker, lateResults, humanActions, claimEpoch, runnable, runAs, reassignments
+VARIABLES task, attempt, worker, lateResults, humanActions, claimEpoch, runnable, runAs, reassignments, launchFaults
 
-vars == <<task, attempt, worker, lateResults, humanActions, claimEpoch, runnable, runAs, reassignments>>
+vars == <<task, attempt, worker, lateResults, humanActions, claimEpoch, runnable, runAs, reassignments, launchFaults>>
+
+Live == {"busy", "failed"}
 
 MaxReviewReturns == 1
 
@@ -146,13 +152,14 @@ TypeOK ==
                            outputs : SUBSET StepSet,
                            passed : BOOLEAN]]
     /\ attempt \in [Workers -> Tasks \cup {NoTask}]
-    /\ worker \in [Workers -> {"idle", "busy", "hung"}]
+    /\ worker \in [Workers -> {"idle", "hung"} \cup Live]
     /\ lateResults \subseteq Tasks
     /\ humanActions \in [Tasks -> 0..MaxHumanActions]
     /\ claimEpoch \in [Workers -> 0..MaxHumanActions]
     /\ runnable \in [Tasks -> BOOLEAN]
     /\ runAs \in [Workers -> BOOLEAN]
     /\ reassignments \in 0..MaxReassignments
+    /\ launchFaults \in 0..MaxLaunchFaults
 
 Init ==
     /\ \E ends \in [Tasks -> EndSteps] :
@@ -166,6 +173,7 @@ Init ==
     /\ runnable = [t \in Tasks |-> TRUE]
     /\ runAs = [w \in Workers |-> FALSE]
     /\ reassignments = 0
+    /\ launchFaults = 0
 
 Passed(t, current, s) ==
     LET kept == [current EXCEPT !.outputs = @ \cup {s},
@@ -265,14 +273,14 @@ Claim(w, t) ==
     /\ worker' = [worker EXCEPT ![w] = "busy"]
     /\ claimEpoch' = [claimEpoch EXCEPT ![w] = humanActions[t]]
     /\ runAs' = [runAs EXCEPT ![w] = runnable[t]]
-    /\ UNCHANGED <<task, lateResults, humanActions, runnable, reassignments>>
+    /\ UNCHANGED <<task, lateResults, humanActions, runnable, reassignments, launchFaults>>
 
 NoOneToRunAs(t) ==
     /\ task[t].state = "ready"
     /\ LiveOn(t) = {}
     /\ ~runnable[t]
     /\ task' = IF NoOneParksTask THEN [task EXCEPT ![t].state = "waiting"] ELSE task
-    /\ UNCHANGED <<attempt, worker, lateResults, humanActions, claimEpoch, runnable, runAs, reassignments>>
+    /\ UNCHANGED <<attempt, worker, lateResults, humanActions, claimEpoch, runnable, runAs, reassignments, launchFaults>>
 
 Reassign(t) ==
     /\ reassignments < MaxReassignments
@@ -281,18 +289,40 @@ Reassign(t) ==
     /\ task[t].state = "ready"
     /\ runnable' = [runnable EXCEPT ![t] = ~@]
     /\ reassignments' = reassignments + 1
-    /\ UNCHANGED <<task, attempt, worker, lateResults, humanActions, claimEpoch, runAs>>
+    /\ UNCHANGED <<task, attempt, worker, lateResults, humanActions, claimEpoch, runAs, launchFaults>>
+
+Launch(w) ==
+    /\ FailedLaunchRelaunches
+    /\ worker[w] = "failed"
+    /\ worker' = [worker EXCEPT ![w] = "busy"]
+    /\ UNCHANGED <<task, attempt, lateResults, humanActions, claimEpoch, runnable, runAs, reassignments, launchFaults>>
+
+LaunchFails(w) ==
+    /\ worker[w] = "busy"
+    /\ launchFaults < MaxLaunchFaults
+    /\ launchFaults' = launchFaults + 1
+    /\ worker' = [worker EXCEPT ![w] = "failed"]
+    /\ UNCHANGED <<task, attempt, lateResults, humanActions, claimEpoch, runnable, runAs, reassignments>>
+
+Refuse(w) ==
+    /\ worker[w] \in Live
+    /\ task' = [task EXCEPT ![attempt[w]] = [IF RefusedLaunchIsNotLost THEN @ ELSE LostOnce(@) EXCEPT !.state = "waiting", !.passed = FALSE]]
+    /\ attempt' = [attempt EXCEPT ![w] = NoTask]
+    /\ worker' = [worker EXCEPT ![w] = "idle"]
+    /\ claimEpoch' = [claimEpoch EXCEPT ![w] = 0]
+    /\ runAs' = [runAs EXCEPT ![w] = FALSE]
+    /\ UNCHANGED <<lateResults, humanActions, runnable, reassignments, launchFaults>>
 
 Hang(w) ==
-    /\ worker[w] = "busy"
+    /\ worker[w] \in Live
     /\ worker' = [worker EXCEPT ![w] = "hung"]
-    /\ UNCHANGED <<task, attempt, lateResults, humanActions, claimEpoch, runnable, runAs, reassignments>>
+    /\ UNCHANGED <<task, attempt, lateResults, humanActions, claimEpoch, runnable, runAs, reassignments, launchFaults>>
 
 Wake(w) ==
     /\ ~LapsedLeaseCannotRenew
     /\ worker[w] = "hung"
     /\ worker' = [worker EXCEPT ![w] = "busy"]
-    /\ UNCHANGED <<task, attempt, lateResults, humanActions, claimEpoch, runnable, runAs, reassignments>>
+    /\ UNCHANGED <<task, attempt, lateResults, humanActions, claimEpoch, runnable, runAs, reassignments, launchFaults>>
 
 Reap(w) ==
     /\ worker[w] = "hung"
@@ -302,7 +332,7 @@ Reap(w) ==
     /\ worker' = [worker EXCEPT ![w] = "idle"]
     /\ claimEpoch' = [claimEpoch EXCEPT ![w] = 0]
     /\ runAs' = [runAs EXCEPT ![w] = FALSE]
-    /\ UNCHANGED <<humanActions, runnable, reassignments>>
+    /\ UNCHANGED <<humanActions, runnable, reassignments, launchFaults>>
 
 Finishes(w, v) ==
     /\ worker[w] = "busy"
@@ -311,7 +341,7 @@ Finishes(w, v) ==
     /\ worker' = [worker EXCEPT ![w] = "idle"]
     /\ claimEpoch' = [claimEpoch EXCEPT ![w] = 0]
     /\ runAs' = [runAs EXCEPT ![w] = FALSE]
-    /\ UNCHANGED <<lateResults, humanActions, runnable, reassignments>>
+    /\ UNCHANGED <<lateResults, humanActions, runnable, reassignments, launchFaults>>
 
 Finish(w) == worker[w] = "busy" /\ \E v \in Outcomes(task[attempt[w]].step) : Finishes(w, v)
 
@@ -321,15 +351,15 @@ LateResult(t) ==
     /\ IF LateResultIsRefused
        THEN UNCHANGED task
        ELSE \E v \in Outcomes(task[t].step) : task' = [task EXCEPT ![t] = [Judged(t, @, v) EXCEPT !.passed = (v = "pass")]]
-    /\ UNCHANGED <<attempt, worker, humanActions, claimEpoch, runnable, runAs, reassignments>>
+    /\ UNCHANGED <<attempt, worker, humanActions, claimEpoch, runnable, runAs, reassignments, launchFaults>>
 
 Stop(t) ==
     /\ Spent < MaxHumanActions
     /\ task[t].state \in IF StopSparesDoneTasks THEN {"ready"} \cup Waiting ELSE {"ready", "done"} \cup Waiting
     /\ task' = [task EXCEPT ![t].state = "stopped", ![t].passed = FALSE]
-    /\ IF StopEndsAttempt THEN EndAttemptsOn(t) ELSE UNCHANGED <<attempt, worker, lateResults, claimEpoch, runAs>>
+    /\ IF StopEndsAttempt THEN EndAttemptsOn(t) ELSE UNCHANGED <<attempt, worker, lateResults, claimEpoch, runAs, launchFaults>>
     /\ humanActions' = [humanActions EXCEPT ![t] = @ + 1]
-    /\ UNCHANGED <<runnable, reassignments>>
+    /\ UNCHANGED <<runnable, reassignments, launchFaults>>
 
 RetriesFrom == IF RetryResumesStopped THEN {"ready", "stopped"} \cup Waiting ELSE {"ready"} \cup Waiting
 
@@ -349,9 +379,9 @@ Retry(t) ==
     /\ Spent < MaxHumanActions
     /\ task[t].state \in RetriesFrom
     /\ task' = [task EXCEPT ![t] = Retried(@)]
-    /\ IF RetryEndsAttempt THEN EndAttemptsOn(t) ELSE UNCHANGED <<attempt, worker, lateResults, claimEpoch, runAs>>
+    /\ IF RetryEndsAttempt THEN EndAttemptsOn(t) ELSE UNCHANGED <<attempt, worker, lateResults, claimEpoch, runAs, launchFaults>>
     /\ humanActions' = [humanActions EXCEPT ![t] = @ + 1]
-    /\ UNCHANGED <<runnable, reassignments>>
+    /\ UNCHANGED <<runnable, reassignments, launchFaults>>
 
 Approve(t) ==
     LET current == task[t]
@@ -361,12 +391,12 @@ Approve(t) ==
                                        THEN [current EXCEPT !.step = After[current.step], !.state = "ready", !.approved = current.approved \cup {current.step}]
                                        ELSE [current EXCEPT !.state = "ready", !.retries = 0]]
        /\ humanActions' = [humanActions EXCEPT ![t] = @ + 1]
-       /\ UNCHANGED <<attempt, worker, lateResults, claimEpoch, runnable, runAs, reassignments>>
+       /\ UNCHANGED <<attempt, worker, lateResults, claimEpoch, runnable, runAs, reassignments, launchFaults>>
 
 OutsideApproval(t) ==
     /\ OutsideApprovalNeedsAWait => task[t].state = "awaitingApproval"
     /\ task' = [task EXCEPT ![t].state = "ready"]
-    /\ UNCHANGED <<attempt, worker, lateResults, humanActions, claimEpoch, runnable, runAs, reassignments>>
+    /\ UNCHANGED <<attempt, worker, lateResults, humanActions, claimEpoch, runnable, runAs, reassignments, launchFaults>>
 
 ApprovalGoesMissing(t) == task[t].step \in Merges /\ task'[t] = [task[t] EXCEPT !.approved = {}, !.missing = @ \cup task[t].approved]
 
@@ -376,19 +406,20 @@ LoseApproval(t) ==
     /\ task[t].approved # {}
     /\ LiveOn(t) = {}
     /\ task' = [task EXCEPT ![t].approved = {}, ![t].missing = @ \cup task[t].approved]
-    /\ UNCHANGED <<attempt, worker, lateResults, humanActions, claimEpoch, runnable, runAs, reassignments>>
+    /\ UNCHANGED <<attempt, worker, lateResults, humanActions, claimEpoch, runnable, runAs, reassignments, launchFaults>>
 
 Terminated == \A t \in Tasks : task[t].state \in Settled
 
 Next ==
     \/ \E w \in Workers, t \in Tasks : Claim(w, t)
-    \/ \E w \in Workers : Hang(w) \/ Wake(w) \/ Reap(w) \/ Finish(w)
+    \/ \E w \in Workers : Launch(w) \/ LaunchFails(w) \/ Refuse(w) \/ Hang(w) \/ Wake(w) \/ Reap(w) \/ Finish(w)
     \/ \E t \in Tasks : LateResult(t) \/ Stop(t) \/ Retry(t) \/ Approve(t) \/ OutsideApproval(t) \/ LoseApproval(t) \/ NoOneToRunAs(t) \/ Reassign(t)
     \/ Terminated /\ UNCHANGED vars
 
 WorkersProgress ==
     /\ \A t \in Tasks : WF_vars(\E w \in Workers : Claim(w, t))
     /\ \A t \in Tasks : WF_vars(NoOneToRunAs(t))
+    /\ \A w \in Workers : WF_vars(Launch(w))
     /\ \A w \in Workers : WF_vars(Finish(w))
 
 ReaperProgress == \A w \in Workers : WF_vars(Reap(w))
@@ -497,6 +528,8 @@ EndStagePassIsDone ==
     [][\A w \in Workers : \A t \in Tasks :
           attempt[w] = t /\ task[t].step = task[t].end /\ Gates(t) \subseteq task[t].approved /\ Finishes(w, "pass") =>
               task'[t].state = "done"]_vars
+
+ReleasedOnlyAfterItsLease == [][\A t \in Tasks : task'[t].lost > task[t].lost => \E w \in Workers : attempt[w] = t /\ worker[w] = "hung"]_vars
 
 LapsedLeaseNeverRenews == [][\A w \in Workers : worker[w] = "hung" => worker'[w] # "busy"]_vars
 

@@ -1,5 +1,5 @@
 import { execFile, spawn, type ChildProcess } from 'node:child_process';
-import { randomBytes, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -33,7 +33,7 @@ const codexPin = 'codex-cli 0.156.0';
 const readyBudgetMs = 30_000;
 const sweepBudgetMs = 5_000;
 const doneWaitMs = 180_000;
-const bridge = 'node-bridge /app/services/job/main.ts';
+const prepared = `node-bridge --input-type=module -e "const w=await import('/app/features/jobs/workspace.ts');const ready=await w.prepareWorkspace(w.readJobEnvironment(process.env));console.log('workspace ready at '+ready.commit+' on '+ready.branch)"`;
 const manifestTypes = [
   'application/vnd.oci.image.index.v1+json',
   'application/vnd.oci.image.manifest.v1+json',
@@ -143,7 +143,7 @@ async function seed(db: Database): Promise<Seeded> {
   return { person: person.id, routine: routine.id, repository: repository.id };
 }
 
-async function newAttempt(world: World, key: string): Promise<string> {
+async function newAttempt(world: World, key: string, token: string): Promise<string> {
   const now = new Date();
   const task = await world.db
     .insertInto('task')
@@ -152,7 +152,7 @@ async function newAttempt(world: World, key: string): Promise<string> {
     .executeTakeFirstOrThrow();
   const attempt = await world.db
     .insertInto('attempt')
-    .values({ task_id: task.id, routine_id: world.seeded.routine, routine_version: 1, step: 'specify', started_at: now, lease_until: new Date(now.getTime() + 86_400_000), run_as_id: world.seeded.person, epoch: 0 })
+    .values({ task_id: task.id, routine_id: world.seeded.routine, routine_version: 1, step: 'specify', started_at: now, lease_until: new Date(now.getTime() + 86_400_000), run_as_id: world.seeded.person, epoch: 0, bridge_token_hash: createHash('sha256').update(token, 'utf8').digest(), job_created_at: now })
     .returning('id')
     .executeTakeFirstOrThrow();
   return attempt.id;
@@ -179,8 +179,8 @@ type Options = {
 async function start(world: World, options: Options = {}): Promise<Started> {
   const key = options.key ?? `probe-${world.run}-${randomBytes(3).toString('hex')}`;
   const number = options.number ?? 1;
-  const attempt = await newAttempt(world, `${key}#${String(number)}`);
   const token = randomBytes(24).toString('hex');
+  const attempt = await newAttempt(world, `${key}#${String(number)}`, token);
   const input = {
     attempt,
     taskKey: key,
@@ -277,9 +277,9 @@ const readyLine = (log: string): string | undefined => log.split('\n').find(line
 
 async function readyFlow(world: World): Promise<readonly Check[]> {
   const started = await start(world);
-  const done = await settled(world, started.attempt);
-  const log = await logOf(world, started.attempt);
   const expected = `workspace ready at ${pinnedCommit} on ${started.branch}`;
+  const readyAfter = await until(async () => readyLine(await logOf(world, started.attempt)) === expected, doneWaitMs);
+  const log = await logOf(world, started.attempt);
   await finish(world, started.attempt);
   const swept = await sweepOnce(world.db, world.cluster);
   const cleared = await until(async () => {
@@ -287,13 +287,13 @@ async function readyFlow(world: World): Promise<readonly Check[]> {
     return state.job && state.secret;
   }, 10_000);
   return [
-    done.state === 'succeeded' && readyLine(log) === expected ? pass(`the Job printed "${expected}"`, `in ${(done.ms / 1000).toFixed(1)} s`) : fail(`the Job printed "${expected}"`, `${done.state === 'failed' ? done.reason : done.state}: ${log.slice(-400)}`),
+    readyAfter === undefined ? fail(`the Job printed "${expected}"`, `not within ${String(doneWaitMs / 1000)} s: ${log.slice(-400)}`) : pass(`the Job printed "${expected}"`, `in ${(readyAfter / 1000).toFixed(1)} s`),
     cleared === undefined ? fail('one sweep removed the Job and its Secret', swept.join(' | ')) : pass('one sweep removed the Job and its Secret', `${swept.filter(line => line.includes(started.attempt)).join(' | ')}; gone after ${(cleared / 1000).toFixed(1)} s`),
   ];
 }
 
 async function regression(world: World): Promise<readonly Check[]> {
-  const started = await start(world, { script: `${bridge} && codex --version` });
+  const started = await start(world, { script: `${prepared} && codex --version` });
   const done = await settled(world, started.attempt);
   const log = await logOf(world, started.attempt);
   await finish(world, started.attempt);
@@ -331,7 +331,7 @@ async function noKube(world: World): Promise<readonly Check[]> {
   const bound = [...roleBindings.items, ...clusterRoleBindings.items].filter(binding => binding.subjects?.some(subject => subject.kind === 'ServiceAccount' && subject.name === serviceAccount));
   const checks: Check[] = [bound.length === 0 ? pass(`no role binding names ${serviceAccount}`, `${String(roleBindings.items.length + clusterRoleBindings.items.length)} bindings read`) : fail(`no role binding names ${serviceAccount}`, bound.map(b => b.metadata?.name).join(', '))];
   for (const step of ['specify', 'implement', 'verify']) {
-    const started = await start(world, { step, script: `${bridge} && ${asCodex(codexProbe)}` });
+    const started = await start(world, { step, script: `${prepared} && ${asCodex(codexProbe)}` });
     const done = await settled(world, started.attempt);
     const log = await logOf(world, started.attempt);
     const { items } = await world.cluster.core.listNamespacedPod({ namespace: world.cluster.namespace, labelSelector: `${labels.attempt}=${started.attempt}` });
@@ -358,7 +358,7 @@ async function noKube(world: World): Promise<readonly Check[]> {
 }
 
 async function envNames(world: World): Promise<readonly Check[]> {
-  const started = await start(world, { script: `${bridge} && node-bridge -e "console.log(Object.keys(process.env).sort().join(' '))"` });
+  const started = await start(world, { script: `${prepared} && node-bridge -e "console.log(Object.keys(process.env).sort().join(' '))"` });
   const done = await settled(world, started.attempt);
   const log = await rawLogOf(world, started.attempt);
   await finish(world, started.attempt);
@@ -415,7 +415,7 @@ const engineMain = fileURLToPath(new URL('../../services/engine/main.ts', import
 function engine(world: World, everyMs: number): { readonly child: ChildProcess; readonly said: () => string } {
   let said = '';
   const child = spawn(process.execPath, [engineMain], {
-    env: { PATH: process.env['PATH'] ?? '', HOME: process.env['HOME'] ?? '/root', DATABASE_URL: world.url, JOB_IMAGE: world.image, SWEEP_EVERY_MS: String(everyMs), JOB_NAMESPACE: world.cluster.namespace },
+    env: { PATH: process.env['PATH'] ?? '', HOME: process.env['HOME'] ?? '/root', DATABASE_URL: world.url, JOB_IMAGE: world.image, SWEEP_EVERY_MS: String(everyMs), JOB_NAMESPACE: world.cluster.namespace, JOB_ENGINE_URL: 'http://127.0.0.1:1/', CREDENTIAL_KEY: randomBytes(32).toString('base64'), CREDENTIAL_KEY_VERSION: '1' },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   child.stdout.setEncoding('utf8').on('data', (chunk: string) => (said += chunk));
@@ -498,12 +498,12 @@ async function probeRepository(server: GitServer, name: string, files: Readonly<
 async function bridgeFromImage(world: World): Promise<readonly Check[]> {
   const server = await gitServer(world.address);
   try {
-    const head = await probeRepository(server, 'probe.git', { 'services/job/main.ts': "throw new Error('planted: the entry point in the clone ran');\n", 'README.md': 'probe\n' });
-    const started = await start(world, { repositoryUrl: server.url('probe.git'), startCommit: head, script: `${bridge} && head -1 /workspace/services/job/main.ts` });
+    const head = await probeRepository(server, 'probe.git', { 'features/jobs/workspace.ts': "throw new Error('planted: the workspace code in the clone ran');\n", 'README.md': 'probe\n' });
+    const started = await start(world, { repositoryUrl: server.url('probe.git'), startCommit: head, script: `${prepared} && head -1 /workspace/features/jobs/workspace.ts` });
     const done = await settled(world, started.attempt);
     const log = await logOf(world, started.attempt);
     await finish(world, started.attempt);
-    const name = "the Job prints workspace ready from the image's entry point while the clone's entry point is broken";
+    const name = "the Job prints workspace ready from the image's workspace code while the clone's copy is broken";
     return [
       done.state === 'succeeded' && readyLine(log) === `workspace ready at ${head} on ${started.branch}` && log.includes("throw new Error('planted") && !log.includes('Error: planted')
         ? pass(name, log.replaceAll('\n', ' | '))
@@ -516,7 +516,7 @@ async function bridgeFromImage(world: World): Promise<readonly Check[]> {
 
 const pushScript = (step: string, then: string): string =>
   [
-    bridge,
+    prepared,
     asCodex(`echo ${step} > /workspace/${step}.txt`),
     `node-bridge --input-type=module -e "const cp=await import('node:child_process');const w=await import('/app/features/jobs/workspace.ts');const env=w.readJobEnvironment(process.env);const first=await w.pushStep(env,'step ${step}',undefined);console.log('pushed',JSON.stringify(first));${then}"`,
   ].join(' && ');
@@ -553,7 +553,7 @@ async function lostPush(world: World): Promise<readonly Check[]> {
 }
 
 async function init(world: World): Promise<readonly Check[]> {
-  const started = await start(world, { script: `${bridge} && sh -c "sleep 0.3 &" && sleep 2 && for p in /proc/[0-9]*/stat; do cut -d" " -f1-3 "$p"; done` });
+  const started = await start(world, { script: `${prepared} && sh -c "sleep 0.3 &" && sleep 2 && for p in /proc/[0-9]*/stat; do cut -d" " -f1-3 "$p"; done` });
   const done = await settled(world, started.attempt);
   const log = await logOf(world, started.attempt);
   await finish(world, started.attempt);
@@ -601,7 +601,7 @@ async function repoImage(world: World): Promise<readonly Check[]> {
     await world.db.updateTable('repository').set({ job_image: probe }).where('id', '=', world.seeded.repository).execute();
     const row = await world.db.selectFrom('repository').select('job_image').where('id', '=', world.seeded.repository).executeTakeFirstOrThrow();
     const image = imageFor(world.settings, row.job_image === null ? null : imageReference.parse(row.job_image));
-    const started = await start(world, { image, script: `${bridge} && cat /extra.txt` });
+    const started = await start(world, { image, script: `${prepared} && cat /extra.txt` });
     const done = await settled(world, started.attempt);
     const log = await logOf(world, started.attempt);
     await finish(world, started.attempt);
@@ -622,7 +622,7 @@ async function perf(world: World): Promise<readonly Check[]> {
   const launches: number[] = [];
   const sweeps: number[] = [];
   for (let round = 0; round < 5; round += 1) {
-    const started = await start(world);
+    const started = await start(world, { script: prepared });
     const done = await settled(world, started.attempt);
     if (done.state !== 'succeeded') return [fail('perf launch succeeded', done.state === 'failed' ? done.reason : done.state)];
     launches.push(done.ms);
@@ -684,11 +684,9 @@ const reproduced = z.object({ state: z.literal('ran'), base: z.object({ run: ran
 
 type Reproduced = z.infer<typeof reproduced>;
 
-const prepareOnly = `node-bridge --input-type=module -e "const w=await import('/app/features/jobs/workspace.ts');await w.prepareWorkspace(w.readJobEnvironment(process.env));console.log('prepared')"`;
-
 const reproduceScript = (script: string, agentLeftovers: string): string =>
   [
-    prepareOnly,
+    prepared,
     asCodex(`echo ${Buffer.from(script).toString('base64')} | base64 -d > /tmp/autoworker-reproduce.sh${agentLeftovers}`),
     `node-bridge --input-type=module -e "const r=await import('/app/features/jobs/reproduce.ts');const w=await import('/app/features/jobs/workspace.ts');const env=w.readJobEnvironment(process.env);const got=await r.reproduce(env,{base:env.BASE_COMMIT,change:env.START_COMMIT,setup:env.SETUP_COMMAND});console.log('REPRODUCED '+JSON.stringify(got))"`,
   ].join(' && ');
@@ -745,7 +743,7 @@ async function reproduceLane(world: World): Promise<readonly Check[]> {
 
 const unchangedScript = (plant: string): string =>
   [
-    prepareOnly,
+    prepared,
     `node-bridge --input-type=module -e "const cp=await import('node:child_process');const git=(a,i)=>cp.execFileSync('git',['--git-dir=/var/lib/autoworker/attempt.git','--work-tree=/workspace','-c','user.name=Probe','-c','user.email=probe@example.com',...a],{encoding:'utf8',input:i});${plant}const w=await import('/app/features/jobs/workspace.ts');console.log('PUSHED '+JSON.stringify(await w.pushStep(w.readJobEnvironment(process.env),'step',undefined)))"`,
   ].join(' && ');
 

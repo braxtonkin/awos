@@ -17,7 +17,8 @@ export type Observation =
   | { readonly kind: 'merged'; readonly head: string; readonly judged: boolean; readonly countedGreen: boolean; readonly taskStep: string; readonly how: 'direct' | 'queue' }
   | { readonly kind: 'enqueued'; readonly head: string; readonly unansweredEjection: string | null }
   | { readonly kind: 'performed'; readonly action: string; readonly outcome: 'done' | 'refused' | 'failed'; readonly faulted: boolean; readonly detail: string }
-  | { readonly kind: 'opened'; readonly numbers: readonly number[] };
+  | { readonly kind: 'opened'; readonly numbers: readonly number[] }
+  | { readonly kind: 'wrote'; readonly action: string; readonly intended: number; readonly number: number; readonly what: string };
 
 type Judge = (observation: Observation) => string | undefined;
 
@@ -60,6 +61,10 @@ export const properties = {
   },
   AwaitsOnlyMissingApproval: observation =>
     observation.kind === 'read' && observation.value.kind === 'review-required' && observation.truth.approved ? `the pull request read as review-required at ${observation.head} while GitHub reported it approved` : undefined,
+  ActsOnTheTaskPullRequest: observation =>
+    observation.kind === 'wrote' && observation.number !== observation.intended
+      ? `${observation.action} for pull request ${String(observation.intended)} sent ${observation.what} to pull request ${String(observation.number)}`
+      : undefined,
   LandSettles: observation => {
     if (observation.kind === 'performed' && observation.outcome === 'failed' && !observation.faulted) return `${observation.action} failed on a definite answer, so its row would be tried again: ${observation.detail}`;
     if (observation.kind === 'opened' && new Set(observation.numbers).size > 1) return `opening one head twice made pull requests ${observation.numbers.join(' and ')}`;

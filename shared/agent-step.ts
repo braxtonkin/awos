@@ -21,6 +21,8 @@ export type Reply = { readonly step: string; readonly output: unknown; readonly 
 
 export type Settled = { readonly output: unknown; readonly evidence: Evidence | null; readonly observed: Unasked | null };
 
+export type PullRequestFact = { readonly kind: 'none' } | { readonly kind: 'owed' } | { readonly kind: 'opened'; readonly number: number };
+
 export type Verdicted = {
   readonly step: string;
   readonly verdict: Verdict;
@@ -29,7 +31,7 @@ export type Verdicted = {
   readonly taskBranch: { readonly name: string; readonly head: string | null };
   readonly attempt: { readonly branch: string; readonly start: string; readonly lastPushed: string | null };
   readonly branches: readonly string[];
-  readonly pullRequestOwed: boolean;
+  readonly pullRequest: PullRequestFact;
   readonly firstPass: boolean;
   readonly startStatus: string | null;
   readonly endStatus: string | null;

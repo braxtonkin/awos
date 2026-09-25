@@ -83,6 +83,7 @@ const engineSettings = (world: World, image: string): Readonly<Record<string, st
   REAPER_EVERY_MS: '5000',
   LEASE_MS: '60000',
   ATTEMPT_START_LEASE_MS: '240000',
+  ENVIRONMENT_START_DEADLINE_MS: '30000',
   SCHEDULER_EVERY_MS: '600000',
   CHECKS_EVERY_MS: '600000',
 });

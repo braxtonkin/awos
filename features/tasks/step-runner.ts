@@ -1,7 +1,7 @@
 import { sql } from 'kysely';
 import { z } from 'zod';
 import { actionKinds, type Enqueue } from '../../shared/actions.ts';
-import type { AgentSteps, Change, Earlier, Evidence } from '../../shared/agent-step.ts';
+import type { AgentSteps, Change, Earlier, Evidence, PullRequestFact } from '../../shared/agent-step.ts';
 import type { Database } from '../../shared/db/client.ts';
 import { finalMessage, reduce } from '../../shared/items.ts';
 import { reproduction } from '../../shared/reproduction.ts';
@@ -130,7 +130,7 @@ async function notesFor(db: Database, step: Step): Promise<readonly string[]> {
     .select('attempt.started_at')
     .where('attempt.task_id', '=', step.task)
     .where('attempt.id', '<', step.attempt)
-    .where('attempt.verdict', '<>', 'lost')
+    .where('attempt.verdict', 'not in', ['lost', 'not_launched'])
     .orderBy('attempt.id', 'desc')
     .limit(1)
     .executeTakeFirst();
@@ -154,7 +154,7 @@ async function answersFor(db: Database, step: Step): Promise<readonly string[]> 
     .where('attempt.task_id', '=', step.task)
     .where('attempt.step', '=', step.kind.name)
     .where('attempt.id', '<', step.attempt)
-    .where('attempt.verdict', '<>', 'lost')
+    .where('attempt.verdict', 'not in', ['lost', 'not_launched'])
     .orderBy('attempt.id', 'desc')
     .limit(1)
     .executeTakeFirst();
@@ -176,6 +176,7 @@ async function lostSummary(db: Database, step: Step): Promise<readonly string[]>
     .where('attempt.task_id', '=', step.task)
     .where('attempt.step', '=', step.kind.name)
     .where('attempt.id', '<', step.attempt)
+    .where('attempt.verdict', '<>', 'not_launched')
     .orderBy('attempt.id', 'desc')
     .limit(1)
     .executeTakeFirst();
@@ -241,6 +242,14 @@ const replyOf = (final: string | undefined): unknown => {
   }
 };
 
+const openedResult = actionKinds.prOpenDraft.result;
+
+const pullRequestOf = (row: { readonly state: string; readonly result: unknown } | undefined): PullRequestFact => {
+  if (row === undefined) return { kind: 'none' };
+  const opened = openedResult.safeParse(row.result);
+  return row.state === 'done' && opened.success ? { kind: 'opened', number: opened.data.number } : { kind: 'owed' };
+};
+
 async function branchesToDelete(tx: Transacting, step: Step): Promise<readonly string[]> {
   const rows = await tx
     .selectFrom('attempt')
@@ -270,11 +279,12 @@ const owing =
       .execute();
     const opened = await tx
       .selectFrom('outbox')
-      .select('outbox.id')
+      .select(['outbox.state', 'outbox.result'])
       .where('outbox.task_id', '=', step.task)
       .where('outbox.kind', '=', actionKinds.prOpenDraft.kind)
       .where('outbox.state', 'in', ['owed', 'done'])
-      .execute();
+      .orderBy('outbox.position', 'desc')
+      .executeTakeFirst();
     const actions = step.agent.owes({
       step: step.kind.name,
       verdict: standing.verdict,
@@ -283,7 +293,7 @@ const owing =
       taskBranch: { name: taskBranch(step.key), head: await taskBranchHead(tx, step.task) },
       attempt: { branch: step.branch, start: step.start, lastPushed: attempt.last_pushed },
       branches: standing.verdict === 'pass' ? await branchesToDelete(tx, step) : [],
-      pullRequestOwed: opened.length > 0,
+      pullRequest: pullRequestOf(opened),
       firstPass: earlierPasses.length === 0,
       startStatus: step.startStatus,
       endStatus: step.endStatus,

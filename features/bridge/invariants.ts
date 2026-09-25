@@ -58,6 +58,14 @@ export const simulatorSchema: readonly Statement[] = [
   sql`create trigger sim_apply after insert on sim_applied for each row execute function sim_apply()`,
   sql`create table sim_bridge (attempt_id bigint primary key, state text not null, emitted bigint not null)`,
   sql`create table sim_outage (id bigint generated always as identity primary key, down_at timestamptz not null, up_at timestamptz)`,
+  sql`create table sim_lease (id bigint generated always as identity primary key, attempt_id bigint not null, was timestamptz not null, renewed_to timestamptz not null)`,
+  sql`create function sim_lease() returns trigger language plpgsql as $$
+      begin
+        insert into sim_lease (attempt_id, was, renewed_to) values (new.id, old.lease_until, new.lease_until);
+        return new;
+      end
+      $$`,
+  sql`create trigger sim_lease after update of lease_until on attempt for each row when (new.lease_until > old.lease_until) execute function sim_lease()`,
 ];
 
 export const worldStartsAt = Date.parse('2026-01-01T00:00:00.000Z');
@@ -235,6 +243,13 @@ export const properties = {
         violation: sql`update attempt set finished_at = ${t0} + interval '101 seconds', verdict = 'lost' where id = 1`,
       },
     ],
+  },
+  LapsedLeaseNeverRenews: {
+    moment: 'each-step',
+    breaks: sql`select l.attempt_id, l.was, l.renewed_to from sim_lease l
+      where l.was < l.renewed_to - make_interval(secs => ${sql.lit(worldLeaseMs / 1000)})
+        and not exists (select 1 from sim_outage o where o.up_at = l.renewed_to - make_interval(secs => ${sql.lit(worldLeaseMs / 1000)}))`,
+    plants: [{ setup: [], violation: sql`update attempt set lease_until = ${t0} + interval '100 seconds' where id = 1` }],
   },
 } satisfies Readonly<Record<string, Property>>;
 

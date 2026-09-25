@@ -6,7 +6,7 @@ export const checksModel = defineModel({
   name: 'checks',
   module: new URL('Checks.tla', import.meta.url),
   configs: { pr: { file: 'Checks.cfg', floors }, nightly: { file: 'Checks.cfg', floors } },
-  guards: ['ClaimIsExclusive', 'RefreshIsClaimedOnce', 'WriteBackNeedsOpenedLogin', 'JobCopyIsAccessOnly', 'DeathKeepsRefreshClaim', 'ClaimNeedsDueLogin', 'FinishNeedsClaim'],
+  guards: ['ClaimIsExclusive', 'RefreshIsClaimedOnce', 'WriteBackNeedsOpenedLogin', 'JobCopyIsAccessOnly', 'DeathKeepsRefreshClaim', 'ClaimNeedsDueLogin', 'FinishNeedsClaim', 'ReapplyNeedsNewerLogin'],
   properties: {
     OneLiveCheck: 'INVARIANTS',
     NoRefreshTokenReused: 'INVARIANTS',
@@ -23,5 +23,6 @@ export const checksModel = defineModel({
     { guard: 'DeathKeepsRefreshClaim', without: 'a check that presented the refresh token and then died releases its refresh claim', property: 'NoRefreshTokenReused' },
     { guard: 'ClaimNeedsDueLogin', without: 'a checker claims a login it read before another check finished it or someone replaced it', property: 'OneCheckPerLogin' },
     { guard: 'FinishNeedsClaim', without: 'a checker finishes a check after its claim was reaped', property: 'FinishedCheckIsFinal' },
+    { guard: 'ReapplyNeedsNewerLogin', without: 'a person re-applies a setup file whose login is older than the stored one', property: 'StoredLoginIsNewest' },
   ],
 });
