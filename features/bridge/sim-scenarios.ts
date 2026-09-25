@@ -6,7 +6,7 @@ import { z } from 'zod';
 import { connect } from '../../shared/db/client.ts';
 import { fail, pass, type Check, type Scenario } from '../../tools/verify/check.ts';
 import { withPostgres, type TestPostgres } from '../../tools/verify/postgres.ts';
-import { issueToken, pollCommands, receive, rules, sendCommand, type BridgeEngine } from './engine.ts';
+import { issueToken, nulStandIn, pollCommands, receive, rules, sendCommand, type BridgeEngine } from './engine.ts';
 import { provePlants, world, worldStartsAt } from './invariants.ts';
 import { attemptId, bridgeRequestIds, protocolVersion, type Caller, type EventsPost } from './protocol.ts';
 import { droppedBy, mutantName, mutants, noMutantYet, simulate, type MutantName, type Plan, type Run } from './simulate.ts';
@@ -170,6 +170,35 @@ async function refusalChecks(postgres: TestPostgres): Promise<readonly Check[]> 
   }
 }
 
+const nulName = 'a line whose text carries NUL is stored with U+FFFD in its place, in app lines, lines that are not JSON, and reproduced lines';
+
+async function nulCheck(postgres: TestPostgres): Promise<Check> {
+  const scratch = await postgres.scratch();
+  const db = connect(scratch.url, 2);
+  try {
+    for (const statement of world) await statement.execute(db);
+    const attempt = attemptId.parse('1');
+    const token = await issueToken(db, attempt);
+    if (token === undefined) throw new Error('the world attempt took no token');
+    const caller: Caller = { attempt, token, protocol: protocolVersion, pid: 7001, image: 'autoworker-job:current' };
+    const lines: EventsPost['lines'] = [
+      { kind: 'app', seq: 1, text: JSON.stringify({ method: 'item/commandExecution/outputDelta', params: { itemId: 'item-\u0000-1', delta: 'binary \u0000 output', ['key\u0000']: true } }) },
+      { kind: 'app', seq: 2, text: 'not json \u0000 at all' },
+      { kind: 'reproduced', seq: 3, reproduction: { state: 'no_script', reason: 'the log held \u0000' } },
+    ];
+    const answer = await receive(db, engine, caller, { received: 0, lines });
+    const rows = await db.selectFrom('attempt_event').select(['seq', 'item_id', sql<string>`body::text`.as('body')]).where('attempt_id', '=', attempt).orderBy('seq').execute();
+    const standIns = rows.filter(row => row.body.includes(nulStandIn) && !row.body.includes('\\u0000')).length;
+    const said = `answer ${JSON.stringify(answer)}; ${String(rows.length)} rows, ${String(standIns)} with U+FFFD; item id ${JSON.stringify(rows[0]?.item_id ?? null)}`;
+    return 'stored' in answer && answer.stored === 3 && rows.length === 3 && standIns === 3 && rows[0]?.item_id === `item-${nulStandIn}-1` ? pass(nulName, said) : fail(nulName, said);
+  } catch (error) {
+    return fail(nulName, error instanceof Error ? error.message : String(error));
+  } finally {
+    await db.destroy();
+    await scratch.drop();
+  }
+}
+
 const textBlock = {
   type: 'object',
   additionalProperties: false,
@@ -211,12 +240,12 @@ async function schemaOrderCheck(postgres: TestPostgres): Promise<Check> {
 
 async function simulationChecks(postgres: TestPostgres, options: Options): Promise<readonly Check[]> {
   if (options.mutant === 'all') {
-    const checks: Check[] = [await plantChecks(postgres), await catalogCheck(postgres), ...(await refusalChecks(postgres)), await schemaOrderCheck(postgres)];
+    const checks: Check[] = [await plantChecks(postgres), await catalogCheck(postgres), ...(await refusalChecks(postgres)), await schemaOrderCheck(postgres), await nulCheck(postgres)];
     for (const mutant of mutantName.options) checks.push(await mutantCheck(postgres, mutant, options));
     return checks;
   }
   if (options.mutant !== undefined) return [await mutantCheck(postgres, options.mutant, options)];
-  return [...(await cleanSeeds(postgres, options)), await plantChecks(postgres), ...(await refusalChecks(postgres)), await schemaOrderCheck(postgres)];
+  return [...(await cleanSeeds(postgres, options)), await plantChecks(postgres), ...(await refusalChecks(postgres)), await schemaOrderCheck(postgres), await nulCheck(postgres)];
 }
 
 function parseOptions(args: readonly string[]): Options {

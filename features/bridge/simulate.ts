@@ -216,7 +216,7 @@ function scriptFor(next: () => number): Step[] {
   const count = 1 + Math.floor(next() * 4);
   const steps = Array.from({ length: count }, (_, index): Step => {
     const kind = kinds[Math.floor(next() * kinds.length)] ?? 'reasoning';
-    return { kind, deltas: Array.from({ length: 1 + Math.floor(next() * 3) }, (_unused, part) => `${kind} ${String(index)}.${String(part)} `) };
+    return { kind, deltas: Array.from({ length: 1 + Math.floor(next() * 3) }, (_unused, part) => `${kind} ${String(index)}.${String(part)}\u0000 `) };
   });
   return [...steps, { kind: 'agentMessage', deltas: ['All ', 'done.'] }];
 }
