@@ -11,6 +11,8 @@ import {
   checkCatalog,
   mutantName,
   mutants,
+  probeDeadline,
+  probeReviewThroughFailure,
   probeRollback,
   probeThroughput,
   profileName,
@@ -22,7 +24,7 @@ import {
   type Throughput,
 } from './simulate.ts';
 
-type TaskView = { readonly id: string; readonly state: string };
+type TaskView = { readonly id: string; readonly state: string; readonly review: string };
 
 type RowView = {
   readonly id: string;
@@ -58,13 +60,14 @@ function viewOf(text: string): StateView {
   const variables = variablesIn(text);
   const entries = (name: string): ReadonlyMap<string, string> => entriesIn(variables.get(name) ?? '');
   const tasks = entries('task');
+  const reviews = entries('review');
   const effects = entries('effects');
   const rows = [...entries('row')].map(([id, record]): RowView => {
     const fields = fieldsIn(record);
     const [, task = '', index = ''] = /^<<(\w+),(\d+)>>$/.exec(id) ?? [];
     return {
       id,
-      task: { id: task, state: tasks.get(task) ?? '' },
+      task: { id: task, state: tasks.get(task) ?? '', review: reviews.get(task) ?? '' },
       index: Number.parseInt(index, 10),
       state: fields.get('state') ?? '',
       tries: Number.parseInt(fields.get('tries') ?? '', 10),
@@ -207,6 +210,22 @@ const performersStopTakingOwedRows = shape(
     last.performers.some(performer => (performer.step === 'idle' ? last.rows.some(row => claimable(last, row)) : !performer.stalled)),
 );
 
+const reviewLostToAFailedRow = shape(
+  'by a failed row that parks its task over the review a person has not decided',
+  ({ actions, last }) => !actions.includes('Approve') && actions.at(-1) === 'Expire' && last.rows.some(row => row.state === 'failed' && row.task.state === 'waiting' && row.task.review === 'open'),
+);
+
+const performerOnAnotherClockPostsAgain = shape(
+  'by a performer whose lease another engine judged over by its own clock posting after the next claim',
+  ({ actions, last }) =>
+    !actions.includes('Crash') && !actions.includes('Hang') && inOrder(actions, ['Claim', 'Expire', 'Claim']) && actions.at(-1) === 'Call' && last.rows.some(row => postedTwice(row) && performersOn(last, row).length === 2),
+);
+
+const requestSettlesAfterItsLease = shape(
+  "by a failed call's request landing after its lease ran out and another performer posted",
+  ({ actions, last }) => !actions.includes('Crash') && !actions.includes('Hang') && inOrder(actions, ['Call', 'Expire', 'Claim', 'Call']) && actions.at(-1) === 'Resolve' && last.rows.some(postedTwice),
+);
+
 const simulationFlags = {
   profile: { type: 'string' },
   seeds: { type: 'string' },
@@ -291,7 +310,7 @@ function doneChecks(profile: ProfileName, runs: readonly Run[]): Check {
   return idle.length === 0 ? pass(name, `${String(Math.min(...done))} to ${String(Math.max(...done))} tasks done per seed`) : fail(name, `seeds with no task done: ${idle.slice(0, 10).join(', ')}`);
 }
 
-const finishingProfiles: ReadonlySet<ProfileName> = new Set<ProfileName>(['mixed', 'two-engines']);
+const finishingProfiles: ReadonlySet<ProfileName> = new Set<ProfileName>(['mixed', 'two-engines', 'skewed']);
 
 async function profileChecks(postgres: TestPostgres, profile: ProfileName, options: SimulationOptions): Promise<readonly Check[]> {
   const started = performance.now();
@@ -344,6 +363,24 @@ async function rollbackCheck(postgres: TestPostgres): Promise<Check> {
   return rows === 0 && effects === 0 ? pass(name, 'no row, and the pass after it performed nothing') : fail(name, `${String(rows)} rows, ${String(effects)} effects`);
 }
 
+async function reviewCheck(postgres: TestPostgres): Promise<Check> {
+  const problems = await probeReviewThroughFailure(postgres);
+  const name = 'a Jira comment that fails while specify waits for approval keeps the review, Retry reruns nothing, and Approve posts the comment once';
+  return problems.length === 0 ? pass(name, 'the review and its note outlived the failure, and specify ran once') : fail(name, problems.join('; '));
+}
+
+const shortLease = { leaseMs: 1_000, marginMs: 400, maxTries: 3 };
+
+async function deadlineCheck(postgres: TestPostgres): Promise<Check> {
+  const waitMs = 4_000;
+  const { settledMs, claimed, error } = await probeDeadline(postgres, shortLease, waitMs);
+  const name = `a performer that never answers and ignores its signal lets the pass go by the ${String(shortLease.leaseMs - shortLease.marginMs)} ms deadline, and its row keeps the claim and the error`;
+  if (settledMs === undefined) return fail(name, `the pass still waited on the call ${String(waitMs)} ms later`);
+  return settledMs <= shortLease.leaseMs && claimed && error !== null
+    ? pass(name, `the pass ended after ${settledMs.toFixed(0)} ms with the error: ${error}`)
+    : fail(name, `the pass ended after ${settledMs.toFixed(0)} ms, the row is ${claimed ? 'still' : 'no longer'} claimed, and its error is ${error ?? 'empty'}`);
+}
+
 async function simulationChecks(postgres: TestPostgres, options: SimulationOptions): Promise<readonly Check[]> {
   if (options.mutant === 'all') {
     const checks: Check[] = [...(await plantChecks(postgres)), await catalogCheck(postgres)];
@@ -352,7 +389,7 @@ async function simulationChecks(postgres: TestPostgres, options: SimulationOptio
   }
   if (options.mutant !== undefined) return [await mutantCheck(postgres, options.mutant, options)];
   const chosen = options.profile === 'all' ? profileName.options : [options.profile];
-  const checks: Check[] = [await rollbackCheck(postgres)];
+  const checks: Check[] = [await rollbackCheck(postgres), await reviewCheck(postgres), await deadlineCheck(postgres)];
   for (const profile of chosen) checks.push(...(await profileChecks(postgres, profile, options)));
   return checks;
 }
@@ -397,7 +434,10 @@ export const scenarios: readonly Scenario[] = [
       'FailedCallKeepsClaim',
       'RetriesAreCapped',
       'FailureParksTask',
+      'FailureKeepsReview',
       'RetryReowesFailedRows',
+      'LeasesOnOneClock',
+      'TargetSettlesWithinMargin',
       'PerformerIsFair',
     ],
     properties: {
@@ -407,6 +447,7 @@ export const scenarios: readonly Scenario[] = [
       ActionsInOrderPerTask: 'INVARIANTS',
       NextStageWaitsForOwedActions: 'INVARIANTS',
       OneLivePerformerPerRow: 'INVARIANTS',
+      ReviewKeptUntilDecided: 'INVARIANTS',
       EveryOwedActionSettles: 'PROPERTIES',
     },
     liveness: ['EveryOwedActionSettles'],
@@ -422,7 +463,10 @@ export const scenarios: readonly Scenario[] = [
       { guard: 'FailedCallKeepsClaim', property: 'EffectAtMostOnce', shape: failedCallLandsAfterRetry },
       { guard: 'RetriesAreCapped', property: 'EveryOwedActionSettles', overrides: { MaxCrashes: '0', MaxStalls: '0', MaxRetries: '0' }, shape: rowRetriedForever },
       { guard: 'FailureParksTask', property: 'NextStageWaitsForOwedActions', shape: nextStageClaimedOverUnparkedFailure },
+      { guard: 'FailureKeepsReview', property: 'ReviewKeptUntilDecided', shape: reviewLostToAFailedRow },
       { guard: 'RetryReowesFailedRows', property: 'NextStageWaitsForOwedActions', shape: nextStageClaimedOverFailedRow },
+      { guard: 'LeasesOnOneClock', property: 'EffectAtMostOnce', shape: performerOnAnotherClockPostsAgain },
+      { guard: 'TargetSettlesWithinMargin', property: 'EffectAtMostOnce', shape: requestSettlesAfterItsLease },
       { guard: 'ClaimWaitsForOwedActions', property: 'NextStageWaitsForOwedActions', shape: nextStageClaimedWhileOwing },
       { guard: 'DoneFollowsEffect', property: 'DoneMeansEffect', shape: rowMarkedDoneBeforeEffect },
       { guard: 'PerformerIsFair', property: 'EveryOwedActionSettles', overrides: { MaxCrashes: '0', MaxStalls: '0', MaxRetries: '0' }, shape: performersStopTakingOwedRows },

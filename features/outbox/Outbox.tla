@@ -21,18 +21,23 @@ CONSTANTS
     FailedCallKeepsClaim,
     RetriesAreCapped,
     FailureParksTask,
+    FailureKeepsReview,
     RetryReowesFailedRows,
+    LeasesOnOneClock,
+    TargetSettlesWithinMargin,
     PerformerIsFair
 
 ASSUME RowsPerTask \in Nat \ {0} /\ MaxTries \in Nat \ {0} /\ MaxCrashes \in Nat /\ MaxStalls \in Nat /\ MaxRetries \in Nat
 
-VARIABLES task, row, effects, pending, perf, crashes, stalls, retries
+VARIABLES task, review, row, effects, pending, perf, crashes, stalls, retries
 
-vars == <<task, row, effects, pending, perf, crashes, stalls, retries>>
+vars == <<task, review, row, effects, pending, perf, crashes, stalls, retries>>
 
 Rows == Tasks \X (1..RowsPerTask)
 
-TaskStates == {"working", "owing", "rolledBack", "next", "waiting"}
+TaskStates == {"working", "owing", "review", "rolledBack", "next", "waiting"}
+
+ReviewStates == {"none", "open"}
 
 RowStates == {"absent", "owed", "done", "failed"}
 
@@ -56,6 +61,7 @@ FirstStep(r) == IF MarkerCheckedBeforeWrite /\ ~Keyed(r) THEN "check" ELSE "call
 
 TypeOK ==
     /\ task \in [Tasks -> TaskStates]
+    /\ review \in [Tasks -> ReviewStates]
     /\ row \in [Rows -> [state : RowStates, tries : 0..MaxTries, leased : BOOLEAN]]
     /\ effects \in [Rows -> 0..2]
     /\ pending \subseteq Rows
@@ -66,6 +72,7 @@ TypeOK ==
 
 Init ==
     /\ task = [t \in Tasks |-> "working"]
+    /\ review = [t \in Tasks |-> "none"]
     /\ row = [r \in Rows |-> [state |-> "absent", tries |-> 0, leased |-> FALSE]]
     /\ effects = [r \in Rows |-> 0]
     /\ pending = {}
@@ -91,13 +98,16 @@ LostTry(r) ==
        ELSE [Released(r) EXCEPT !.tries = Min(tried, MaxTries),
                                 !.state = IF RetriesAreCapped /\ tried >= MaxTries THEN "failed" ELSE "owed"]
 
-ParkedAfter(r, lost) == IF FailureParksTask /\ lost.state = "failed" /\ row[r].state = "owed" THEN [task EXCEPT ![r[1]] = "waiting"] ELSE task
+Parks(t) == FailureParksTask /\ (FailureKeepsReview => task[t] # "review")
+
+ParkedAfter(r, lost) == IF lost.state = "failed" /\ row[r].state = "owed" /\ Parks(r[1]) THEN [task EXCEPT ![r[1]] = "waiting"] ELSE task
 
 Transact(t) ==
     /\ task[t] = "working"
-    /\ \E commits, enqueued \in BOOLEAN :
+    /\ \E commits, enqueued, gated \in BOOLEAN :
          /\ EnqueueWithState => enqueued = commits
-         /\ task' = [task EXCEPT ![t] = IF commits THEN "owing" ELSE "rolledBack"]
+         /\ task' = [task EXCEPT ![t] = IF ~commits THEN "rolledBack" ELSE IF gated THEN "review" ELSE "owing"]
+         /\ review' = [review EXCEPT ![t] = IF commits /\ gated THEN "open" ELSE "none"]
          /\ row' = IF enqueued THEN Owed(t) ELSE row
     /\ UNCHANGED <<effects, pending, perf, crashes, stalls, retries>>
 
@@ -105,7 +115,14 @@ ClaimNextStage(t) ==
     /\ task[t] = "owing"
     /\ ClaimWaitsForOwedActions => \A r \in RowsOf(t) : row[r].state # "owed"
     /\ task' = [task EXCEPT ![t] = "next"]
-    /\ UNCHANGED <<row, effects, pending, perf, crashes, stalls, retries>>
+    /\ UNCHANGED <<review, row, effects, pending, perf, crashes, stalls, retries>>
+
+Approve(t) ==
+    /\ task[t] = "review"
+    /\ task' = [task EXCEPT ![t] = "owing"]
+    /\ review' = [review EXCEPT ![t] = "none"]
+    /\ row' = IF RetryReowesFailedRows THEN Reowed(t) ELSE row
+    /\ UNCHANGED <<effects, pending, perf, crashes, stalls, retries>>
 
 Retry(t) ==
     /\ task[t] = "waiting"
@@ -113,7 +130,7 @@ Retry(t) ==
     /\ task' = [task EXCEPT ![t] = "owing"]
     /\ row' = IF RetryReowesFailedRows THEN Reowed(t) ELSE row
     /\ retries' = retries + 1
-    /\ UNCHANGED <<effects, pending, perf, crashes, stalls>>
+    /\ UNCHANGED <<review, effects, pending, perf, crashes, stalls>>
 
 Claim(p, r) ==
     /\ perf[p].step = "idle"
@@ -122,7 +139,7 @@ Claim(p, r) ==
     /\ InOrderPerTask => \A e \in Earlier(r) : row[e].state = "done"
     /\ row' = [row EXCEPT ![r].leased = TRUE, ![r].state = IF DoneFollowsEffect THEN @ ELSE "done"]
     /\ perf' = [perf EXCEPT ![p] = [step |-> FirstStep(r), row |-> r, live |-> TRUE, stalled |-> FALSE]]
-    /\ UNCHANGED <<task, effects, pending, crashes, stalls, retries>>
+    /\ UNCHANGED <<task, review, effects, pending, crashes, stalls, retries>>
 
 Check(p) ==
     LET r == perf[p].row
@@ -133,7 +150,7 @@ Check(p) ==
                /\ perf' = [perf EXCEPT ![p] = Idle]
           ELSE /\ perf' = [perf EXCEPT ![p].step = "call"]
                /\ UNCHANGED row
-       /\ UNCHANGED <<task, effects, pending, crashes, stalls, retries>>
+       /\ UNCHANGED <<task, review, effects, pending, crashes, stalls, retries>>
 
 Call(p) ==
     LET r == perf[p].row
@@ -143,13 +160,14 @@ Call(p) ==
        /\ EffectWithinLease => perf[p].live
        /\ \/ /\ effects' = Landed(r)
              /\ perf' = [perf EXCEPT ![p].step = "mark"]
-             /\ UNCHANGED <<task, row, pending>>
+             /\ UNCHANGED <<task, review, row, pending>>
           \/ /\ pending' = pending \cup {r}
              /\ perf' = [perf EXCEPT ![p] = Idle]
              /\ IF FailedCallKeepsClaim
-                THEN UNCHANGED <<task, row>>
+                THEN UNCHANGED <<task, review, row>>
                 ELSE /\ row' = [row EXCEPT ![r] = lost]
                      /\ task' = ParkedAfter(r, lost)
+                     /\ UNCHANGED review
              /\ UNCHANGED effects
        /\ UNCHANGED <<crashes, stalls, retries>>
 
@@ -159,7 +177,7 @@ Mark(p) ==
        /\ ~perf[p].stalled
        /\ row' = [row EXCEPT ![r] = Done(r)]
        /\ perf' = [perf EXCEPT ![p] = Idle]
-       /\ UNCHANGED <<task, effects, pending, crashes, stalls, retries>>
+       /\ UNCHANGED <<task, review, effects, pending, crashes, stalls, retries>>
 
 Abandon(p) ==
     /\ perf[p].step = "call"
@@ -167,14 +185,14 @@ Abandon(p) ==
     /\ ~perf[p].stalled
     /\ ~perf[p].live
     /\ perf' = [perf EXCEPT ![p] = Idle]
-    /\ UNCHANGED <<task, row, effects, pending, crashes, stalls, retries>>
+    /\ UNCHANGED <<task, review, row, effects, pending, crashes, stalls, retries>>
 
 Crash(p) ==
     /\ perf[p].step # "idle"
     /\ crashes < MaxCrashes
     /\ perf' = [perf EXCEPT ![p] = Idle]
     /\ crashes' = crashes + 1
-    /\ UNCHANGED <<task, row, effects, pending, stalls, retries>>
+    /\ UNCHANGED <<task, review, row, effects, pending, stalls, retries>>
 
 Hang(p) ==
     /\ perf[p].step = "call"
@@ -182,35 +200,35 @@ Hang(p) ==
     /\ stalls < MaxStalls
     /\ perf' = [perf EXCEPT ![p].stalled = TRUE]
     /\ stalls' = stalls + 1
-    /\ UNCHANGED <<task, row, effects, pending, crashes, retries>>
+    /\ UNCHANGED <<task, review, row, effects, pending, crashes, retries>>
 
 Wake(p) ==
     /\ perf[p].stalled
     /\ perf' = [perf EXCEPT ![p].stalled = FALSE]
-    /\ UNCHANGED <<task, row, effects, pending, crashes, stalls, retries>>
+    /\ UNCHANGED <<task, review, row, effects, pending, crashes, stalls, retries>>
 
 Resolve(r) ==
     /\ r \in pending
     /\ pending' = pending \ {r}
     /\ \/ effects' = Landed(r)
        \/ UNCHANGED effects
-    /\ UNCHANGED <<task, row, perf, crashes, stalls, retries>>
+    /\ UNCHANGED <<task, review, row, perf, crashes, stalls, retries>>
 
 Expire(r) ==
     LET lost == LostTry(r)
     IN /\ LeaseExpires
        /\ row[r].leased
-       /\ r \notin pending
-       /\ \A p \in Holders(r) : perf[p].stalled
+       /\ TargetSettlesWithinMargin => r \notin pending
+       /\ LeasesOnOneClock => \A p \in Holders(r) : perf[p].stalled
        /\ row' = [row EXCEPT ![r] = lost]
        /\ task' = ParkedAfter(r, lost)
-       /\ perf' = [p \in Performers |-> IF perf[p].row = r THEN [perf[p] EXCEPT !.live = FALSE] ELSE perf[p]]
-       /\ UNCHANGED <<effects, pending, crashes, stalls, retries>>
+       /\ perf' = IF LeasesOnOneClock THEN [p \in Performers |-> IF perf[p].row = r THEN [perf[p] EXCEPT !.live = FALSE] ELSE perf[p]] ELSE perf
+       /\ UNCHANGED <<review, effects, pending, crashes, stalls, retries>>
 
 Quiet == \A p \in Performers : perf[p].step = "idle"
 
 Next ==
-    \/ \E t \in Tasks : Transact(t) \/ ClaimNextStage(t) \/ Retry(t)
+    \/ \E t \in Tasks : Transact(t) \/ ClaimNextStage(t) \/ Approve(t) \/ Retry(t)
     \/ \E p \in Performers, r \in Rows : Claim(p, r)
     \/ \E p \in Performers : Check(p) \/ Call(p) \/ Mark(p) \/ Abandon(p)
     \/ \E p \in Performers : Crash(p) \/ Hang(p) \/ Wake(p)
@@ -239,6 +257,10 @@ NextStageWaitsForOwedActions == \A t \in Tasks : task[t] = "next" => \A r \in Ro
 
 OneLivePerformerPerRow == \A r \in Rows : Cardinality(Holders(r)) <= 1
 
-EveryOwedActionSettles == \A r \in Rows : <>[](row[r].state # "owed" \/ task[r[1]] = "waiting")
+ReviewKeptUntilDecided == \A t \in Tasks : review[t] = "open" => task[t] = "review"
+
+HeldForAPerson(r) == task[r[1]] = "waiting" \/ (task[r[1]] = "review" /\ \E e \in Earlier(r) : row[e].state = "failed")
+
+EveryOwedActionSettles == \A r \in Rows : <>[](row[r].state # "owed" \/ HeldForAPerson(r))
 
 =============================================================================

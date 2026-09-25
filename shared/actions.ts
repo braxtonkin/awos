@@ -111,11 +111,27 @@ async function look<R>(schema: z.ZodType<R>, find: () => Promise<Lookup<R>>): Pr
   }
 }
 
+const pastDeadline = { failed: 'The call ran past its deadline, so the performer stopped waiting for it.' } as const;
+
+function byDeadline<T>(signal: AbortSignal, work: () => Promise<T>, late: T): Promise<T> {
+  if (signal.aborted) return Promise.resolve(late);
+  let lapse = (): void => undefined;
+  const lapsed = new Promise<T>(resolve => {
+    lapse = () => {
+      resolve(late);
+    };
+    signal.addEventListener('abort', lapse, { once: true });
+  });
+  return Promise.race([work(), lapsed]).finally(() => {
+    signal.removeEventListener('abort', lapse);
+  });
+}
+
 export function performer<K extends string, P, R>(kind: ActionSpec<K, P, R>, target: Target<P, R>, stands: Stands | null = null): Performer<K> {
   const typed = (owed: Owed<unknown>): Owed<P> | string => parsedPayload(kind.payload, owed);
   const call = (owed: Owed<unknown>, limits: Limits): Promise<Outcome<unknown>> => {
     const parsed = typed(owed);
-    return typeof parsed === 'string' ? Promise.resolve({ failed: parsed }) : settle(kind.result, () => target.call(parsed, limits));
+    return typeof parsed === 'string' ? Promise.resolve({ failed: parsed }) : byDeadline(limits.signal, () => settle(kind.result, () => target.call(parsed, limits)), pastDeadline);
   };
   if (target.catches === 'duplicates') return { kind: kind.kind, stands, find: null, call };
   const { find } = target;
@@ -125,7 +141,7 @@ export function performer<K extends string, P, R>(kind: ActionSpec<K, P, R>, tar
     call,
     find: (owed, limits) => {
       const parsed = typed(owed);
-      return typeof parsed === 'string' ? Promise.resolve({ failed: parsed }) : look(kind.result, () => find(parsed, limits));
+      return typeof parsed === 'string' ? Promise.resolve({ failed: parsed }) : byDeadline(limits.signal, () => look(kind.result, () => find(parsed, limits)), pastDeadline);
     },
   };
 }

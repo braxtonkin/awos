@@ -1,17 +1,18 @@
 import { randomUUID } from 'node:crypto';
 import { availableParallelism } from 'node:os';
+import { setTimeout as wait } from 'node:timers/promises';
 import { sql, type RawBuilder } from 'kysely';
 import { z } from 'zod';
 import { performer, type ActionSpec, type Limits, type Lookup, type Outcome, type Owed, type Owe } from '../../shared/actions.ts';
 import { connect, refusal, type Database } from '../../shared/db/client.ts';
-import { neverStops, realClock, runLoop, type Clock } from '../../shared/loop.ts';
+import { neverStops, realClock, runLoop } from '../../shared/loop.ts';
 import { inTransaction } from '../../shared/transaction.ts';
 import type { TestPostgres } from '../../tools/verify/postgres.ts';
 import { enqueue } from './enqueue.ts';
 import { check, worldOf, type PropertyName, type Violation } from './invariants.ts';
-import { claimNext, expire, guarded, outbox, performClaimed, registryOf, type Claimed, type Guards, type Lease, type Performed, type Registry } from './perform.ts';
+import { claimNext, databaseTime, expire, guarded, outbox, performClaimed, registryOf, type Claim, type Claimed, type Guards, type Lease, type Performed, type Registry, type Time } from './perform.ts';
 
-export const profileName = z.enum(['mixed', 'crashes', 'two-engines', 'always-fails']);
+export const profileName = z.enum(['mixed', 'crashes', 'two-engines', 'always-fails', 'skewed', 'late']);
 
 export type ProfileName = z.infer<typeof profileName>;
 
@@ -42,6 +43,7 @@ type Profile = {
   readonly rollback: number;
   readonly failing: boolean;
   readonly stepMs: number;
+  readonly clockSkewMs: number;
   readonly weights: Weights;
 };
 
@@ -54,7 +56,7 @@ const steps = ['s1', 's2', 's3'] as const;
 const calm: Weights = { claimTask: 1.5, owe: 3, claimRow: 4, advance: 8, crash: 0.5, hang: 0.4, wake: 0.6, resolve: 1, expire: 1.5, retry: 1, approve: 1, stop: 0.03, race: 0, tick: 0.4 };
 
 export const profiles: Readonly<Record<ProfileName, Profile>> = {
-  mixed: { engines: 2, performersPerEngine: 1, tasks: 4, fail: 0.15, landsLater: 0.5, refuse: 0.03, rollback: 0.15, failing: false, stepMs: 400, weights: calm },
+  mixed: { engines: 2, performersPerEngine: 1, tasks: 4, fail: 0.15, landsLater: 0.5, refuse: 0.03, rollback: 0.15, failing: false, stepMs: 400, clockSkewMs: 0, weights: calm },
   crashes: {
     engines: 2,
     performersPerEngine: 1,
@@ -65,6 +67,7 @@ export const profiles: Readonly<Record<ProfileName, Profile>> = {
     rollback: 0.1,
     failing: false,
     stepMs: 400,
+    clockSkewMs: 0,
     weights: { ...calm, crash: 2, hang: 2, wake: 0.4, resolve: 1.5, expire: 2, tick: 0.8 },
   },
   'two-engines': {
@@ -77,9 +80,12 @@ export const profiles: Readonly<Record<ProfileName, Profile>> = {
     rollback: 0.1,
     failing: false,
     stepMs: 300,
+    clockSkewMs: 0,
     weights: { ...calm, claimRow: 5, crash: 0.3, race: 2 },
   },
-  'always-fails': { engines: 2, performersPerEngine: 1, tasks: 3, fail: 1, landsLater: 0, refuse: 0, rollback: 0.1, failing: true, stepMs: 400, weights: { ...calm, crash: 0.3, stop: 0 } },
+  'always-fails': { engines: 2, performersPerEngine: 1, tasks: 3, fail: 1, landsLater: 0, refuse: 0, rollback: 0.1, failing: true, stepMs: 400, clockSkewMs: 0, weights: { ...calm, crash: 0.3, approve: 0.2, stop: 0 } },
+  skewed: { engines: 2, performersPerEngine: 1, tasks: 4, fail: 0.1, landsLater: 0.5, refuse: 0.02, rollback: 0.1, failing: false, stepMs: 400, clockSkewMs: 6_000, weights: { ...calm, expire: 3 } },
+  late: { engines: 2, performersPerEngine: 1, tasks: 4, fail: 0.4, landsLater: 1, refuse: 0, rollback: 0.1, failing: false, stepMs: 400, clockSkewMs: 0, weights: { ...calm, crash: 0.2, hang: 0.2, resolve: 0.5, expire: 3 } },
 };
 
 export const mutantName = z.enum([
@@ -97,6 +103,9 @@ export const mutantName = z.enum([
   'no-reowe',
   'enqueue-apart',
   'unfair',
+  'wall-clock',
+  'park-over-review',
+  'settles-late',
 ]);
 
 export type MutantName = z.infer<typeof mutantName>;
@@ -107,7 +116,17 @@ type Mutant = {
   readonly profile: ProfileName;
   readonly off?: keyof Guards;
   readonly drops?: string;
+  readonly replaces?: RawBuilder<unknown>;
 };
+
+const parkOverReview = sql`create or replace function park_for_failed_row() returns trigger language plpgsql as $$
+begin
+  update task set state = 'waiting', waiting_on = 'retry', review_attempt = null,
+    waiting_reason = format('The %s action failed %s times, last with: %s. Fix what it needs, then press Retry to perform it again.', new.kind, new.tries, new.last_error)
+  where id = new.task_id and state in ('ready', 'waiting');
+  return null;
+end
+$$`;
 
 export const mutants: Readonly<Record<MutantName, Mutant>> = {
   'no-claim': { guard: 'ClaimIsExclusive', breaks: ['EffectAtMostOnce', 'OneLivePerformerPerRow'], profile: 'mixed', off: 'ClaimIsExclusive' },
@@ -124,6 +143,9 @@ export const mutants: Readonly<Record<MutantName, Mutant>> = {
   'no-reowe': { guard: 'RetryReowesFailedRows', breaks: ['EveryOwedActionSettles'], profile: 'always-fails', off: 'RetryReowesFailedRows' },
   'enqueue-apart': { guard: 'EnqueueWithState', breaks: ['NoEffectWithoutOwingState'], profile: 'mixed' },
   unfair: { guard: 'PerformerIsFair', breaks: ['EveryOwedActionSettles'], profile: 'mixed' },
+  'wall-clock': { guard: 'LeasesOnOneClock', breaks: ['EffectAtMostOnce', 'OneLivePerformerPerRow'], profile: 'skewed' },
+  'park-over-review': { guard: 'FailureKeepsReview', breaks: ['ReviewKeptUntilDecided'], profile: 'always-fails', replaces: parkOverReview },
+  'settles-late': { guard: 'TargetSettlesWithinMargin', breaks: ['EffectAtMostOnce'], profile: 'late' },
 };
 
 export const noMutantYet: Readonly<Record<string, readonly string[]>> = {
@@ -171,13 +193,14 @@ type Busy = { readonly claimed: Claimed; readonly simClaim: string; readonly run
 
 type Slot = { readonly id: string; readonly engine: number; stalled: boolean; gate: Gate | undefined; arrived: () => void; busy: Busy | undefined };
 
-type Pending = { readonly marker: string; readonly keyed: boolean; readonly deadline: number };
+type Pending = { readonly marker: string; readonly keyed: boolean; readonly from: number; readonly deadline: number };
 
 type Target = {
   readonly db: Database;
   readonly now: () => number;
   readonly random: Random;
   readonly profile: Pick<Profile, 'fail' | 'landsLater' | 'refuse' | 'failing'>;
+  readonly settlesAfterLease: boolean;
   readonly pending: Pending[];
 };
 
@@ -188,7 +211,6 @@ type Sim = Target & {
   readonly guards: Guards;
   readonly mutant: MutantName | undefined;
   readonly random: Random;
-  readonly clock: Clock;
   readonly slots: readonly Slot[];
   readonly pending: Pending[];
   readonly retried: Map<string, number>;
@@ -260,12 +282,17 @@ function gateAt(slot: Slot | undefined, at: GateAt): Promise<void> {
   });
 }
 
+function inFlight(sim: Target, marker: string, keyed: boolean, deadline: number): Pending {
+  const leaseEnd = deadline + lease.marginMs;
+  return sim.settlesAfterLease ? { marker, keyed, from: leaseEnd, deadline: leaseEnd + lease.leaseMs } : { marker, keyed, from: 0, deadline };
+}
+
 function fakeCall(sim: Target, slot: Slot | undefined, keyed: boolean, faults: boolean) {
   return async (owed: Owed<unknown>, limits: Limits): Promise<Outcome<z.infer<typeof simResult>>> => {
     await gateAt(slot, 'call');
     if (sim.now() >= limits.deadline.getTime()) return { failed: 'The call passed its deadline before it was sent.' };
     if (sim.profile.failing || (faults && sim.random() < sim.profile.fail)) {
-      if (faults && sim.random() < sim.profile.landsLater) sim.pending.push({ marker: owed.marker, keyed, deadline: limits.deadline.getTime() });
+      if (faults && sim.random() < sim.profile.landsLater) sim.pending.push(inFlight(sim, owed.marker, keyed, limits.deadline.getTime()));
       return { failed: 'The target answered 503 Service Unavailable.' };
     }
     if (keyed && faults && sim.random() < sim.profile.refuse) return { refused: { reason: 'The target refused the change it was asked for.', head: null } };
@@ -310,11 +337,19 @@ async function driveUntilGate(sim: Sim, slot: Slot, busy: Busy, reached: Promise
   return `${slot.id} ${outcome} row ${busy.claimed.row}`;
 }
 
-function engineOf(sim: Sim, slot: Slot): Database {
-  const engine = sim.engines[slot.engine];
-  if (engine === undefined) throw new Error(`The simulator has no engine ${String(slot.engine)}.`);
+function engineAt(sim: Sim, index: number): Database {
+  const engine = sim.engines[index];
+  if (engine === undefined) throw new Error(`The simulator has no engine ${String(index)}.`);
   return engine;
 }
+
+const engineOf = (sim: Sim, slot: Slot): Database => engineAt(sim, slot.engine);
+
+const skewOf = (sim: Sim, engine: number): number => (engine === sim.profile.engines - 1 ? sim.profile.clockSkewMs : 0);
+
+const virtualTime = (at: () => number): Time => ({ now: () => Promise.resolve(new Date(at())), timeout: () => neverStops });
+
+const timeFor = (sim: Sim, engine: number): Time => virtualTime(() => sim.time + (sim.mutant === 'wall-clock' ? skewOf(sim, engine) : 0));
 
 async function startClaimed(sim: Sim, slot: Slot, claimed: Claimed): Promise<string> {
   const { rows } = await sql<{ id: string }>`insert into sim_claim (row_id, performer, claimed_at, lease_until)
@@ -325,13 +360,18 @@ async function startClaimed(sim: Sim, slot: Slot, claimed: Claimed): Promise<str
   if (own === undefined) throw new Error(`The simulator claimed ${claimed.kind}, which it does not perform.`);
   count(sim, 'claimed');
   const reached = arrival(slot);
-  const busy: Busy = { claimed, simClaim, run: performClaimed(engineOf(sim, slot), sim.guards, own, claimed, sim.clock, lease) };
+  const busy: Busy = { claimed, simClaim, run: performClaimed(engineOf(sim, slot), sim.guards, own, claimed, timeFor(sim, slot.engine), lease) };
   slot.busy = busy;
   return driveUntilGate(sim, slot, busy, reached);
 }
 
+async function claimFor(sim: Sim, slot: Slot, registry: Registry): Promise<Claim> {
+  const db = engineOf(sim, slot);
+  return claimNext(db, sim.guards, registry, await timeFor(sim, slot.engine).now(db), lease);
+}
+
 async function claimRow(sim: Sim, slot: Slot): Promise<string> {
-  const { claimed, dropped } = await claimNext(engineOf(sim, slot), sim.guards, registryFor(sim, undefined, false), new Date(sim.time), lease);
+  const { claimed, dropped } = await claimFor(sim, slot, registryFor(sim, undefined, false));
   for (let row = 0; row < dropped; row += 1) count(sim, 'dropped');
   if (claimed === undefined) return `${slot.id} claimed no row and dropped ${String(dropped)}`;
   return startClaimed(sim, slot, claimed);
@@ -339,7 +379,7 @@ async function claimRow(sim: Sim, slot: Slot): Promise<string> {
 
 async function race(sim: Sim, first: Slot, second: Slot): Promise<string> {
   const registry = registryFor(sim, undefined, false);
-  const claims = await Promise.all([first, second].map(slot => claimNext(engineOf(sim, slot), sim.guards, registry, new Date(sim.time), lease)));
+  const claims = await Promise.all([first, second].map(slot => claimFor(sim, slot, registry)));
   const lines: string[] = [];
   for (const [index, slot] of [first, second].entries()) {
     const claimed = claims[index]?.claimed;
@@ -376,9 +416,10 @@ async function resolveOverdue(sim: Sim): Promise<void> {
   for (const pending of sim.pending.filter(entry => entry.deadline <= sim.time)) await resolvePending(sim, pending);
 }
 
-async function runExpire(sim: Sim, db: Database): Promise<string> {
+async function runExpire(sim: Sim, engine: number): Promise<string> {
   await resolveOverdue(sim);
-  const lapsed = await expire(db, sim.guards, new Date(sim.time), lease);
+  const db = engineAt(sim, engine);
+  const lapsed = await expire(db, sim.guards, await timeFor(sim, engine).now(db), lease);
   for (const entry of lapsed) {
     count(sim, entry.state === 'failed' ? 'failed at cap' : 'lapsed');
     if (entry.tries === 1 && sim.failedBefore.has(entry.row)) sim.reowed += 1;
@@ -434,6 +475,7 @@ async function moveTask(db: Database, sim: Sim, task: TaskRow, token: string): P
               review_attempt = (select max(a.id) from attempt a where a.task_id = task.id)`
         : sql`step = ${next}, state = 'ready'`;
   await sql`update task set ${standing} where id = ${task.id}`.execute(db);
+  if (gated) await sql`insert into sim_review (attempt_id, task_id) select review_attempt, id from task where id = ${task.id}`.execute(db);
   await sql`insert into sim_owing (token, task_id) values (${token}, ${task.id})`.execute(db);
   if (sim.random() < sim.profile.rollback) throw new RolledBack();
 }
@@ -492,11 +534,16 @@ async function retry(sim: Sim, task: TaskRow): Promise<string> {
   return `a person pressed Retry on task ${task.id}`;
 }
 
+async function decideReview(db: Database, sim: Pick<Sim, 'time'>, task: string): Promise<void> {
+  await sql`update sim_review set decided_at = ${new Date(sim.time)} where task_id = ${task} and decided_at is null`.execute(db);
+}
+
 async function approve(sim: Sim, task: TaskRow, review: string): Promise<string> {
   await sim.db.transaction().execute(async tx => {
     await tx.insertInto('human_action').values({ id: randomUUID(), at: new Date(sim.time), person_id: '1', kind: 'approve', task_id: task.id, attempt_id: review }).execute();
     await sql`update task set state = 'ready', waiting_on = null, waiting_reason = null, review_attempt = null, epoch = epoch + 1
       where id = ${task.id} and state = 'waiting' and waiting_on = 'approval'`.execute(tx);
+    await decideReview(tx, sim, task.id);
   });
   count(sim, 'approved');
   return `a person approved task ${task.id}`;
@@ -508,6 +555,7 @@ async function stop(sim: Sim, task: TaskRow): Promise<string> {
     await tx.insertInto('human_action').values({ id, at: new Date(sim.time), person_id: '1', kind: 'stop_task', task_id: task.id }).execute();
     await tx.updateTable('attempt').set({ finished_at: new Date(sim.time), verdict: 'stopped' }).where('attempt.task_id', '=', task.id).where('attempt.finished_at', 'is', null).execute();
     await sql`update task set state = 'stopped', stopped_by = ${id}, waiting_on = null, waiting_reason = null, review_attempt = null where id = ${task.id}`.execute(tx);
+    await decideReview(tx, sim, task.id);
   });
   count(sim, 'stopped');
   return `a person stopped task ${task.id}`;
@@ -553,11 +601,12 @@ function movesFor(sim: Sim, tasks: readonly TaskRow[]): readonly (readonly [Move
       });
     }
   }
-  sim.engines.forEach((engine, index) => {
-    add(weights.expire / sim.engines.length, `expire ${String(index)}`, () => runExpire(sim, engine));
+  sim.engines.forEach((_, index) => {
+    add(weights.expire / sim.engines.length, `expire ${String(index)}`, () => runExpire(sim, index));
   });
-  const [waiting] = sim.pending;
-  if (waiting !== undefined) add(weights.resolve, 'resolve', () => resolvePending(sim, pick(sim.random, sim.pending) ?? waiting));
+  const settling = sim.pending.filter(pending => pending.from <= sim.time);
+  const [waiting] = settling;
+  if (waiting !== undefined) add(weights.resolve, 'resolve', () => resolvePending(sim, pick(sim.random, settling) ?? waiting));
   const [first, second] = [idle.find(slot => slot.engine === 0), idle.find(slot => slot.engine === 1)];
   if (fair && first !== undefined && second !== undefined) add(weights.race, 'race', () => race(sim, first, second));
   add(weights.tick, 'tick', () => {
@@ -579,14 +628,14 @@ async function drain(sim: Sim): Promise<void> {
   await finishBusy(sim);
   if (sim.mutant === 'unfair') return;
   const [db = sim.db] = sim.engines;
-  const loop = outbox({ everyMs: 1_000, clock: sim.clock, registry: registryFor(sim, undefined, false), ...lease }, sim.guards);
+  const loop = outbox({ everyMs: 1_000, time: timeFor(sim, 0), registry: registryFor(sim, undefined, false), ...lease }, sim.guards);
   for (let pass = 0; pass < 12; pass += 1) {
     for (const task of await tasksOf(sim)) {
       if (task.state === 'waiting' && task.waiting_on === 'retry' && (sim.retried.get(task.id) ?? 0) < maxRetries) await retry(sim, task);
     }
     sim.time += lease.leaseMs + lease.marginMs;
     let rounds = 0;
-    await runExpire(sim, db);
+    await runExpire(sim, 0);
     await loop.pass(db, { now: new Date(sim.time), late: () => (rounds += 1) > 200, stop: neverStops });
   }
 }
@@ -622,7 +671,6 @@ async function runSeed(postgres: TestPostgres, plan: Plan, seed: number): Promis
     mutant: plan.mutant,
     random: seeded(seed),
     now: () => sim.time,
-    clock: { now: () => new Date(sim.time), sleep: () => Promise.resolve() },
     slots: Array.from({ length: profile.engines * profile.performersPerEngine }, (_, index) => ({
       id: `p${String(index + 1)}`,
       engine: index % profile.engines,
@@ -631,6 +679,7 @@ async function runSeed(postgres: TestPostgres, plan: Plan, seed: number): Promis
       arrived: noop,
       busy: undefined,
     })),
+    settlesAfterLease: plan.mutant === 'settles-late',
     pending: [],
     retried: new Map(),
     failedBefore: new Set(),
@@ -643,6 +692,7 @@ async function runSeed(postgres: TestPostgres, plan: Plan, seed: number): Promis
   try {
     for (const statement of worldOf(profile.tasks)) await statement.execute(db);
     if (mutant?.drops !== undefined) await dropGuard(db, mutant.drops);
+    if (mutant?.replaces !== undefined) await mutant.replaces.execute(db);
     const ended = async (failure: Failure | undefined): Promise<Run> => ({
       plan,
       seed,
@@ -737,7 +787,7 @@ export async function checkCatalog(postgres: TestPostgres): Promise<Catalog> {
   }
 }
 
-const instantTarget = (db: Database): Target => ({ db, now: () => Date.now(), random: seeded(1), profile: { fail: 0, landsLater: 0, refuse: 0, failing: false }, pending: [] });
+const instantTarget = (db: Database): Target => ({ db, now: () => Date.now(), random: seeded(1), profile: { fail: 0, landsLater: 0, refuse: 0, failing: false }, settlesAfterLease: false, pending: [] });
 
 export async function probeRollback(postgres: TestPostgres): Promise<{ readonly rows: number; readonly effects: number }> {
   const scratch = await postgres.scratch();
@@ -752,13 +802,115 @@ export async function probeRollback(postgres: TestPostgres): Promise<{ readonly 
     }).catch((error: unknown) => {
       if (!(error instanceof RolledBack)) throw error;
     });
-    const clock = realClock;
-    await outbox({ everyMs: 1_000, clock, registry: registryFor(instantTarget(db), undefined, false), ...lease }).pass(db, { now: clock.now(), late: () => false, stop: neverStops });
+    await outbox({ everyMs: 1_000, time: databaseTime, registry: registryFor(instantTarget(db), undefined, false), ...lease }).pass(db, { now: new Date(), late: () => false, stop: neverStops });
     return {
       rows: await scalar(db, sql<{ value: string }>`select count(*) as value from outbox`),
       effects: await scalar(db, sql<{ value: string }>`select count(*) as value from sim_effect`),
     };
   } finally {
+    await db.destroy();
+    await scratch.drop();
+  }
+}
+
+type Standing = { readonly state: string; readonly step: string; readonly waiting_on: string | null; readonly review_attempt: string | null; readonly waiting_reason: string | null };
+
+const standingOf = async (db: Database): Promise<Standing | undefined> =>
+  (await sql<Standing>`select state, step, waiting_on, review_attempt, waiting_reason from task where id = 1`.execute(db)).rows[0];
+
+const describe = (standing: Standing | undefined): string =>
+  standing === undefined ? 'no task' : `${standing.state} at ${standing.step}${standing.waiting_on === null ? '' : ` on ${standing.waiting_on}`}, review ${standing.review_attempt ?? 'none'}`;
+
+const keepsReview = (standing: Standing | undefined, review: string): boolean =>
+  standing?.state === 'waiting' && standing.waiting_on === 'approval' && standing.review_attempt === review && standing.step === 'specify';
+
+export async function probeReviewThroughFailure(postgres: TestPostgres): Promise<readonly string[]> {
+  const scratch = await postgres.scratch();
+  const db = connect(scratch.url, 2);
+  let time = epoch;
+  const clock = { now: () => new Date(time) };
+  const jira = (failing: boolean): Target => ({ db, now: () => time, random: seeded(1), profile: { fail: 0, landsLater: 0, refuse: 0, failing }, settlesAfterLease: false, pending: [] });
+  const passes = async (failing: boolean, count: number): Promise<void> => {
+    const loop = outbox({ everyMs: 1_000, time: virtualTime(() => time), registry: registryFor(jira(failing), undefined, false), ...lease });
+    for (let pass = 0; pass < count; pass += 1) {
+      await loop.pass(db, { now: clock.now(), late: () => false, stop: neverStops });
+      time += lease.leaseMs + 1;
+    }
+  };
+  try {
+    for (const statement of worldOf(1)) await statement.execute(db);
+    await sql`update task set step = 'specify' where id = 1`.execute(db);
+    const { rows } = await sql<{ id: string }>`insert into attempt (task_id, routine_id, routine_version, step, epoch, run_as_id, started_at, lease_until)
+      select id, routine_id, 1, step, epoch, 1, ${clock.now()}, ${new Date(time + 60_000)} from task where id = 1 returning id`.execute(db);
+    const review = rows[0]?.id;
+    if (review === undefined) return ['the Specify attempt could not start'];
+    const comment = [{ kind: unkeyedKind.kind, payload: simPayload.parse({ owing: randomUUID(), text: 'Specify posts its plan on the ticket.' }) }];
+    await inTransaction(db, async tx => {
+      await tx
+        .updateTable('attempt')
+        .set({ finished_at: clock.now(), verdict: 'pass', output: JSON.stringify({ outcome: 'done', summary: 'Simulated.', blocks: [] }) })
+        .where('attempt.id', '=', review)
+        .execute();
+      await sql`update task set state = 'waiting', waiting_on = 'approval', review_attempt = ${review},
+        waiting_reason = 'Approve specify for task SIM-1 to go on to implement, or send it back with a note to run specify again.' where id = 1`.execute(tx);
+      await enqueue(tx, { task: '1', actsAs: '1', now: clock.now() }, comment);
+    });
+    await passes(true, lease.maxTries + 1);
+    const failed = await standingOf(db);
+    const problems: string[] = [];
+    const { rows: errors } = await sql<{ state: string; last_error: string | null }>`select state, last_error from outbox where task_id = 1`.execute(db);
+    const error = errors[0]?.last_error ?? '';
+    if (errors[0]?.state !== 'failed') problems.push(`the comment row is ${errors[0]?.state ?? 'missing'} after Jira refused it ${String(lease.maxTries)} times`);
+    if (!keepsReview(failed, review)) problems.push(`after the comment failed, the task is ${describe(failed)}, not waiting on the review of attempt ${review}`);
+    if (error === '' || failed?.waiting_reason?.includes(error) !== true) problems.push(`the review's note does not name the failure: ${failed?.waiting_reason ?? 'no note'}`);
+    await db.transaction().execute(async tx => {
+      await tx.insertInto('human_action').values({ id: randomUUID(), at: clock.now(), person_id: '1', kind: 'retry_task', task_id: '1' }).execute();
+      await sql`update task set state = 'ready', waiting_on = null, waiting_reason = null, lost = 0, epoch = epoch + 1
+        where id = 1 and state = 'waiting' and waiting_on = 'retry'`.execute(tx);
+    });
+    const retried = await standingOf(db);
+    if (!keepsReview(retried, review)) problems.push(`after Retry, the task is ${describe(retried)}, so specify would run again`);
+    await db.transaction().execute(async tx => {
+      await tx.insertInto('human_action').values({ id: randomUUID(), at: clock.now(), person_id: '1', kind: 'approve', task_id: '1', attempt_id: review }).execute();
+      await sql`update task set state = 'ready', step = 'implement', waiting_on = null, waiting_reason = null, review_attempt = null, epoch = epoch + 1
+        where id = 1 and state = 'waiting' and waiting_on = 'approval'`.execute(tx);
+    });
+    await passes(false, 1);
+    const approved = await standingOf(db);
+    const posted = await scalar(db, sql<{ value: string }>`select count(*) as value from sim_effect`);
+    const specifies = await scalar(db, sql<{ value: string }>`select count(*) as value from attempt where task_id = 1 and step = 'specify'`);
+    const { rows: after } = await sql<{ state: string }>`select state from outbox where task_id = 1`.execute(db);
+    if (after[0]?.state !== 'done' || posted !== 1) problems.push(`after Approve with Jira back, the comment row is ${after[0]?.state ?? 'missing'} and posted ${String(posted)} times`);
+    if (approved?.state !== 'ready' || approved.step !== 'implement') problems.push(`after Approve, the task is ${describe(approved)}, not ready at implement`);
+    if (specifies !== 1) problems.push(`specify ran ${String(specifies)} times`);
+    return problems;
+  } finally {
+    await db.destroy();
+    await scratch.drop();
+  }
+}
+
+export type Deadline = { readonly settledMs: number | undefined; readonly claimed: boolean; readonly error: string | null };
+
+export async function probeDeadline(postgres: TestPostgres, short: Lease, waitMs: number): Promise<Deadline> {
+  const scratch = await postgres.scratch();
+  const db = connect(scratch.url, 2);
+  const giveUp = new AbortController();
+  try {
+    for (const statement of worldOf(1)) await statement.execute(db);
+    const owed = [{ kind: keyedKind.kind, payload: simPayload.parse({ owing: randomUUID(), text: 'Owed to a target that never answers.' }) }];
+    await inTransaction(db, tx => enqueue(tx, { task: '1', actsAs: '1', now: new Date() }, owed));
+    const deaf = registryOf({ keyed: performer(keyedKind, { catches: 'duplicates', call: () => new Promise<never>(noop) }) });
+    const started = performance.now();
+    let rounds = 0;
+    const passing = outbox({ everyMs: 1_000, time: databaseTime, registry: deaf, ...short })
+      .pass(db, { now: new Date(), late: () => (rounds += 1) > 1, stop: neverStops })
+      .then(() => performance.now() - started);
+    const settledMs = await Promise.race([passing, wait(waitMs, undefined, { signal: giveUp.signal }).catch(() => undefined)]);
+    const { rows } = await sql<{ claim: string | null; last_error: string | null }>`select claim, last_error from outbox`.execute(db);
+    return { settledMs, claimed: rows[0]?.claim !== null, error: rows[0]?.last_error ?? null };
+  } finally {
+    giveUp.abort();
     await db.destroy();
     await scratch.drop();
   }
@@ -794,9 +946,8 @@ export async function probeThroughput(postgres: TestPostgres, everyMs: number): 
   const stop = new AbortController();
   try {
     for (const statement of worldOf(50)) await statement.execute(db);
-    const clock = realClock;
-    const loop = outbox({ everyMs, clock, registry: registryFor(instantTarget(db), undefined, false), ...lease });
-    const running = runLoop(loop, db, clock, stop.signal, noop);
+    const loop = outbox({ everyMs, time: databaseTime, registry: registryFor(instantTarget(db), undefined, false), ...lease });
+    const running = runLoop(loop, db, realClock, stop.signal, noop);
     const probes: (Throughput & { readonly kind: 'batch' | 'single' })[] = [];
     for (let round = 0; round < 3; round += 1) {
       probes.push({ kind: 'batch', ...(await oweAndWait(db, 50, 10)) }, { kind: 'single', ...(await oweAndWait(db, 1, 1)) });
