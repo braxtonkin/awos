@@ -14,6 +14,7 @@ import { cleanChecks, leftovers, type CleanSources, type Leftover, type Place } 
 import { githubFromEnvironment } from './github.ts';
 import { jiraAt } from './jira.ts';
 import { PayloadRejected } from './payload.ts';
+import { agentModel, agentSteps, recordChecks } from './record-checks.ts';
 import { linksFrom, renderReport, stepRuns, tokenUsageMethod, type StepRun } from './report.ts';
 
 const ticket = 'CLEAN-1';
@@ -53,6 +54,7 @@ function transcript(plan: AttemptPlan): readonly Line[] {
 }
 
 type World = {
+  readonly plans: readonly AttemptPlan[];
   readonly lines: (plan: AttemptPlan) => readonly Line[];
   readonly prune: boolean;
   readonly after: (db: Database, attempts: readonly string[]) => Promise<unknown>;
@@ -63,7 +65,7 @@ const taskBranch = `autoworker/${ticket}`;
 
 const attemptBranch = (index: number): string => `${taskBranch}-attempt-${String(index + 1)}`;
 
-const cleanWorld: World = { lines: transcript, prune: true, after: () => Promise.resolve(), onGitHub: ['e2e/run-clean', 'autoworker/CLEAN-10', 'autoworker/CLEAN-10-attempt-1'] };
+const cleanWorld: World = { plans: attemptPlans, lines: transcript, prune: true, after: () => Promise.resolve(), onGitHub: ['e2e/run-clean', 'autoworker/CLEAN-10', 'autoworker/CLEAN-10-attempt-1'] };
 
 async function seed(db: Database, world: World): Promise<readonly string[]> {
   const person = (await db.insertInto('person').values({ email: 'owner@example.com', name: 'Owner', jira_account_id: 'owner-account' }).returning('id').executeTakeFirstOrThrow()).id;
@@ -83,7 +85,7 @@ async function seed(db: Database, world: World): Promise<readonly string[]> {
       .executeTakeFirstOrThrow()
   ).id;
   const attempts: string[] = [];
-  for (const plan of attemptPlans) {
+  for (const plan of world.plans) {
     await db.updateTable('task').set({ step: plan.step }).where('id', '=', task).execute();
     const attempt = (
       await db
@@ -142,6 +144,8 @@ type Plant = {
 
 const verifyAttempt = (attempts: readonly string[]): string => attempts[2] ?? 'missing';
 
+const plantedLabels = (attempt: string) => ({ name: `autoworker-attempt-${attempt}`, labels: { [labels.attempt]: attempt } });
+
 const plants: readonly Plant[] = [
   {
     name: 'a Secret labeled for a finished attempt',
@@ -152,6 +156,38 @@ const plants: readonly Plant[] = [
         body: { metadata: { name: `autoworker-attempt-${verifyAttempt(attempts)}`, labels: { [labels.attempt]: verifyAttempt(attempts) } }, stringData: { PLANTED: 'yes' } },
       }),
     expect: attempts => [{ place: 'cluster', name: `Secret autoworker-attempt-${verifyAttempt(attempts)}` }],
+  },
+  {
+    name: 'a Job labeled for a finished attempt',
+    world: cleanWorld,
+    cluster: (cluster, attempts) =>
+      cluster.batch.createNamespacedJob({
+        namespace: cluster.namespace,
+        body: { metadata: plantedLabels(verifyAttempt(attempts)), spec: { suspend: true, template: { spec: { restartPolicy: 'Never', containers: [{ name: 'planted', image: 'planted.invalid/never-pulled' }] } } } },
+      }),
+    expect: attempts => [{ place: 'cluster', name: `Job autoworker-attempt-${verifyAttempt(attempts)}` }],
+  },
+  {
+    name: 'a Pod labeled for a finished attempt',
+    world: cleanWorld,
+    cluster: (cluster, attempts) =>
+      cluster.core.createNamespacedPod({
+        namespace: cluster.namespace,
+        body: { metadata: plantedLabels(verifyAttempt(attempts)), spec: { schedulingGates: [{ name: 'autoworker.example/planted' }], containers: [{ name: 'planted', image: 'planted.invalid/never-pulled' }] } },
+      }),
+    expect: attempts => [{ place: 'cluster', name: `Pod autoworker-attempt-${verifyAttempt(attempts)}` }],
+  },
+  {
+    name: 'a failed outbox action',
+    world: {
+      ...cleanWorld,
+      after: db =>
+        db
+          .insertInto('outbox')
+          .values({ task_id: '1', position: 3, kind: 'ticket.transition', payload: JSON.stringify({}), acts_as: '1', idempotency_key: 'clean-world-planted-failed-row', owed_at: at(600), state: 'failed', settled_at: at(601), tries: 3, last_error: 'Jira answered 500' })
+          .execute(),
+    },
+    expect: () => [{ place: 'outbox', name: 'outbox row 3 (ticket.transition)' }],
   },
   {
     name: 'an owed outbox action',
@@ -204,6 +240,11 @@ const plants: readonly Plant[] = [
     world: { ...cleanWorld, onGitHub: [...cleanWorld.onGitHub, taskBranch] },
     expect: () => [{ place: 'github', name: `branch ${taskBranch}` }],
   },
+  {
+    name: 'a branch for the ticket that the record does not name, left on GitHub',
+    world: { ...cleanWorld, onGitHub: [...cleanWorld.onGitHub, attemptBranch(8)] },
+    expect: () => [{ place: 'github', name: `branch ${attemptBranch(8)}` }],
+  },
 ];
 
 type Allowance = { readonly name: string; readonly world: World };
@@ -225,6 +266,17 @@ const listed =
   (branches: readonly string[]) =>
   (prefix: string): Promise<readonly string[]> =>
     Promise.resolve(branches.filter(branch => branch.startsWith(prefix)));
+
+async function removePlanted(cluster: Cluster): Promise<void> {
+  const selected = { namespace: cluster.namespace, labelSelector: labels.attempt };
+  const [secrets, jobs, pods] = await Promise.all([cluster.core.listNamespacedSecret(selected), cluster.batch.listNamespacedJob(selected), cluster.core.listNamespacedPod(selected)]);
+  const named = (items: readonly { readonly metadata?: { readonly name?: string } }[]): readonly string[] => items.flatMap(item => (item.metadata?.name === undefined ? [] : [item.metadata.name]));
+  await Promise.all([
+    ...named(secrets.items).map(name => cluster.core.deleteNamespacedSecret({ namespace: cluster.namespace, name })),
+    ...named(jobs.items).map(name => cluster.batch.deleteNamespacedJob({ namespace: cluster.namespace, name, propagationPolicy: 'Background' })),
+    ...named(pods.items).map(name => cluster.core.deleteNamespacedPod({ namespace: cluster.namespace, name, gracePeriodSeconds: 0 })),
+  ]);
+}
 
 const describe = (found: readonly Leftover[]): string => (found.length === 0 ? 'nothing left' : found.map(entry => `${entry.place}: ${entry.name} ${entry.detail}`).join('; '));
 
@@ -265,8 +317,7 @@ async function cleanLane(args: readonly string[]): Promise<readonly Check[]> {
             const named = found.length === expected.length && expected.every(entry => found.some(each => each.place === entry.place && each.name === entry.name));
             return named ? pass(`the clean check fails on ${plant.name} and names it`, describe(found)) : fail(`the clean check fails on ${plant.name} and names it`, `expected ${expected.map(entry => `${entry.place}: ${entry.name}`).join('; ')}, found ${describe(found)}`);
           } finally {
-            const { items } = await cluster.core.listNamespacedSecret({ namespace: cluster.namespace, labelSelector: labels.attempt });
-            await Promise.all(items.map(secret => cluster.core.deleteNamespacedSecret({ namespace: cluster.namespace, name: secret.metadata?.name ?? '' })));
+            await removePlanted(cluster);
           }
         });
         checks.push(check);
@@ -330,6 +381,11 @@ async function reportLane(): Promise<readonly Check[]> {
     checks.push(JSON.stringify(seen) === JSON.stringify(expectedRuns) ? pass('input tokens per step come from the last usage event', JSON.stringify(seen)) : fail('input tokens per step come from the last usage event', `expected ${JSON.stringify(expectedRuns)}, read ${JSON.stringify(seen)}`));
     const durations = runs.map(run => (run.finishedAt === null ? -1 : (run.finishedAt.getTime() - run.startedAt.getTime()) / 1000));
     checks.push(JSON.stringify(durations) === '[60,300,120,20]' ? pass('each step keeps its duration', durations.join(', ')) : fail('each step keeps its duration', durations.join(', ')));
+    const modelCheckName = `record: every agent attempt ran on ${agentModel}`;
+    const landOnly: World = { ...cleanWorld, plans: attemptPlans.filter(plan => !agentSteps.has(plan.step)) };
+    const modelCheck = await inWorld(postgres, landOnly, async db => (await recordChecks(db, ticket, 'owner@example.com', 'Clean')).find(check => check.name === modelCheckName));
+    const noAgent = 'the model check fails when no agent attempt ran';
+    checks.push(modelCheck?.passed === false ? pass(noAgent, modelCheck.detail) : fail(noAgent, modelCheck === undefined ? `no check named ${modelCheckName}` : `it passed: ${modelCheck.detail}`));
     const broken: World = { ...cleanWorld, after: db => db.updateTable('attempt_event').set({ body: JSON.stringify({ method: tokenUsageMethod, params: { tokenUsage: { total: {} } } }) }).where('method', '=', tokenUsageMethod).execute() };
     const rejected = await inWorld(postgres, broken, db => stepRuns(db, ticket).then(() => 'accepted', (error: unknown) => (error instanceof PayloadRejected ? error.message : `threw ${String(error)}`)));
     checks.push(rejected.includes('params.tokenUsage.total.inputTokens:') ? pass('a usage event without input tokens is rejected by field name', rejected) : fail('a usage event without input tokens is rejected by field name', rejected));
@@ -378,7 +434,7 @@ export const cleanScenarios: readonly Scenario[] = [
   },
   {
     name: 'e2e-report',
-    summary: "reads each step's duration and input tokens from stored usage events, renders the run report, and posts it to a local fake Jira",
+    summary: "reads each step's duration and input tokens from stored usage events, renders the run report, and posts it to a local fake Jira, and fails the record's model check on a task with no agent attempt",
     run: reportLane,
   },
 ];

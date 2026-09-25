@@ -11,7 +11,7 @@ export const agentModel = 'gpt-6-luna';
 
 const stepOrder = ['specify', 'implement', 'verify', 'land'] as const;
 
-const agentSteps = new Set<string>(['specify', 'implement', 'verify']);
+export const agentSteps: ReadonlySet<string> = new Set<string>(['specify', 'implement', 'verify']);
 
 const check = (name: string, ok: boolean, detail: string): Check => (ok ? pass(name, detail) : fail(name, detail));
 
