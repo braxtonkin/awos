@@ -90,12 +90,39 @@ const optionalVerifyField: Edit = {
 
 const optionalExtra = `${codeChange} verify $.properties.extra is not in required`;
 
+const textBlock = "z.strictObject({ kind: z.enum(['text']), title: z.string().nullable(), body: z.string() })";
+
 const textBlockStartsWithBody: Edit = {
-  from: "z.strictObject({ kind: z.enum(['text']), title: z.string().nullable(), body: z.string() })",
+  from: textBlock,
   to: "z.strictObject({ body: z.string(), kind: z.enum(['text']), title: z.string().nullable() })",
 };
 
 const bodyFirst = `${codeChange} specify $.properties.blocks.items.anyOf[0] starts with body`;
+
+const refToSummary = (ref: string): Edit => ({ from: 'summary: z.string(),', to: `summary: z.string().meta({ $ref: '${ref}' }),` });
+
+const schemaPlants: readonly (readonly [string, string, Edit, string])[] = [
+  [
+    'an object that allows keys it does not declare',
+    'shared/review.ts',
+    { from: textBlock, to: "z.looseObject({ kind: z.enum(['text']), title: z.string().nullable(), body: z.string() })" },
+    `${codeChange} specify $.properties.blocks.items.anyOf[0] does not set additionalProperties to false`,
+  ],
+  ['a oneOf from z.discriminatedUnion', 'shared/review.ts', { from: 'const block = z.union([', to: "const block = z.discriminatedUnion('kind', [" }, `${codeChange} specify $.properties.blocks.items uses oneOf`],
+  [
+    'an allOf from .and',
+    'shared/review.ts',
+    { from: textBlock, to: "z.strictObject({ kind: z.enum(['text']), title: z.string().nullable(), body: z.string().and(z.string().min(1)) })" },
+    `${codeChange} specify $.properties.blocks.items.anyOf[0].properties.body uses allOf`,
+  ],
+  ['a $ref the schema does not define', 'shared/review.ts', refToSummary('#/definitions/missing'), `${codeChange} specify $.properties.summary refers to "#/definitions/missing"`],
+  [
+    'an output whose root is not an object',
+    `features/${codeChange}/workflow.ts`,
+    { from: optionalVerifyField.from, to: "behavior: z.enum(['fixed', 'still_wrong']).nullable() }).nullable()" },
+    `${codeChange} verify $ is not type "object"`,
+  ],
+];
 
 const plantedStep = "name: 'planted', reads: [], runBy: 'agent', prompt: 'Planted.', startsEnvironment: false, afterTurn: 'push', needsRepository: true, canEnd: true, owes: [], output: review, requires: ['text'], failures: { fail: { kind: 'fail' } }";
 
@@ -1032,6 +1059,7 @@ const violations: readonly Violation[] = [
     tool: 'strict-schemas',
     expect: [bodyFirst],
   },
+  ...schemaPlants.map(([what, file, edit, line]): Violation => ({ name: `strict-schemas rejects ${what}`, file, edit, tool: 'strict-schemas', expect: [line] })),
   {
     name: 'npm run check runs the strict-schemas check',
     file: `features/${codeChange}/workflow.ts`,
@@ -1185,6 +1213,12 @@ const plantedModel: Violation = {
 };
 
 const allowances: readonly Allowance[] = [
+  {
+    name: 'strict-schemas accepts a $ref that the schema defines',
+    file: 'shared/review.ts',
+    edit: refToSummary('#/properties/outcome'),
+    tool: 'strict-schemas',
+  },
   {
     name: 'ci-plan runs a new run: step in the verify container with no code change',
     file: ciWorkflow,
