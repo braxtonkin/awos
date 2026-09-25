@@ -12,6 +12,7 @@ services:
     environment:
       TESTCONTAINERS_HOST_OVERRIDE: host.docker.internal
       TESTCONTAINERS_RYUK_DISABLED: "true"
+      GITHUB_BASE_REF: ${GITHUB_BASE_REF:-}
     extra_hosts:
       - host.docker.internal:host-gateway
 

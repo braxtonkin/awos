@@ -10,6 +10,7 @@ import { z } from 'zod';
 import { connect, type Database } from '../../shared/db/client.ts';
 import { shapeOf } from '../../shared/workflow.ts';
 import { fail, pass, type Check, type Scenario } from '../../tools/verify/check.ts';
+import { engineHandlesSigtermFrom, hangCeilingMs } from '../../tools/verify/engine.ts';
 import { withPostgres, type TestPostgres } from '../../tools/verify/postgres.ts';
 import { modelShape, shapeDrift } from '../../tools/verify/model-shape.ts';
 import { defineModel, type Shape } from '../../tools/verify/models.ts';
@@ -669,15 +670,16 @@ const quickEngine = { REAPER_EVERY_MS: '200', LEASE_MS: '1000' } as const;
 const startLine = 'The engine runs';
 
 function startEngine(env: NodeJS.ProcessEnv): { readonly status: number | null; readonly said: string } {
-  const started = spawnSync(process.execPath, [engineMain], { env, encoding: 'utf8', timeout: 30_000 });
-  return { status: started.status, said: `${started.stdout}${started.stderr}`.trim() };
+  const started = spawnSync(process.execPath, [engineMain], { env, encoding: 'utf8', timeout: hangCeilingMs });
+  const hung = started.error === undefined ? '' : ` The verify tool stopped the engine after ${String(hangCeilingMs / 1000)} s: ${started.error.message}`;
+  return { status: started.status, said: `${started.stdout}${started.stderr}`.trim() + hung };
 }
 
 type RunningEngine = {
   readonly said: () => string;
   readonly errors: () => string;
   readonly running: () => boolean;
-  readonly waitFor: (text: string, ms?: number) => Promise<boolean>;
+  readonly waitFor: (text: string) => Promise<boolean>;
   readonly terminate: () => Promise<number | null>;
 };
 
@@ -698,9 +700,10 @@ function runEngine(url: string, settings: Readonly<Record<string, string>>): Run
       resolve(status);
     });
   });
-  const waitFor = async (text: string, ms = 10_000): Promise<boolean> => {
-    const deadline = performance.now() + ms;
+  const waitFor = async (text: string): Promise<boolean> => {
+    const deadline = performance.now() + hangCeilingMs;
     while (!said.includes(text) && code === undefined && performance.now() < deadline) await wait(20);
+    if (!said.includes(text) && code === undefined) errors += `\nThe verify tool stopped waiting for "${text}" after ${String(hangCeilingMs / 1000)} s, and the engine still ran.`;
     return said.includes(text);
   };
   return {
@@ -709,11 +712,12 @@ function runEngine(url: string, settings: Readonly<Record<string, string>>): Run
     running: () => code === undefined,
     waitFor,
     terminate: async () => {
+      await waitFor(engineHandlesSigtermFrom);
       child.kill('SIGTERM');
-      return Promise.race([exited, wait(15_000).then(() => 'hung' as const)]).then(status => {
+      return Promise.race([exited, wait(hangCeilingMs).then(() => 'hung' as const)]).then(status => {
         if (status === 'hung') {
           child.kill('SIGKILL');
-          throw new Error(`the engine did not exit within 15 s of SIGTERM. It said: ${said}`);
+          throw new Error(`the engine did not exit within ${String(hangCeilingMs / 1000)} s of SIGTERM. It said: ${said}`);
         }
         return status;
       });
@@ -895,7 +899,7 @@ async function sigtermChecks(postgres: TestPostgres): Promise<readonly Check[]> 
       await unlocked;
       await sql`commit`.execute(connection);
     });
-    const midPass = resumed && (await until(10_000, blocked));
+    const midPass = resumed && (await until(hangCeilingMs, blocked));
     const stopping = engine.terminate();
     await wait(500);
     const heldOn = engine.running();
@@ -916,7 +920,7 @@ async function sigtermChecks(postgres: TestPostgres): Promise<readonly Check[]> 
     const releasedWhileDown = await lost(backlog);
     const restarted = runEngine(scratch.stableUrl, { REAPER_EVERY_MS: '250', LEASE_MS: '1000' });
     const restartedUp = await restarted.waitFor(startLine);
-    const finished = restartedUp && (await until(15_000, async () => (await lost(backlog)) === backlog.length));
+    const finished = restartedUp && (await until(hangCeilingMs, async () => (await lost(backlog)) === backlog.length));
     const secondStatus = await restarted.terminate();
     const stopName = 'the engine got SIGTERM in the middle of a reaper pass, finished that pass, and exited 0';
     const halfName = 'no attempt was left half-released: every task counts exactly its lost attempts';
@@ -949,8 +953,8 @@ async function restartCheck(postgres: TestPostgres): Promise<Check> {
   const started = await engine.waitFor('reaper: gave ');
   const restartedAt = engine.said().length;
   if (started) await postgres.restart();
-  const noticed = started && (await engine.waitFor('Postgres restarted at ', 20_000));
-  const resumed = noticed && (await until(10_000, () => Promise.resolve(engine.said().slice(engine.said().indexOf('Postgres restarted at ')).includes('reaper: gave '))));
+  const noticed = started && (await engine.waitFor('Postgres restarted at '));
+  const resumed = noticed && (await until(hangCeilingMs, () => Promise.resolve(engine.said().slice(engine.said().indexOf('Postgres restarted at ')).includes('reaper: gave '))));
   const status = await engine.terminate();
   await scratch.drop();
   const said = engine.said().slice(restartedAt).replaceAll('\n', ' ');

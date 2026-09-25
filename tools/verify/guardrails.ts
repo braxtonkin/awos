@@ -3,10 +3,11 @@ import { cp, lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'nod
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { budgetFile, ceilingsOf, diskSource, loadBudget, withCeilings } from '../budget/budget.ts';
 import { fail, pass, type Check, type Scenario } from './check.ts';
 import { plantAnchor, plantedFixture, plantIds, plants } from './screens/plants.ts';
 
-type Tool = 'tsc' | 'node' | 'eslint' | 'depcruise' | 'check' | 'shape' | 'sql-comments' | 'model-names' | 'step-names' | 'strict-schemas' | 'ci-plan' | 'db-types' | 'models' | 'migration-versions' | 'screen-gates';
+type Tool = 'tsc' | 'node' | 'eslint' | 'depcruise' | 'check' | 'shape' | 'sql-comments' | 'model-names' | 'step-names' | 'strict-schemas' | 'ci-plan' | 'db-types' | 'models' | 'migration-versions' | 'screen-gates' | 'budget';
 
 type Edit = { readonly from: string; readonly to: string };
 
@@ -74,6 +75,8 @@ const livenessModel = (section: string): string =>
   `import { defineModel } from '../../tools/verify/models.ts';\n\nconst floors = { Limit: 2 };\n\nexport const scenarios = [\n  defineModel({\n    name: 'planted',\n    module: new URL('Planted.tla', import.meta.url),\n    configs: { pr: { file: 'Planted.cfg', floors }, nightly: { file: 'Planted.cfg', floors } },\n    guards: ['Fair'],\n    properties: { Settles: '${section}' },\n    liveness: ['Settles'],\n    mutants: [{ guard: 'Fair', property: 'Settles' }],\n  }),\n];\n`;
 
 const plantedSpec = '---- MODULE Planted ----\nEXTENDS Naturals\nCONSTANTS Limit, Fair\nVARIABLE x\nTypeOK == x \\in 0..Limit\nInit == x = 0\nNext == x < Limit /\\ x\' = x + 1\nSpec == Init /\\ [][Next]_x /\\ (Fair => WF_x(Next))\nSettles == <>(x = Limit)\n====\n';
+
+const settlingSpec = plantedSpec.replace("Next == x < Limit /\\ x' = x + 1", "Next == (x < Limit /\\ x' = x + 1) \\/ (x = Limit /\\ UNCHANGED x)");
 
 const plantedInvariants = 'features/planted/invariants.ts';
 
@@ -1340,6 +1343,157 @@ const plantedLiveness: Violation = {
   companions: [{ file: 'features/planted/verify.ts', source: livenessModel('PROPERTIES') }, { file: 'features/planted/Planted.tla', source: plantedSpec }],
 };
 
+const raiseFile = (raise: Readonly<Record<string, number>>): string => `${JSON.stringify({ why: 'planted by guardrails', raise }, null, 2)}\n`;
+
+const plantedRaise = 'budget/raises/planted.json';
+
+const plantedStates: Violation = {
+  name: 'npm run verify -- models fails a model that explores more distinct states than its ceiling',
+  file: plantedRaise,
+  source: raiseFile({ 'states/Planted': 1 }),
+  tool: 'models',
+  expect: ['Planted explores 3 distinct states, over its ceiling of 1'],
+  companions: [
+    { file: 'features/planted/verify.ts', source: livenessModel('PROPERTIES') },
+    { file: 'features/planted/Planted.tla', source: settlingSpec },
+    { file: 'features/planted/Planted.cfg', source: 'SPECIFICATION Spec\n\nCONSTANTS\n    Limit = 2\n    Fair = TRUE\n\nINVARIANTS\n    TypeOK\n\nPROPERTIES\n    Settles\n' },
+  ],
+};
+
+const grownProduct = 'features/tasks/grown.ts';
+
+const grownSource = 'export const grown = 1;\n';
+
+const overProductLines = `${budgetFile} lines/product is`;
+
+const budgetViolations: readonly Violation[] = [
+  {
+    name: 'the budget check rejects a product file past the product ceiling',
+    file: grownProduct,
+    source: grownSource,
+    tool: 'budget',
+    expect: [overProductLines],
+  },
+  {
+    name: 'the budget check rejects product code that makes room by deleting verification code',
+    file: grownProduct,
+    source: grownSource,
+    tool: 'budget',
+    expect: [overProductLines],
+    companions: [{ file: 'features/credentials/seal.test.ts', edit: { from: 'const samples = 10_000;\nconst longestSecret = 2048;\n', to: 'const samples = 10_000;\n' } }],
+  },
+  {
+    name: 'the budget check rejects a line past its role longest-line ceiling, even when a raise covers the lines',
+    file: 'features/tasks/wide.ts',
+    source: `export const wide = '${'w'.repeat(400)}';\n`,
+    tool: 'budget',
+    expect: ['features/tasks/wide.ts:1 is 423 characters wide, over the longest-line/product ceiling'],
+    companions: [{ file: plantedRaise, source: raiseFile({ 'lines/product': 1, 'characters/product': 1000 }) }],
+  },
+  {
+    name: 'the budget check rejects a raise of a longest-line ceiling',
+    file: plantedRaise,
+    source: raiseFile({ 'longest-line/product': 100 }),
+    tool: 'budget',
+    expect: [`${plantedRaise} names longest-line/product. A longest-line ceiling only goes down`],
+  },
+  {
+    name: 'npm run check runs the budget check',
+    file: grownProduct,
+    source: grownSource,
+    tool: 'check',
+    expect: [overProductLines],
+    rejects: budgetFile,
+  },
+];
+
+const budgetAllowances: readonly Allowance[] = [
+  {
+    name: 'the budget check accepts a product file that a raise file covers',
+    file: grownProduct,
+    source: grownSource,
+    tool: 'budget',
+    companions: [{ file: plantedRaise, source: raiseFile({ 'lines/product': 1, 'characters/product': 20 }) }],
+  },
+];
+
+const committer: Readonly<Record<string, string>> = {
+  GIT_AUTHOR_NAME: 'guardrails',
+  GIT_AUTHOR_EMAIL: 'guardrails@example.invalid',
+  GIT_COMMITTER_NAME: 'guardrails',
+  GIT_COMMITTER_EMAIL: 'guardrails@example.invalid',
+};
+
+function gitIn(copy: string, args: readonly string[]): string {
+  const result = spawnSync('git', args, { cwd: copy, encoding: 'utf8', env: { ...process.env, ...committer } });
+  if (result.status !== 0) throw new Error(`git ${args.join(' ')} failed in the copy: ${result.stderr.trim()}`);
+  return result.stdout;
+}
+
+type Commit = { readonly name: string; readonly write: (copy: string) => Promise<void>; readonly expect: string | undefined };
+
+const lowerFeatures = async (copy: string): Promise<void> => {
+  const path = join(copy, budgetFile);
+  const text = await readFile(path, 'utf8');
+  const lowered = text.replace(/("features": \{\s*"why": "[^"]*",\s*"ceiling": )(\d+)/, (_all, head: string, ceiling: string) => `${head}${String(Number(ceiling) - 1)}`);
+  if (lowered === text) throw new Error(`${budgetFile} has no structure.features ceiling for the case to lower. Update the case to match the file.`);
+  await writeFile(path, lowered);
+};
+
+const writePlant = (file: string, source: string) => async (copy: string): Promise<void> => {
+  await mkdir(dirname(join(copy, file)), { recursive: true });
+  await writeFile(join(copy, file), source);
+};
+
+const commits: readonly Commit[] = [
+  {
+    name: 'the range check rejects a commit that raises a ceiling and changes code',
+    write: async copy => {
+      await writePlant(plantedRaise, raiseFile({ 'lines/product': 1, 'characters/product': 20 }))(copy);
+      await writePlant(grownProduct, grownSource)(copy);
+    },
+    expect: `raises characters/product from`,
+  },
+  { name: 'the range check accepts a commit that only raises a ceiling', write: writePlant(plantedRaise, raiseFile({ 'lines/product': 1 })), expect: undefined },
+  {
+    name: 'the range check accepts a commit that lowers a ceiling beside a code change',
+    write: async copy => {
+      await lowerFeatures(copy);
+      await writePlant(grownProduct, grownSource)(copy);
+    },
+    expect: undefined,
+  },
+];
+
+async function commitChecks(copy: string): Promise<readonly Check[]> {
+  gitIn(copy, ['init', '--quiet']);
+  await writeFile(join(copy, '.git', 'info', 'exclude'), 'node_modules\n');
+  gitIn(copy, ['add', '--all']);
+  gitIn(copy, ['commit', '--quiet', '--message', 'base']);
+  const checks: Check[] = [];
+  for (const commit of commits) {
+    await commit.write(copy);
+    gitIn(copy, ['add', '--all']);
+    gitIn(copy, ['commit', '--quiet', '--message', commit.name]);
+    const outcome = spawnSync('npm', ['run', '--silent', 'budget', '--', '--since', 'HEAD~1'], { cwd: copy, encoding: 'utf8' });
+    const output = `${outcome.stdout}${outcome.stderr}`;
+    const rejected = outcome.status !== 0;
+    const judged = commit.expect === undefined ? !rejected : rejected && output.includes(commit.expect) && output.includes(`also changes ${grownProduct}`);
+    checks.push(judged ? pass(commit.name, output.trim().split('\n')[0] ?? '') : fail(commit.name, `exit ${String(outcome.status)}: ${output.trim().split('\n').slice(0, 2).join(' | ')}`));
+    gitIn(copy, ['reset', '--hard', '--quiet', 'HEAD~1']);
+  }
+  return checks;
+}
+
+async function withRoom(copy: string): Promise<void> {
+  const loaded = loadBudget(diskSource(copy));
+  if ('unreadable' in loaded) throw new Error(loaded.unreadable);
+  const room = new Map([...ceilingsOf(loaded.budget)].map(([key]): [string, number] => [key, roomyCeiling]));
+  await writeFile(join(copy, budgetFile), `${JSON.stringify(withCeilings(loaded.budget, room), null, 2)}\n`);
+}
+
+const roomyCeiling = 1_000_000_000;
+
 const allowances: readonly Allowance[] = [
   {
     name: 'strict-schemas accepts a $ref that the schema defines',
@@ -1628,6 +1782,10 @@ const tools: Record<
     command: () => ['npm', 'run', '--silent', 'verify', '--', 'screen-gates', '--repeat', '1'],
     caught: startsALine,
   },
+  budget: {
+    command: () => ['npm', 'run', '--silent', 'budget'],
+    caught: (outcome, _file, code) => outcome.output.includes(code),
+  },
   models: {
     command: () => ['npm', 'run', '--silent', 'verify', '--', 'models'],
     caught: (outcome, _file, code) => outcome.output.includes(code),
@@ -1703,6 +1861,7 @@ export const guardrails: Scenario = {
   summary: 'plants each violation a check must reject and each line it must accept, and proves both',
   run: async () => [
     ...(await withCopy(async copy => {
+      await withRoom(copy);
       const checks: Check[] = (['tsc', 'eslint', 'depcruise', 'shape', 'sql-comments', 'migration-versions', 'model-names', 'step-names', 'strict-schemas', 'ci-plan', 'db-types', 'screen-gates'] as const).map(tool => {
         const clean = run(tool, copy, '.');
         const name = `the unplanted copy passes ${tool}`;
@@ -1713,6 +1872,13 @@ export const guardrails: Scenario = {
       for (const allowance of allowances) checks.push(await accept(copy, allowance));
       return checks;
     })),
-    ...(await withCopy(async copy => [await reject(copy, plantedModel), await reject(copy, plantedLiveness)], ['features'])),
+    ...(await withCopy(async copy => {
+      const clean = run('budget', copy, '.');
+      const checks: Check[] = [clean.status === 0 ? pass('the unplanted copy passes budget', '') : fail('the unplanted copy passes budget', firstLines(clean))];
+      for (const violation of budgetViolations) checks.push(await reject(copy, violation));
+      for (const allowance of budgetAllowances) checks.push(await accept(copy, allowance));
+      return [...checks, ...(await commitChecks(copy))];
+    })),
+    ...(await withCopy(async copy => [await reject(copy, plantedModel), await reject(copy, plantedLiveness), await reject(copy, plantedStates)], ['features'])),
   ],
 };

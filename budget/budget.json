@@ -1,0 +1,156 @@
+{
+  "exclude": [
+    ".claude/**",
+    "budget/**",
+    "ci-local/**",
+    "traces/**",
+    "**/package-lock.json",
+    "shared/db/types.ts"
+  ],
+  "roles": [
+    {
+      "name": "e2e-harness",
+      "why": "The end-to-end harness takes a sandbox ticket to a merged pull request. It proves one path through every feature, so it grows with each connector, and each growth should name what it proves that the feature simulations do not.",
+      "files": [
+        "features/e2e/**"
+      ],
+      "lines": 5128,
+      "characters": 257731,
+      "longest-line": 471
+    },
+    {
+      "name": "tla-models",
+      "why": "TLA+ models and their configs come before the concurrent code they cover (C5). A reader holds a whole model in their head to trust it, so its length is reader load, and its state count, budgeted apart, is CI time.",
+      "files": [
+        "**/*.tla",
+        "**/*.cfg"
+      ],
+      "lines": 2155,
+      "characters": 68279,
+      "longest-line": 251
+    },
+    {
+      "name": "feature-verification",
+      "why": "Each feature's simulations, invariants, catalogs, fakes, live lanes, and tests prove the product (C6). They have their own ceiling so that none of them can be deleted to make room for product code: on 24 Sep two units deleted six schema constraints to pass a catalog check.",
+      "files": [
+        "{features,services,shared}/**/{verify,simulate,invariants,catalog,failed-seeds,mutants,live,lanes,plants,world}.ts",
+        "{features,services,shared}/**/{sim,fake}-*.ts",
+        "{features,services,shared}/**/*-model.ts",
+        "{features,services,shared}/**/*.test.ts"
+      ],
+      "lines": 16423,
+      "characters": 786847,
+      "longest-line": 504
+    },
+    {
+      "name": "migrations",
+      "why": "The schema holds the invariants (C6), so a migration is often the right place for growth. Every migration also runs in every simulation and in the migrations scenario, and tables and named constraints have structural ceilings of their own.",
+      "files": [
+        "db/migrations/**"
+      ],
+      "lines": 1093,
+      "characters": 48294,
+      "longest-line": 220
+    },
+    {
+      "name": "tools",
+      "why": "Checks and the verify harness run on every change. Their size is CI time and the context an agent reads before it can extend them (C2).",
+      "files": [
+        "tools/**",
+        "eslint.config.ts"
+      ],
+      "lines": 4900,
+      "characters": 213705,
+      "longest-line": 547
+    },
+    {
+      "name": "docs",
+      "why": "Agents read AGENTS.md on every task and the spec and decisions on most, so every docs line is paid for on every run. Growth should replace text, not add beside it.",
+      "files": [
+        "docs/**",
+        "*.md"
+      ],
+      "lines": 554,
+      "characters": 153281,
+      "longest-line": 4553
+    },
+    {
+      "name": "product",
+      "why": "Product code is what AutoWorker deploys and what a fork maintains. It grows only by a reviewed decision, because agents copy what they see (A1) and every line is read by the next agent that changes it.",
+      "files": [
+        "features/**",
+        "services/**",
+        "shared/**"
+      ],
+      "lines": 7384,
+      "characters": 343077,
+      "longest-line": 374
+    }
+  ],
+  "structure": {
+    "features": {
+      "why": "Each feature folder is a unit a fork must understand and keep (A4). A new one is an architecture decision.",
+      "ceiling": 11
+    },
+    "services": {
+      "why": "Each service deploys on its own and holds no logic. A new one is a new process to run, watch, and secure.",
+      "ceiling": 2
+    },
+    "migrations": {
+      "why": "Every migration runs forward and back in the migrations scenario and in every simulation's database.",
+      "ceiling": 29
+    },
+    "tables": {
+      "why": "Each table is state that every later migration, query, and simulator predicate must keep consistent.",
+      "ceiling": 18
+    },
+    "named-constraints-indexes-triggers": {
+      "why": "Named guards are the invariants the store enforces. Each should come with a mutant or a reason it has none, so growth is catalog work too.",
+      "ceiling": 186
+    },
+    "tla-models": {
+      "why": "Each model runs in the models job with every mutant on every change.",
+      "ceiling": 6
+    },
+    "runtime-dependencies": {
+      "why": "A runtime dependency ships to every deployment and is code nobody here reviews. Stack lists the approved ones.",
+      "ceiling": 6
+    },
+    "dev-dependencies": {
+      "why": "A dev dependency runs in CI and on every contributor's machine, and Stack allows one tool per job (A3).",
+      "ceiling": 13
+    },
+    "verify-scenarios": {
+      "why": "Scenarios are the verification tool's surface (C2). Each one is a command an agent must know about and CI time to run.",
+      "ceiling": 55
+    },
+    "ci-jobs": {
+      "why": "Each CI job is a parallel lane of machine time and a result to read on every change.",
+      "ceiling": 4
+    },
+    "ci-steps": {
+      "why": "Each CI step is a command that runs on every change and can fail it.",
+      "ceiling": 34
+    }
+  },
+  "states": {
+    "why": "A model's distinct state count under its pull request config sets how long TLC takes, and unlike wall time it does not depend on machine load. The models run checks it.",
+    "ceilings": {
+      "Bridge": 419300,
+      "Checks": 5886184,
+      "Land": 1679702,
+      "Outbox": 1126209,
+      "Schedule": 376613,
+      "Tasks": 5424892
+    }
+  },
+  "seconds": {
+    "why": "Wall time per CI job, about twice the time recent local runs measured. These are tripwires for a runaway, not a ratchet, because local times vary with machine load, so the lowering command never lowers them.",
+    "ceilings": {
+      "check": 7000,
+      "models": 9300,
+      "sims": 5300,
+      "simulation": 4000
+    }
+  }
+}

@@ -8,6 +8,7 @@ import { Kysely, PostgresDialect, sql } from 'kysely';
 import pg from 'pg';
 import { z } from 'zod';
 import { docker } from './docker.ts';
+import { ownerLabel } from './owner-label.ts';
 
 export type Pause = () => Promise<() => Promise<void>>;
 
@@ -25,7 +26,6 @@ export type TestPostgres = { readonly readyInMs: number; readonly scratch: () =>
 
 const template = 'migrated';
 const image = 'postgres:18-alpine@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873';
-const ownerLabel = 'autoworker.verify.owner';
 const settings = ['fsync=off', 'synchronous_commit=off', 'full_page_writes=off', 'max_connections=250'];
 export const migrationsFolder = fileURLToPath(new URL('../../db/migrations', import.meta.url));
 const outsideVerifyContainer = 'Postgres for verification starts beside the verify container. Run the command inside it: docker compose run --rm verify <command>';
