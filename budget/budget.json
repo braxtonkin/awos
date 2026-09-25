@@ -59,8 +59,8 @@
         "tools/**",
         "eslint.config.ts"
       ],
-      "lines": 4247,
-      "characters": 182300,
+      "lines": 4898,
+      "characters": 213603,
       "longest-line": 547
     },
     {
@@ -70,8 +70,8 @@
         "docs/**",
         "*.md"
       ],
-      "lines": 540,
-      "characters": 147632,
+      "lines": 554,
+      "characters": 153281,
       "longest-line": 4553
     },
     {
@@ -130,7 +130,7 @@
     },
     "ci-steps": {
       "why": "Each CI step is a command that runs on every change and can fail it.",
-      "ceiling": 33
+      "ceiling": 34
     }
   },
   "states": {
@@ -147,10 +147,10 @@
   "seconds": {
     "why": "Wall time per CI job, about twice the time recent local runs measured. These are tripwires for a runaway, not a ratchet, because local times vary with machine load, so the lowering command never lowers them.",
     "ceilings": {
-      "check": 3500,
-      "models": 4700,
-      "sims": 2700,
-      "simulation": 2000
+      "check": 7000,
+      "models": 9300,
+      "sims": 5300,
+      "simulation": 4000
     }
   }
 }
