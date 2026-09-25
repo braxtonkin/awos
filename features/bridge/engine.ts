@@ -294,15 +294,17 @@ function frameOf(command: Stored, thread: string, turn: string | undefined): Com
 }
 
 export async function pollCommands(db: Database, attempt: AttemptId, after: number): Promise<Polled> {
-  const row = await db.selectFrom('attempt').select('finished_at').where('id', '=', attempt).executeTakeFirst();
-  const commands = await db
+  const numbered = await db
     .selectFrom('attempt_command')
     .select(['seq', 'kind', 'input', 'output_schema', 'client_message_id'])
     .where('attempt_id', '=', attempt)
     .where('seq', '>', String(after))
     .orderBy('seq')
     .execute();
+  const row = await db.selectFrom('attempt').select('finished_at').where('id', '=', attempt).executeTakeFirst();
   const ended = row === undefined || row.finished_at !== null;
+  const firstNotStop = numbered.findIndex(command => command.kind !== 'turn.stop');
+  const commands = ended && firstNotStop !== -1 ? numbered.slice(0, firstNotStop) : numbered;
   if (commands.length === 0) return { frames: [], ended };
   const starts = await db.selectFrom('attempt_command').select('seq').where('attempt_id', '=', attempt).where('kind', '=', 'turn.start').orderBy('seq').execute();
   const answered = await answeredIds(db, attempt, [bridgeRequestIds.threadStart, ...starts.map(start => commandRequestId(Number(start.seq)))]);

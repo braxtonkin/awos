@@ -6,9 +6,9 @@ import { z } from 'zod';
 import { connect } from '../../shared/db/client.ts';
 import { fail, pass, type Check, type Scenario } from '../../tools/verify/check.ts';
 import { withPostgres, type TestPostgres } from '../../tools/verify/postgres.ts';
-import { issueToken, nulStandIn, pollCommands, receive, rules, sendCommand, type BridgeEngine } from './engine.ts';
+import { issueToken, nulStandIn, numberCommand, pollCommands, receive, rules, sendCommand, type BridgeEngine } from './engine.ts';
 import { provePlants, world, worldStartsAt } from './invariants.ts';
-import { attemptId, bridgeRequestIds, protocolVersion, type Caller, type EventsPost } from './protocol.ts';
+import { attemptId, bridgeRequestIds, commandRequestId, protocolVersion, type Caller, type EventsPost } from './protocol.ts';
 import { droppedBy, mutantName, mutants, noMutantYet, simulate, type MutantName, type Plan, type Run } from './simulate.ts';
 
 const flags = { seeds: { type: 'string' }, seed: { type: 'string' }, steps: { type: 'string' }, mutant: { type: 'string' }, trace: { type: 'string' } } as const;
@@ -170,7 +170,41 @@ async function refusalChecks(postgres: TestPostgres): Promise<readonly Check[]> 
   }
 }
 
-const nulName = 'a line whose text carries NUL is stored with U+FFFD in its place, in app lines, lines that are not JSON, and reproduced lines';
+const afterEndName = 'once an attempt has ended, its command stream carries only the turn.stop frames that directly follow what the bridge applied';
+
+async function afterEndCheck(postgres: TestPostgres): Promise<Check> {
+  const scratch = await postgres.scratch();
+  const db = connect(scratch.url, 2);
+  try {
+    for (const statement of world) await statement.execute(db);
+    const attempt = attemptId.parse('1');
+    const token = await issueToken(db, attempt);
+    if (token === undefined) throw new Error('the world attempt took no token');
+    const caller: Caller = { attempt, token, protocol: protocolVersion, pid: 7001, image: 'autoworker-job:current' };
+    const now = new Date(worldStartsAt);
+    await sendCommand(db, attempt, { kind: 'turn.start', prompt: 'Do the work.', outputSchema: null }, now);
+    const answers = [JSON.stringify({ id: bridgeRequestIds.threadStart, result: { thread: { id: 'thread-1' } } }), JSON.stringify({ id: commandRequestId(1), result: { turn: { id: 'turn-1' } } })];
+    await receive(db, engine, caller, { received: 1, lines: answers.map((text, index) => ({ kind: 'app', seq: index + 1, text })) });
+    await sendCommand(db, attempt, { kind: 'turn.steer', message: 'Also check the edge case.' }, now);
+    await db.transaction().execute(async writer => {
+      await numberCommand(writer, attempt, { kind: 'turn.stop' }, now);
+      await writer.updateTable('attempt').set({ finished_at: now, verdict: 'stopped' }).where('id', '=', attempt).execute();
+    });
+    const seqs = async (after: number): Promise<string> => {
+      const polled = await pollCommands(db, attempt, after);
+      return `${polled.frames.map(frame => `${String(frame.seq)} ${frame.request.method}`).join(', ') || 'nothing'}${polled.ended ? ', then the end' : ''}`;
+    };
+    const afterStart = await seqs(1);
+    const afterSteer = await seqs(2);
+    const said = `after the start the stream sends ${afterStart}; after the steer it sends ${afterSteer}`;
+    return afterStart === 'nothing, then the end' && afterSteer === '3 turn/interrupt, then the end' ? pass(afterEndName, said) : fail(afterEndName, said);
+  } finally {
+    await db.destroy();
+    await scratch.drop();
+  }
+}
+
+const nulName ='a line whose text carries NUL is stored with U+FFFD in its place, in app lines, lines that are not JSON, and reproduced lines';
 
 async function nulCheck(postgres: TestPostgres): Promise<Check> {
   const scratch = await postgres.scratch();
@@ -240,12 +274,12 @@ async function schemaOrderCheck(postgres: TestPostgres): Promise<Check> {
 
 async function simulationChecks(postgres: TestPostgres, options: Options): Promise<readonly Check[]> {
   if (options.mutant === 'all') {
-    const checks: Check[] = [await plantChecks(postgres), await catalogCheck(postgres), ...(await refusalChecks(postgres)), await schemaOrderCheck(postgres), await nulCheck(postgres)];
+    const checks: Check[] = [await plantChecks(postgres), await catalogCheck(postgres), ...(await refusalChecks(postgres)), await schemaOrderCheck(postgres), await nulCheck(postgres), await afterEndCheck(postgres)];
     for (const mutant of mutantName.options) checks.push(await mutantCheck(postgres, mutant, options));
     return checks;
   }
   if (options.mutant !== undefined) return [await mutantCheck(postgres, options.mutant, options)];
-  return [...(await cleanSeeds(postgres, options)), await plantChecks(postgres), ...(await refusalChecks(postgres)), await schemaOrderCheck(postgres), await nulCheck(postgres)];
+  return [...(await cleanSeeds(postgres, options)), await plantChecks(postgres), ...(await refusalChecks(postgres)), await schemaOrderCheck(postgres), await nulCheck(postgres), await afterEndCheck(postgres)];
 }
 
 function parseOptions(args: readonly string[]): Options {
