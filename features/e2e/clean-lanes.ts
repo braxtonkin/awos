@@ -203,6 +203,21 @@ const plants: readonly Plant[] = [
   },
 ];
 
+type Allowance = { readonly name: string; readonly world: World };
+
+const allowances: readonly Allowance[] = [
+  {
+    name: 'a reasoning item Codex left open in a turn that completed',
+    world: {
+      ...cleanWorld,
+      lines: plan =>
+        plan.step === 'verify'
+          ? transcript(plan).flatMap(line => (line.method === 'item/started' && line.itemId === 'a-1' ? [app('item/started', { turnId: `turn-${plan.step}`, item: { id: 'rs-1', type: 'reasoning', summary: [], content: [] } }, 'rs-1'), line] : [line]))
+          : transcript(plan),
+    },
+  },
+];
+
 const listed =
   (branches: readonly string[]) =>
   (prefix: string): Promise<readonly string[]> =>
@@ -252,6 +267,11 @@ async function cleanLane(args: readonly string[]): Promise<readonly Check[]> {
           }
         });
         checks.push(check);
+      }
+      for (const allowance of allowances) {
+        const found = await inWorld(postgres, allowance.world, db => leftovers(sourcesFor(db, allowance.world), ticket));
+        const name = `the clean check accepts ${allowance.name}`;
+        checks.push(found.length === 0 ? pass(name, describe(found)) : fail(name, describe(found)));
       }
       return checks;
     });
