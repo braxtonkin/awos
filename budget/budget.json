@@ -17,8 +17,8 @@
       "files": [
         "**/fixtures/**"
       ],
-      "lines": 0,
-      "characters": 0
+      "lines": 434,
+      "characters": 71256
     },
     {
       "name": "e2e-harness",
@@ -26,8 +26,8 @@
       "files": [
         "features/e2e/**"
       ],
-      "lines": 5128,
-      "characters": 257731,
+      "lines": 5828,
+      "characters": 293653,
       "longest-line": 471
     },
     {
@@ -37,8 +37,8 @@
         "**/*.tla",
         "**/*.cfg"
       ],
-      "lines": 2155,
-      "characters": 68279,
+      "lines": 2321,
+      "characters": 73344,
       "longest-line": 251
     },
     {
@@ -50,8 +50,8 @@
         "{features,services,shared}/**/*-model.ts",
         "{features,services,shared}/**/*.test.ts"
       ],
-      "lines": 16423,
-      "characters": 786847,
+      "lines": 17822,
+      "characters": 851441,
       "longest-line": 504
     },
     {
@@ -60,8 +60,8 @@
       "files": [
         "db/migrations/**"
       ],
-      "lines": 1093,
-      "characters": 48294,
+      "lines": 1247,
+      "characters": 54752,
       "longest-line": 220
     },
     {
@@ -71,8 +71,8 @@
         "tools/**",
         "eslint.config.ts"
       ],
-      "lines": 4977,
-      "characters": 216349,
+      "lines": 6493,
+      "characters": 292294,
       "longest-line": 547
     },
     {
@@ -82,8 +82,8 @@
         "docs/**",
         "*.md"
       ],
-      "lines": 554,
-      "characters": 153732
+      "lines": 685,
+      "characters": 173297
     },
     {
       "name": "product",
@@ -93,15 +93,15 @@
         "services/**",
         "shared/**"
       ],
-      "lines": 7384,
-      "characters": 343077,
+      "lines": 7876,
+      "characters": 367047,
       "longest-line": 374
     }
   ],
   "structure": {
     "features": {
       "why": "Each feature folder is a unit a fork must understand and keep (A4). A new one is an architecture decision.",
-      "ceiling": 11
+      "ceiling": 12
     },
     "services": {
       "why": "Each service deploys on its own and holds no logic. A new one is a new process to run, watch, and secure.",
@@ -109,19 +109,19 @@
     },
     "migrations": {
       "why": "Every migration runs forward and back in the migrations scenario and in every simulation's database.",
-      "ceiling": 29
+      "ceiling": 33
     },
     "tables": {
       "why": "Each table is state that every later migration, query, and simulator predicate must keep consistent.",
-      "ceiling": 18
+      "ceiling": 21
     },
     "named-constraints-indexes-triggers": {
       "why": "Named guards are the invariants the store enforces. Each should come with a mutant or a reason it has none, so growth is catalog work too.",
-      "ceiling": 186
+      "ceiling": 207
     },
     "tla-models": {
       "why": "Each model runs in the models job with every mutant on every change.",
-      "ceiling": 6
+      "ceiling": 7
     },
     "runtime-dependencies": {
       "why": "A runtime dependency ships to every deployment and is code nobody here reviews. Stack lists the approved ones.",
@@ -129,11 +129,11 @@
     },
     "dev-dependencies": {
       "why": "A dev dependency runs in CI and on every contributor's machine, and Stack allows one tool per job (A3).",
-      "ceiling": 13
+      "ceiling": 14
     },
     "verify-scenarios": {
       "why": "Scenarios are the verification tool's surface (C2). Each one is a command an agent must know about and CI time to run.",
-      "ceiling": 55
+      "ceiling": 63
     },
     "ci-jobs": {
       "why": "Each CI job is a parallel lane of machine time and a result to read on every change.",
@@ -141,7 +141,7 @@
     },
     "ci-steps": {
       "why": "Each CI step is a command that runs on every change and can fail it.",
-      "ceiling": 34
+      "ceiling": 35
     }
   },
   "states": {
@@ -151,6 +151,7 @@
       "Checks": 5886184,
       "Land": 1679702,
       "Outbox": 1126209,
+      "Requests": 158167,
       "Schedule": 376613,
       "Tasks": 5424892
     }

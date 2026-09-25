@@ -1,6 +1,0 @@
-{
-  "why": "U0's Requests.tla, the person-request loop model, explores 158167 distinct states at its per-PR config. It had no ceiling because the budget was seeded on the e2e line before the model existed.",
-  "raise": {
-    "states/Requests": 158167
-  }
-}
