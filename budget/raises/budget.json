@@ -1,7 +1,7 @@
 {
   "why": "The budget unit adds the budget check, its lowering, raise, and range commands, the state-count and time checks, their guardrail cases, and the docs for rule B6. It also adds the range check as a CI step.",
   "raise": {
-    "characters/docs": 5443,
+    "characters/docs": 5597,
     "characters/tools": 31303,
     "lines/docs": 14,
     "lines/tools": 651,
