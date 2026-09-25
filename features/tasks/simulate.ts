@@ -51,7 +51,7 @@ export const mutants: Readonly<Record<MutantName, readonly [PropertyName, ...Pro
   target_fits_kind: ['ActionTargetFitsItsKind'],
 };
 
-export const engineMutantName = z.enum(['no-reaper', 'early-reap', 'no-grace', 'no-fence']);
+export const engineMutantName = z.enum(['no-reaper', 'early-reap', 'no-grace', 'no-fence', 'lapsed-renew']);
 
 export type EngineMutantName = z.infer<typeof engineMutantName>;
 
@@ -67,14 +67,19 @@ export const stepMutants: Readonly<Record<StepMutantName, StepMutant>> = {
 
 export const stepMutantProfile: ProfileName = 'jobs';
 
-type EngineMutant = { readonly profile: ProfileName; readonly breaks: readonly [PropertyName, ...PropertyName[]]; readonly loop: (loop: Loop) => Loop | undefined };
+type Renew = typeof renew;
+
+type EngineMutant = { readonly profile: ProfileName; readonly breaks: readonly [PropertyName, ...PropertyName[]]; readonly loop: (loop: Loop) => Loop | undefined; readonly renew?: Renew };
 
 export const engineMutants: Readonly<Record<EngineMutantName, EngineMutant>> = {
   'no-reaper': { profile: 'crashes', breaks: ['EveryTaskSettles'], loop: () => undefined },
   'early-reap': { profile: 'crashes', breaks: ['ReleasedOnlyAfterItsLease'], loop: loop => ({ ...loop, pass: (db, pass) => loop.pass(db, { ...pass, now: new Date(pass.now.getTime() + loop.everyMs) }) }) },
   'no-grace': { profile: 'db-pause', breaks: ['ReleasedWithinOneInterval'], loop: ({ name, everyMs, pass }) => ({ name, everyMs, pass }) },
   'no-fence': { profile: 'db-pause', breaks: ['ReleasedWithinOneInterval'], loop: loop => ({ ...loop, pass: (db, { now, stop }) => loop.pass(db, { now, late: () => false, stop }) }) },
+  'lapsed-renew': { profile: 'crashes', breaks: ['LapsedLeaseNeverRenews'], loop: loop => loop, renew: (db, attempt, now, leaseMs) => renew(db, attempt, new Date(now.getTime() - leaseMs), 2 * leaseMs) },
 };
+
+const renewFor = (plan: Plan): Renew => (plan.engine === undefined ? renew : (engineMutants[plan.engine].renew ?? renew));
 
 const failedToVerify = 'Verify found the behavior still wrong in 3 rounds. Read its evidence on this page, fix the ticket or the plan, then press Retry to run Verify again.';
 
@@ -813,10 +818,10 @@ const rules: Readonly<Record<Move, Rule>> = {
   },
   renew: {
     allowed: world => held(world, ['busy']).length > 0,
-    perform: async ({ db, world, profile, random, now }) => {
+    perform: async ({ db, world, profile, plan, random, now }) => {
       const worker = pick(random, held(world, ['busy']));
       if (worker === undefined) return 'no busy worker';
-      const outcome = await renew(db, worker.attempt, now, profile.leaseMs);
+      const outcome = await renewFor(plan)(db, worker.attempt, now, profile.leaseMs);
       count(world, `renew ${outcome}`);
       if (outcome === 'lost') world.workers[worker.index] = idle;
       return `attempt ${worker.attempt}: ${outcome}`;
