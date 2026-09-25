@@ -515,12 +515,12 @@ Rejected options:
 
 Decided 25 Sep 2026. GitHub marked the owner's account as spam, and a request to reinstate it is pending. The owner disabled GitHub Actions for the repository on 25 Sep 2026, so no pull request or push gets a CI run on GitHub.
 
-Until Actions is enabled again, `node tools/ci-local/main.ts` runs CI on the machine that integrates. It reads every `run:` step of `.github/workflows/ci.yml`, so the local run and the GitHub run can't drift: a new CI step goes in `ci.yml` alone. It builds the verify image and installs packages once, then runs every other step in job order inside the verify container, and it runs every step even after one fails. It refuses a worktree with uncommitted changes and names the head SHA first, then writes one log per step and a summary to `ci-local/<sha>/`. A head is integrated only when that summary says `PASS`. `npm run ci-plan`, part of `npm run check`, fails on any step that the local run can't perform, such as a `uses:` action other than checkout, so `ci.yml` can't gain a step that CI on GitHub runs and the local run skips.
+Until Actions is enabled again, `node tools/ci-local/main.ts` runs CI on the machine that integrates. It reads every `run:` step of `.github/workflows/ci.yml`, so the local run and the GitHub run can't drift: a new CI step goes in `ci.yml` alone. It builds the verify image and installs packages once. Then it runs the jobs in parallel, as GitHub does, and each job's steps in order inside the verify container, and it runs every step even after one fails. It prints results in `ci.yml` order and gives the run's wall time. The jobs ran one after another until 25 Sep, when a run took about 3,000 s and each new job would have added its full length. It refuses a worktree with uncommitted changes and names the head SHA first, then writes one log per step and a summary to `ci-local/<sha>/`. A head is integrated only when that summary says `PASS`. `npm run ci-plan`, part of `npm run check`, fails on any step that the local run can't perform, such as a `uses:` action other than checkout, so `ci.yml` can't gain a step that CI on GitHub runs and the local run skips.
 
 What the local run doesn't give:
 
 - **A clean machine per run.** Every step shares this machine's Docker, its image cache, and the `node_modules` volume of the worktree's compose project. A step can pass here and fail on a fresh runner.
-- **Parallel jobs and time limits.** The jobs run one after another, and `timeout-minutes` is not enforced.
+- **Separate machines per job and time limits.** The jobs run at the same time on one machine, so a slow job slows the others, and `timeout-minutes` is not enforced.
 - **A record anyone else can see.** The summary stays on this machine, and GitHub shows no check on the pull request.
 - **The nightly workflow.** It has no local runner, so its larger model bounds and long simulator runs don't run until Actions returns.
 
