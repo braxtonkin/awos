@@ -55,7 +55,7 @@ export type WaitingOn = "answer" | "approval" | "outside_approval" | "retry";
 
 export interface Attempt {
   branch: string | null;
-  bridge_pid: number | null;
+  bridge_process: string | null;
   bridge_token_hash: Buffer | null;
   commands_received: Generated<Int8>;
   epoch: number;

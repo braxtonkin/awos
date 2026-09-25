@@ -1,6 +1,6 @@
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { chmod, copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { createServer, type Server } from 'node:http';
+import { createServer, request, type Server } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
@@ -495,14 +495,14 @@ async function finishingLane(world: World): Promise<readonly Check[]> {
   return [ended, delivery === 'sent' ? pass(name, `command ${String(steer)} is ${delivery}`) : fail(name, `command ${String(steer)} is ${String(delivery)}; log: ${run.log.join(' | ')}`)];
 }
 
-async function post(world: World, lines: readonly Line[], overrides: Partial<Record<'token' | 'protocol' | 'pid' | 'image', string>> = {}): Promise<{ readonly status: number; readonly body: unknown }> {
+async function post(world: World, lines: readonly Line[], overrides: Partial<Record<'token' | 'protocol' | 'process' | 'image', string>> = {}): Promise<{ readonly status: number; readonly body: unknown }> {
   const response = await fetch(new URL('events', world.engine.url), {
     method: 'POST',
     headers: {
       authorization: `Bearer ${overrides.token ?? world.token}`,
       [headers.attempt]: world.attempt,
       [headers.protocol]: overrides.protocol ?? String(protocolVersion),
-      [headers.pid]: overrides.pid ?? '4242',
+      [headers.process]: overrides.process ?? '00000000-0000-4000-8000-000000004242',
       [headers.image]: overrides.image ?? 'autoworker/attempt:lane',
       'content-type': 'application/json',
     },
@@ -521,7 +521,7 @@ async function wireLane(world: World): Promise<readonly Check[]> {
   const gap = await post(world, [appLine(4), appLine(6), appLine(7)]);
   const afterGap = await rowsNow();
   const resend = await post(world, [appLine(5), appLine(6), appLine(7)]);
-  const other = await post(world, [appLine(8)], { pid: '4343' });
+  const other = await post(world, [appLine(8)], { process: '00000000-0000-4000-8000-000000004343' });
   const wrongToken = await post(world, [appLine(8)], { token: 'x'.repeat(43) });
   const protocol = await post(world, [appLine(8)], { protocol: String(protocolVersion + 1), image: 'registry.example/attempt@sha256:abc' });
   const expect = (name: string, ok: boolean, detail: unknown): Check => (ok ? pass(name, JSON.stringify(detail)) : fail(name, JSON.stringify(detail)));
@@ -576,6 +576,94 @@ async function longOutageLane(world: World): Promise<readonly Check[]> {
   ];
 }
 
+type Proxy = { readonly url: URL; readonly lost: () => number; readonly close: () => Promise<void> };
+
+async function answerLosingProxy(upstream: URL, holdPostsMs: number): Promise<Proxy> {
+  let lost = 0;
+  let heldUntil = 0;
+  const server = createServer((incoming, outgoing) => {
+    const chunks: Buffer[] = [];
+    incoming.on('data', (chunk: Buffer) => chunks.push(chunk));
+    incoming.on('end', () => {
+      const body = Buffer.concat(chunks);
+      const posting = incoming.method === 'POST';
+      if (posting && Date.now() < heldUntil) {
+        outgoing.destroy();
+        return;
+      }
+      const losesItsAnswer = posting && lost === 0 && body.includes('"kind":"end"');
+      const forwarded = request(new URL(incoming.url ?? '/', upstream), { method: incoming.method ?? 'GET', headers: incoming.headers }, answer => {
+        if (losesItsAnswer) {
+          answer.resume();
+          answer.on('end', () => {
+            lost += 1;
+            heldUntil = Date.now() + holdPostsMs;
+            outgoing.destroy();
+          });
+          return;
+        }
+        outgoing.writeHead(answer.statusCode ?? 502, answer.headers);
+        answer.pipe(outgoing);
+      });
+      forwarded.on('error', () => outgoing.destroy());
+      outgoing.on('close', () => forwarded.destroy());
+      forwarded.end(body);
+    });
+  });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  const url = new URL('http://127.0.0.1/');
+  if (typeof address === 'object' && address !== null) url.port = String(address.port);
+  return {
+    url,
+    lost: () => lost,
+    close: async () => {
+      const closed = new Promise<void>(resolve => server.close(() => { resolve(); }));
+      server.closeAllConnections();
+      await closed;
+    },
+  };
+}
+
+async function lostAnswerLane(world: World): Promise<readonly Check[]> {
+  await sendCommand(world.db, world.attempt, { kind: 'turn.start', prompt: tickPrompt(2), outputSchema: null }, new Date());
+  const proxy = await answerLosingProxy(world.engine.url, 3000);
+  try {
+    const run = startBridge(world, () => Promise.resolve([]), { engineUrl: proxy.url });
+    const ended = await endingCheck(run, 0);
+    const row = await world.db.selectFrom('attempt').select(['verdict']).where('id', '=', world.attempt).executeTakeFirstOrThrow();
+    const lostName = "the engine's answer to the end line was lost, and posts failed for 3 s after it";
+    return [
+      proxy.lost() === 1 ? pass(lostName, 'one answer lost') : fail(lostName, `${String(proxy.lost())} answers lost`),
+      row.verdict === 'pass' ? pass('the attempt finished through its end line', 'verdict pass') : fail('the attempt finished through its end line', `verdict ${String(row.verdict)}`),
+      ended,
+    ];
+  } finally {
+    await proxy.close();
+  }
+}
+
+async function latePushLane(world: World): Promise<readonly Check[]> {
+  await sendCommand(world.db, world.attempt, { kind: 'turn.start', prompt: tickPrompt(2), outputSchema: null }, new Date());
+  const commit = 'c'.repeat(40);
+  let pushed = 0;
+  const run = startBridge(world, async () => {
+    await world.db.updateTable('attempt').set({ finished_at: new Date(), verdict: 'stopped' }).where('id', '=', world.attempt).execute();
+    pushed += 1;
+    return [{ kind: 'pushed', commit, branch: 'autoworker/LANE-1-attempt-1' }];
+  });
+  const ended = await endingCheck(run, 1, 'ended');
+  const row = await world.db.selectFrom('attempt').select(['verdict', 'last_pushed']).where('id', '=', world.attempt).executeTakeFirstOrThrow();
+  const pushedLines = await storedWhere(world, sql<boolean>`body ? 'commit'`);
+  const recordName = "the engine refuses the late push's line, so the attempt's record never names the late commit";
+  return [
+    row.verdict === 'stopped' && row.last_pushed === null && pushedLines === 0
+      ? pass(recordName, `the push step ran ${String(pushed)} time after the stop; verdict stopped, last_pushed null, ${String(pushedLines)} pushed lines stored`)
+      : fail(recordName, `verdict ${String(row.verdict)}, last_pushed ${String(row.last_pushed)}, ${String(pushedLines)} pushed lines stored`),
+    ended,
+  ];
+}
+
 const lanes: Readonly<Record<string, Lane>> = {
   outage: {
     summary: 'one real turn with the engine stopped for 8 s mid-turn; every line stored once, no fragment left, and the stored lines replay into the live items',
@@ -589,6 +677,8 @@ const lanes: Readonly<Record<string, Lane>> = {
   planted: { summary: 'a planted .codex/config.toml changes nothing the bridge pins', usesCodex: true, run: plantedLane },
   fence: { summary: 'an attempt marked lost mid-turn stores nothing more, pushes nothing, and its Job side exits non-zero', usesCodex: true, run: fenceLane },
   finishing: { summary: 'a steer sent while the bridge runs its step after the turn is never counted as received', usesCodex: true, run: finishingLane },
+  'late-push': { summary: 'a stop between the last acknowledgement and the push: the Job pushes, and the engine records nothing of it', usesCodex: true, run: latePushLane },
+  'lost-answer': { summary: "the engine's answer to the end line is lost, and the command stream closes as ended before a post gets through; the bridge still exits 0", usesCodex: true, run: lostAnswerLane },
 };
 
 export const liveScenarios: readonly Scenario[] = [

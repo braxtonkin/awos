@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { sql } from 'kysely';
 import { z } from 'zod';
 import { connect, type Database } from '../../shared/db/client.ts';
@@ -766,7 +766,7 @@ async function makeBridge(sim: Pick<Sim, 'db' | 'next'>, index: number): Promise
   app.pending.push(say({ id: bridgeRequestIds.initialize, result: { userAgent: 'simulated app server' } }));
   return {
     attempt,
-    caller: { attempt, token, protocol: protocolVersion, pid: 4000 + index, image: 'autoworker-job:sim' },
+    caller: { attempt, token, protocol: protocolVersion, process: randomUUID(), image: 'autoworker-job:sim' },
     box: outbox(),
     commands: applier(),
     app,

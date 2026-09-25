@@ -74,15 +74,15 @@ export async function issueToken(db: Database, attempt: AttemptId): Promise<stri
     .where('id', '=', attempt)
     .where('finished_at', 'is', null)
     .where('job_created_at', 'is', null)
-    .where('bridge_pid', 'is', null)
+    .where('bridge_process', 'is', null)
     .executeTakeFirst();
   return numUpdatedRows === 1n ? token : undefined;
 }
 
-type Held = { readonly finished_at: Date | null; readonly bridge_token_hash: Buffer | null; readonly bridge_pid: number | null; readonly high_water: string };
+type Held = { readonly finished_at: Date | null; readonly bridge_token_hash: Buffer | null; readonly bridge_process: string | null; readonly high_water: string };
 
 async function hold(writer: Writer, attempt: AttemptId): Promise<Held | undefined> {
-  return writer.selectFrom('attempt').select(['finished_at', 'bridge_token_hash', 'bridge_pid', 'high_water']).where('id', '=', attempt).forUpdate().executeTakeFirst();
+  return writer.selectFrom('attempt').select(['finished_at', 'bridge_token_hash', 'bridge_process', 'high_water']).where('id', '=', attempt).forUpdate().executeTakeFirst();
 }
 
 function gate(engine: BridgeEngine, held: Held | undefined, from: Caller): Refused | undefined {
@@ -95,8 +95,8 @@ function gate(engine: BridgeEngine, held: Held | undefined, from: Caller): Refus
     return refused('protocol', `The bridge in image ${from.image} speaks protocol ${String(from.protocol)}, and this engine speaks ${String(protocolVersion)}. Run the attempt from an image whose bridge speaks protocol ${String(protocolVersion)}.`);
   }
   if (engine.rules.fenced(held.finished_at)) return refused('ended', `Attempt ${from.attempt} has ended, so the engine takes nothing more from its bridge.`);
-  if (held.bridge_pid !== null && held.bridge_pid !== from.pid) {
-    return refused('process', `Attempt ${from.attempt} is bound to bridge process ${String(held.bridge_pid)}, not ${String(from.pid)}.`);
+  if (held.bridge_process !== null && held.bridge_process !== from.process) {
+    return refused('process', `Attempt ${from.attempt} is bound to bridge process ${held.bridge_process}, not ${from.process}.`);
   }
   return undefined;
 }
@@ -105,7 +105,7 @@ async function admit(writer: Writer, engine: BridgeEngine, from: Caller, now: Da
   await writer
     .updateTable('attempt')
     .set({
-      bridge_pid: from.pid,
+      bridge_process: from.process,
       lease_until: engine.rules.renewedLease(now, engine.leaseMs),
       commands_received: sql<string>`greatest(commands_received, ${received})`,
     })
@@ -380,7 +380,7 @@ function callerOf(request: IncomingMessage): Caller | Refused {
   };
   const token = bearer.safeParse(header('authorization'));
   if (!token.success) return refused('token', 'The call carries no bearer token.');
-  const parsed = caller.safeParse({ attempt: header(headers.attempt), token: token.data, protocol: header(headers.protocol), pid: header(headers.pid), image: header(headers.image) });
+  const parsed = caller.safeParse({ attempt: header(headers.attempt), token: token.data, protocol: header(headers.protocol), process: header(headers.process), image: header(headers.image) });
   return parsed.success ? parsed.data : refused('malformed', `The call's headers are wrong. ${z.prettifyError(parsed.error)}`);
 }
 

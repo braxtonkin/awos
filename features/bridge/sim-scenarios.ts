@@ -141,12 +141,12 @@ async function refusalChecks(postgres: TestPostgres): Promise<readonly Check[]> 
     const firstToken = await issueToken(db, first);
     const secondToken = await issueToken(db, second);
     if (firstToken === undefined || secondToken === undefined) throw new Error('the world attempts took no token');
-    const bound: Caller = { attempt: first, token: firstToken, protocol: protocolVersion, pid: 7001, image: 'autoworker-job:current' };
+    const bound: Caller = { attempt: first, token: firstToken, protocol: protocolVersion, process: '00000000-0000-4000-8000-000000007001', image: 'autoworker-job:current' };
     const stored = async (attempt: string): Promise<number> =>
       Number((await db.selectFrom('attempt_event').select(eb => eb.fn.countAll<string>().as('rows')).where('attempt_id', '=', attempt).executeTakeFirstOrThrow()).rows);
     const accepted = await receive(db, engine, bound, { received: 0, lines: [lineOf(1)] });
     const token = await receive(db, engine, { ...bound, attempt: second }, { received: 0, lines: [lineOf(1)] });
-    const secondProcess = await receive(db, engine, { ...bound, pid: 7002 }, { received: 0, lines: [lineOf(2)] });
+    const secondProcess = await receive(db, engine, { ...bound, process: '00000000-0000-4000-8000-000000007002' }, { received: 0, lines: [lineOf(2)] });
     const oldImage = 'autoworker-job:before-protocol-2';
     const protocol = await receive(db, engine, { ...bound, protocol: protocolVersion + 1, image: oldImage }, { received: 0, lines: [lineOf(2)] });
     const counts = { first: await stored(first), second: await stored(second) };
@@ -181,7 +181,7 @@ async function afterEndCheck(postgres: TestPostgres): Promise<Check> {
     const attempt = attemptId.parse('1');
     const token = await issueToken(db, attempt);
     if (token === undefined) throw new Error('the world attempt took no token');
-    const caller: Caller = { attempt, token, protocol: protocolVersion, pid: 7001, image: 'autoworker-job:current' };
+    const caller: Caller = { attempt, token, protocol: protocolVersion, process: '00000000-0000-4000-8000-000000007001', image: 'autoworker-job:current' };
     const now = new Date(worldStartsAt);
     await sendCommand(db, attempt, { kind: 'turn.start', prompt: 'Do the work.', outputSchema: null }, now);
     const answers = [JSON.stringify({ id: bridgeRequestIds.threadStart, result: { thread: { id: 'thread-1' } } }), JSON.stringify({ id: commandRequestId(1), result: { turn: { id: 'turn-1' } } })];
@@ -215,7 +215,7 @@ async function nulCheck(postgres: TestPostgres): Promise<Check> {
     const attempt = attemptId.parse('1');
     const token = await issueToken(db, attempt);
     if (token === undefined) throw new Error('the world attempt took no token');
-    const caller: Caller = { attempt, token, protocol: protocolVersion, pid: 7001, image: 'autoworker-job:current' };
+    const caller: Caller = { attempt, token, protocol: protocolVersion, process: '00000000-0000-4000-8000-000000007001', image: 'autoworker-job:current' };
     const lines: EventsPost['lines'] = [
       { kind: 'app', seq: 1, text: JSON.stringify({ method: 'item/commandExecution/outputDelta', params: { itemId: 'item-\u0000-1', delta: 'binary \u0000 output', ['key\u0000']: true } }) },
       { kind: 'app', seq: 2, text: 'not json \u0000 at all' },
@@ -258,7 +258,7 @@ async function schemaOrderCheck(postgres: TestPostgres): Promise<Check> {
     const attempt = attemptId.parse('1');
     const token = await issueToken(db, attempt);
     if (token === undefined) throw new Error('the world attempt took no token');
-    const caller: Caller = { attempt, token, protocol: protocolVersion, pid: 7001, image: 'autoworker-job:current' };
+    const caller: Caller = { attempt, token, protocol: protocolVersion, process: '00000000-0000-4000-8000-000000007001', image: 'autoworker-job:current' };
     const threadStarted = JSON.stringify({ id: bridgeRequestIds.threadStart, result: { thread: { id: 'thread-1' } } });
     await receive(db, engine, caller, { received: 0, lines: [{ kind: 'app', seq: 1, text: threadStarted }] });
     await sendCommand(db, attempt, { kind: 'turn.start', prompt: 'Plan the change.', outputSchema: declaredSchema }, new Date(worldStartsAt));

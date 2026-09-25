@@ -1,6 +1,7 @@
 import { execFile, spawn, type ChildProcess } from 'node:child_process';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { createServer } from 'node:http';
 import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as wait } from 'node:timers/promises';
@@ -174,6 +175,7 @@ type Options = {
   readonly script?: string;
   readonly deadlineSeconds?: number;
   readonly afterTurn?: JobAfterTurn;
+  readonly engineUrl?: string;
 };
 
 async function start(world: World, options: Options = {}): Promise<Started> {
@@ -191,7 +193,7 @@ async function start(world: World, options: Options = {}): Promise<Started> {
     startCommit: options.startCommit ?? pinnedCommit,
     afterTurn: options.afterTurn ?? { kind: 'push' as const },
     attemptToken: token,
-    engineUrl: `http://${world.address}:9`,
+    engineUrl: options.engineUrl ?? `http://${world.address}:9`,
     runAs: { name: 'Probe Person', email: 'probe@example.com', githubToken: world.githubToken, codexLogin: world.login },
   };
   const made = manifests(input, { ...world.settings, deadlineSeconds: options.deadlineSeconds ?? world.settings.deadlineSeconds });
@@ -552,6 +554,38 @@ async function lostPush(world: World): Promise<readonly Check[]> {
   }
 }
 
+async function processFence(world: World): Promise<readonly Check[]> {
+  const sent = new Map<string, Set<string>>();
+  const engine = createServer((request, response) => {
+    const attempt = request.headers['x-autoworker-attempt'];
+    const identity = request.headers['x-autoworker-process'];
+    if (typeof attempt === 'string' && typeof identity === 'string') sent.set(attempt, (sent.get(attempt) ?? new Set<string>()).add(identity));
+    request.resume();
+    response.writeHead(410, { 'content-type': 'application/json' }).end(JSON.stringify({ refused: 'ended', reason: 'This stand-in engine ends every attempt once it has read its caller.' }));
+  });
+  await new Promise<void>(resolve => engine.listen(0, world.address, resolve));
+  const address = engine.address();
+  const engineUrl = `http://${world.address}:${String(typeof address === 'object' && address !== null ? address.port : 0)}`;
+  const server = await gitServer(world.address);
+  try {
+    const head = await probeRepository(server, 'fence.git', { 'README.md': 'process fence probe\n' });
+    const jobs = [await start(world, { repositoryUrl: server.url('fence.git'), startCommit: head, engineUrl }), await start(world, { repositoryUrl: server.url('fence.git'), startCommit: head, engineUrl })];
+    for (const job of jobs) {
+      await settled(world, job.attempt);
+      await finish(world, job.attempt);
+    }
+    const values = jobs.map(job => [...(sent.get(job.attempt) ?? [])]);
+    const [first, second] = values;
+    const name = 'two bridges, which tini starts at the same PID in every pod, identify their processes to the engine by different values';
+    const said = values.map((list, index) => `Job ${String(index + 1)} sent ${list.join(' and ') || 'nothing'}`).join('; ');
+    return [first?.length === 1 && second?.length === 1 && first[0] !== second[0] ? pass(name, said) : fail(name, said)];
+  } finally {
+    await server.stop();
+    engine.closeAllConnections();
+    await new Promise<void>(resolve => engine.close(() => { resolve(); }));
+  }
+}
+
 async function init(world: World): Promise<readonly Check[]> {
   const started = await start(world, { script: `${prepared} && sh -c "sleep 0.3 &" && sleep 2 && for p in /proc/[0-9]*/stat; do cut -d" " -f1-3 "$p"; done` });
   const done = await settled(world, started.attempt);
@@ -785,6 +819,7 @@ const lanes = {
   'bridge-from-image': bridgeFromImage,
   'lost-push': lostPush,
   init,
+  'process-fence': processFence,
   'bad-image': badImage,
   'repo-image': repoImage,
   perf,
