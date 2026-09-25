@@ -342,6 +342,7 @@ export async function runBridge(settings: BridgeSettings, afterTurn: AfterTurn, 
   const streamLoop = async (): Promise<void> => {
     while (ending === undefined) {
       const refusal = await streamOnce().catch(() => undefined);
+      if (refusal?.refused === 'ended' && endLine !== undefined) return;
       if (refusal !== undefined) {
         refusedBy('command stream', refusal);
         return;
