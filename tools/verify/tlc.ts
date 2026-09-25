@@ -33,9 +33,11 @@ function parseTrace(output: string): Pick<TlcRun, 'trace' | 'loop' | 'loopAction
   return { trace, loop, loopActions, stutters: trace.at(-1)?.action === 'Stuttering' };
 }
 
-export type TlcOptions = { readonly workers?: 'auto' | '1'; readonly liveness?: 'final' };
+export type TlcOptions = { readonly workers?: 'auto' | '1'; readonly liveness?: 'final'; readonly heap?: 'nightly' };
 
-export function checkModel(folder: string, module: string, config: string, { workers = 'auto', liveness }: TlcOptions = {}): TlcRun {
+const heapFlags: Readonly<Record<'nightly', readonly string[]>> = { nightly: ['-XX:MaxRAMPercentage=75'] };
+
+export function checkModel(folder: string, module: string, config: string, { workers = 'auto', liveness, heap }: TlcOptions = {}): TlcRun {
   const work = mkdtempSync(join(tmpdir(), 'tlc-'));
   const configFile = join(work, `${module}.cfg`);
   writeFileSync(configFile, config);
@@ -43,7 +45,7 @@ export function checkModel(folder: string, module: string, config: string, { wor
   try {
     const result = spawnSync(
       'java',
-      ['-XX:+UseParallelGC', '-XX:MaxRAMPercentage=75', '-cp', tlaTools, 'tlc2.TLC', '-workers', workers, ...(liveness === undefined ? [] : ['-lncheck', liveness]), '-metadir', join(work, 'states'), '-config', configFile, `${module}.tla`],
+      ['-XX:+UseParallelGC', ...(heap === undefined ? [] : heapFlags[heap]), '-cp', tlaTools, 'tlc2.TLC', '-workers', workers, ...(liveness === undefined ? [] : ['-lncheck', liveness]), '-metadir', join(work, 'states'), '-config', configFile, `${module}.tla`],
       { cwd: folder, encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 },
     );
     const output = result.error === undefined ? `${result.stdout}${result.stderr}` : `TLC did not run: ${result.error.message}`;
