@@ -50,7 +50,6 @@ const engineSettings = (world: World): Readonly<Record<string, string>> => ({
   SWEEP_EVERY_MS: '600000',
   REAPER_EVERY_MS: '1000',
   LEASE_MS: '60000',
-  ATTEMPT_START_LEASE_MS: '60000',
   SCHEDULER_EVERY_MS: '600000',
   CHECKS_EVERY_MS: '600000',
 });
