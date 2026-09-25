@@ -1,4 +1,4 @@
-import { spawnSync, type SpawnSyncReturns } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { closeSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -8,7 +8,7 @@ type Yaml = null | string | readonly Yaml[] | { readonly [key: string]: Yaml };
 
 type Line = { readonly number: number; readonly indent: number; readonly text: string };
 
-type Step = { readonly name: string; readonly args: readonly string[] };
+type Step = { readonly job: string; readonly name: string; readonly args: readonly string[] };
 
 type Plan = { readonly steps: readonly Step[]; readonly problems: readonly string[] };
 
@@ -173,7 +173,8 @@ function planOf(text: string): Plan {
       }
       const isSetup = setupRuns.has(run.data.run);
       if (isSetup && setup.some(known => known.args.join(' ') === args.join(' '))) return;
-      (isSetup ? setup : steps).push({ name: `${isSetup ? setupJob : job}: docker ${args.join(' ')}`, args });
+      const owner = isSetup ? setupJob : job;
+      (isSetup ? setup : steps).push({ job: owner, name: `${owner}: docker ${args.join(' ')}`, args });
     });
   }
   return { steps: [...setup, ...steps], problems };
@@ -185,26 +186,31 @@ function git(args: readonly string[]): string {
   return result.stdout.trim();
 }
 
-function runStepOf(step: Step, index: number, folder: string): Result {
+async function runStepOf(step: Step, index: number, folder: string): Promise<Result> {
   const log = join(folder, `${String(index + 1).padStart(2, '0')}-${step.name.replace(/[^A-Za-z0-9]+/g, '-').replace(/^-|-$/g, '').toLowerCase()}.log`);
   const fd = openSync(log, 'w');
   const started = performance.now();
-  let result: SpawnSyncReturns<Buffer>;
   try {
     writeFileSync(fd, `$ docker ${step.args.join(' ')}\n`);
-    result = spawnSync('docker', step.args, {
-      cwd: root,
-      stdio: ['ignore', fd, fd],
-      env: process.platform === 'win32' ? { ...process.env, MSYS_NO_PATHCONV: '1' } : process.env,
+    const exit = await new Promise<number | null>(resolve => {
+      const child = spawn('docker', step.args, {
+        cwd: root,
+        stdio: ['ignore', fd, fd],
+        env: process.platform === 'win32' ? { ...process.env, MSYS_NO_PATHCONV: '1' } : process.env,
+      });
+      child.on('error', error => {
+        writeFileSync(fd, `\ndocker did not start: ${error.message}\n`);
+        resolve(null);
+      });
+      child.on('close', resolve);
     });
-    if (result.error !== undefined) writeFileSync(fd, `\ndocker did not start: ${result.error.message}\n`);
+    return { name: step.name, exit, seconds: Math.round((performance.now() - started) / 1000), log };
   } finally {
     closeSync(fd);
   }
-  return { name: step.name, exit: result.status, seconds: Math.round((performance.now() - started) / 1000), log };
 }
 
-function runAll(plan: readonly Step[]): number {
+async function runAll(plan: readonly Step[]): Promise<number> {
   const sha = git(['rev-parse', 'HEAD']);
   process.stdout.write(`ci-local at ${sha}\n`);
   const dirty = git(['status', '--porcelain']);
@@ -215,16 +221,32 @@ function runAll(plan: readonly Step[]): number {
   const folder = join(root, 'ci-local', sha);
   rmSync(folder, { recursive: true, force: true });
   mkdirSync(folder, { recursive: true });
+  const started = performance.now();
   const header = `ci-local at ${sha}, started ${new Date().toISOString()}\n`;
-  const results = plan.map((step, index) => {
-    process.stdout.write(`${step.name}\n`);
-    const result = runStepOf(step, index, folder);
-    process.stdout.write(`  exit ${String(result.exit)} in ${String(result.seconds)}s, log ${result.log}\n`);
-    return result;
-  });
-  const passed = results.every(result => result.exit === 0);
-  const rows = results.map(result => `${String(result.exit).padEnd(6)}${String(result.seconds).padStart(7)}s  ${result.name}`);
-  const summary = `${header}exit  seconds  step\n${rows.join('\n')}\n${passed ? 'PASS' : 'FAIL'}\n`;
+  const results: (Result | undefined)[] = plan.map(() => undefined);
+  let printed = 0;
+  const run = async (index: number): Promise<void> => {
+    const step = plan[index];
+    if (step === undefined) return;
+    results[index] = await runStepOf(step, index, folder);
+    for (let next = results[printed]; next !== undefined; next = results[printed]) {
+      process.stdout.write(`${next.name}\n  exit ${String(next.exit)} in ${String(next.seconds)}s, log ${next.log}\n`);
+      printed += 1;
+    }
+  };
+  const indexesOf = (job: string): readonly number[] => plan.flatMap((step, index) => (step.job === job ? [index] : []));
+  for (const index of indexesOf(setupJob)) await run(index);
+  const jobs = [...new Set(plan.map(step => step.job))].filter(job => job !== setupJob);
+  await Promise.all(
+    jobs.map(async job => {
+      for (const index of indexesOf(job)) await run(index);
+    }),
+  );
+  const finished = results.filter(result => result !== undefined);
+  const passed = finished.length === plan.length && finished.every(result => result.exit === 0);
+  const rows = finished.map(result => `${String(result.exit).padEnd(6)}${String(result.seconds).padStart(7)}s  ${result.name}`);
+  const wall = Math.round((performance.now() - started) / 1000);
+  const summary = `${header}exit  seconds  step\n${rows.join('\n')}\nwall time ${String(wall)}s, with setup first and then each job's steps in order, the jobs at the same time\n${passed ? 'PASS' : 'FAIL'}\n`;
   writeFileSync(join(folder, 'summary.txt'), summary);
   process.stdout.write(`\n${summary}`);
   return passed ? 0 : 1;
@@ -238,7 +260,7 @@ if (problems.length > 0) {
 } else if (mode.length === 1 && mode[0] === '--plan') {
   for (const step of steps) process.stdout.write(`${step.name}\n`);
 } else if (mode.length === 0) {
-  process.exitCode = runAll(steps);
+  process.exitCode = await runAll(steps);
 } else {
   process.stderr.write('Run node tools/ci-local/main.ts to run CI, or add --plan to print its steps without running them.\n');
   process.exitCode = 2;

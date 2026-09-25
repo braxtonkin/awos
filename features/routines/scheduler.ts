@@ -1,13 +1,12 @@
 import { randomUUID } from 'node:crypto';
 import { sql } from 'kysely';
 import { refusal, type Database } from '../../shared/db/client.ts';
+import type { Now } from '../../shared/db/now.ts';
 import type { RunReason } from '../../shared/db/types.ts';
 import type { Loop } from '../../shared/loop.ts';
 import type { Workflow } from '../../shared/workflow.ts';
 import { record, type Recorded, type Search } from './record.ts';
 import type { Claimed, Sources } from './source.ts';
-
-type Now = (db: Database) => Promise<Date>;
 
 export type SchedulerSettings = {
   readonly everyMs: number;
@@ -20,13 +19,6 @@ export type SchedulerSettings = {
 type Claim = { readonly run: Claimed | undefined; readonly closed: number };
 
 export const origin = new Date('2000-01-01T00:00:00.000Z');
-
-export const postgresNow: Now = async db => {
-  const { rows } = await sql<{ now: Date }>`select clock_timestamp() as now`.execute(db);
-  const now = rows[0]?.now;
-  if (now === undefined) throw new Error('Postgres did not tell the time');
-  return now;
-};
 
 const later = (now: Date, ms: number): Date => new Date(now.getTime() + ms);
 

@@ -328,6 +328,14 @@ export async function driveAutoWorker(drive: Drive): Promise<void> {
   const address = await kindAddress();
   const core = kubernetes();
   await jobNamespace(core, drive.namespace, e2eServiceAccount);
+  try {
+    await driveInNamespace(drive, core, image, address);
+  } finally {
+    await core.deleteNamespace({ name: drive.namespace });
+  }
+}
+
+async function driveInNamespace(drive: Drive, core: CoreV1Api, image: string, address: string): Promise<void> {
   const store = await openStore(drive.databaseUrl);
   try {
     const login = join(store.folder, 'codex.json');
@@ -375,6 +383,5 @@ export async function driveAutoWorker(drive: Drive): Promise<void> {
     }
   } finally {
     await closeStore(store);
-    await core.deleteNamespace({ name: drive.namespace });
   }
 }

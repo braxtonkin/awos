@@ -54,10 +54,12 @@ export type Jira = {
 
 type Method = 'GET' | 'POST';
 
-export function jiraFromEnvironment(env: NodeJS.ProcessEnv): Jira {
+export type JiraLogin = { readonly site: string; readonly email: string; readonly token: string };
+
+export function jiraLoginFromEnvironment(env: NodeJS.ProcessEnv): JiraLogin {
   const keys = JiraKeys.safeParse(env);
   if (!keys.success) throw new Error(`The Jira keys are not usable: ${keys.error.issues.map(issue => String(issue.path[0])).join(', ')}`);
-  return jiraAt(keys.data.JIRA_SITE, keys.data.JIRA_EMAIL, keys.data.JIRA_API_TOKEN);
+  return { site: keys.data.JIRA_SITE, email: keys.data.JIRA_EMAIL, token: keys.data.JIRA_API_TOKEN };
 }
 
 export function jiraAt(site: string, email: string, token: string): Jira {

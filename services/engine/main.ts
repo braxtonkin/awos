@@ -24,9 +24,9 @@ import { currentAssignee, jiraSearch, ticketDescription } from '../../features/j
 import { jobSettings } from '../../features/jobs/settings.ts';
 import { sweep } from '../../features/jobs/sweep.ts';
 import { enqueue } from '../../features/outbox/enqueue.ts';
-import { outboxLoops, registryOf } from '../../features/outbox/perform.ts';
+import { databaseTime, outboxLoops, registryOf } from '../../features/outbox/perform.ts';
 import { scheduleSource } from '../../features/routines/schedule-source.ts';
-import { postgresNow, scheduler } from '../../features/routines/scheduler.ts';
+import { scheduler } from '../../features/routines/scheduler.ts';
 import { sourcesByKind } from '../../features/routines/source.ts';
 import { advance, approveFromOutside, handOff } from '../../features/tasks/advance.ts';
 import { claim, renew } from '../../features/tasks/claim.ts';
@@ -37,6 +37,7 @@ import { startProblems } from '../../features/tasks/start.ts';
 import type { Performers } from '../../shared/actions.ts';
 import { connectCluster } from '../../shared/cluster.ts';
 import { connect, type Database } from '../../shared/db/client.ts';
+import { postgresNow } from '../../shared/db/now.ts';
 import { realClock, runLoop, type Loop } from '../../shared/loop.ts';
 import { attempts } from './attempts.ts';
 import { workflows, type ActionKind } from './workflows.ts';
@@ -153,7 +154,7 @@ const loopsFor = (given: Settings, key: SealingKey | undefined, db: Database): r
       tasks: { claim: async (landDb, task, now, leaseMs) => claim(landDb, task, now, leaseMs, await runAs(landDb, task), null), renew, handOff, approveFromOutside, finish: (writer, attempt, report, now, then) => advance(writer, workflows, attempt, report, now, then) },
     }),
     ...(given.JOB_IMAGE === undefined ? [] : [sweep({ everyMs: given.SWEEP_EVERY_MS, cluster: connectCluster(given.JOB_NAMESPACE) })]),
-    ...outboxLoops({ everyMs: given.OUTBOX_EVERY_MS, leaseMs: given.OUTBOX_LEASE_MS, marginMs: given.OUTBOX_MARGIN_MS, maxTries: given.OUTBOX_MAX_TRIES, clock: realClock, registry: actions }),
+    ...outboxLoops({ everyMs: given.OUTBOX_EVERY_MS, leaseMs: given.OUTBOX_LEASE_MS, marginMs: given.OUTBOX_MARGIN_MS, maxTries: given.OUTBOX_MAX_TRIES, time: databaseTime, registry: actions }),
     ...(key === undefined ? [] : [checkLoop(checkSettings(given, key))]),
     ...workerLoops(db, given, key, runAs, given.JIRA_SITE === undefined ? () => Promise.resolve(null) : ticketDescription(jira)),
   ];
