@@ -52,8 +52,10 @@ type Kind = 'invariant' | 'action' | 'liveness';
 const kinds: Readonly<Record<Kind, { readonly section: Section; readonly violation: (property: string) => string; readonly tlc: TlcOptions }>> = {
   invariant: { section: 'INVARIANTS', violation: property => `Invariant ${property} is violated`, tlc: { workers: '1' } },
   action: { section: 'PROPERTIES', violation: property => `Action property ${property} is violated`, tlc: { workers: '1' } },
-  liveness: { section: 'PROPERTIES', violation: () => 'Temporal properties were violated', tlc: { workers: 'auto', liveness: 'final' } },
+  liveness: { section: 'PROPERTIES', violation: () => 'Temporal properties were violated', tlc: { workers: 'auto' } },
 };
+
+const holdsLiveness: TlcOptions = { workers: 'auto', liveness: 'final' };
 
 const isLiveness = (model: Model, property: string): boolean => model.liveness?.includes(property) === true;
 
@@ -251,7 +253,7 @@ function checkHolds(model: Model, file: string, text: string): Check {
     return run.clean ? pass(name, `No error has been found in ${String(run.distinctStates)} distinct states, checked in ${run.seconds.toFixed(1)} s`) : fail(name, failure(run));
   }
   const safety = runTlc(model.module, configOf(parsed, [...listing('INVARIANTS', [...parsed.listed.INVARIANTS]), ...listing('PROPERTIES', [...parsed.listed.PROPERTIES].filter(property => !isLiveness(model, property)))]));
-  const settles = runTlc(model.module, configOf(parsed, listing('PROPERTIES', liveness)), kinds.liveness.tlc);
+  const settles = runTlc(model.module, configOf(parsed, listing('PROPERTIES', liveness)), holdsLiveness);
   const failed = [safety, settles].find(run => !run.clean);
   if (failed !== undefined) return fail(name, failure(failed));
   return pass(
