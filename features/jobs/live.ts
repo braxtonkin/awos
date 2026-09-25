@@ -371,6 +371,12 @@ async function envNames(world: World): Promise<readonly Check[]> {
   await finish(world, plant.attempt);
   const plantedLeaks = leaksIn(plantedLog, issuedTo(world, plant));
   const planted = 'the log check finds the exact attempt token a Job printed, which no token shape matches';
+  const scan = await start(world, { script: 'find / -xdev -perm /6000 -type f 2> /dev/null | sed "s/^/set-id file /"; echo "scan done"' });
+  await settled(world, scan.attempt);
+  const scanLog = await logOf(world, scan.attempt);
+  await finish(world, scan.attempt);
+  const setIds = scanLog.split('\n').filter(line => line.startsWith('set-id file '));
+  const noSetId = 'the attempt image holds no setuid or setgid file';
   const forbidden = ['DATABASE_URL', 'KUBECONFIG', 'CREDENTIAL_KEY', 'REFRESH', 'SERVICEACCOUNT'].filter(word => names.includes(word));
   return [
     done.state === 'succeeded' && forbidden.length === 0 && names.includes('ATTEMPT_TOKEN')
@@ -382,6 +388,7 @@ async function envNames(world: World): Promise<readonly Check[]> {
     plantedLeaks.includes('the attempt token')
       ? pass(planted, `found ${plantedLeaks.join(', ')}; the token shapes alone found ${redact(plantedLog) === plantedLog ? 'nothing' : 'a shape'}`)
       : fail(planted, `found ${plantedLeaks.join(', ') || 'nothing'} in ${String(plantedLog.length)} characters`),
+    scanLog.includes('scan done') && setIds.length === 0 ? pass(noSetId, 'find / -xdev -perm /6000 found none') : fail(noSetId, setIds.length === 0 ? `the scan did not finish: ${scanLog.slice(-400)}` : setIds.join(', ')),
   ];
 }
 

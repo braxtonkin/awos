@@ -12,7 +12,8 @@ RUN apt-get update \
  && apt-get purge -y libcap2-bin && rm -rf /var/lib/apt/lists/* \
  && install -d -o codex -g codex -m 0755 /workspace \
  && install -d -o bridge -g bridge -m 0711 /var/lib/autoworker
-RUN npm install --global @openai/codex@0.156.0 && npm cache clean --force
+RUN npm install --global @openai/codex@0.156.0 && npm cache clean --force \
+ && find / -xdev -perm /6000 -type f -exec chmod a-s {} +
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
