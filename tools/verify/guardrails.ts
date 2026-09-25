@@ -1402,7 +1402,7 @@ const budgetAllowances: readonly Allowance[] = [
     file: 'tools/verify/planted.woff2',
     source: `wOF2\u0000${'x'.repeat(1000)}\n`,
     tool: 'budget',
-    shows: 'Skipped 1 binary files, which hold a NUL byte or are not UTF-8: tools/verify/planted.woff2',
+    shows: 'tools/verify/planted.woff2 holds a NUL byte or is not UTF-8, so the budget skips it.',
   },
   {
     name: 'the budget check holds a fixture to no longest-line ceiling once a raise covers its lines',

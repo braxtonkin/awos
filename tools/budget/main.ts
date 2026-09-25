@@ -340,7 +340,7 @@ function main(): number {
   }
   if (values.lower === true) return lower(loaded, measured, values.states);
   if (values.report === true) report(loaded, measured);
-  if (measured.binary.length > 0) process.stdout.write(`Skipped ${String(measured.binary.length)} binary files, which hold a NUL byte or are not UTF-8: ${measured.binary.join(', ')}\n`);
+  for (const path of measured.binary) process.stdout.write(`${path} holds a NUL byte or is not UTF-8, so the budget skips it.\n`);
   const found = [...overruns(loaded, measured), ...coverage(loaded.budget, effectiveCeilings(loaded.budget, loaded.raises))];
   for (const line of found) process.stdout.write(`${line}\n`);
   return found.length === 0 ? 0 : 1;
