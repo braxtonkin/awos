@@ -27,3 +27,5 @@ export async function writeSandbox(to: string): Promise<void> {
     await writeFile(target, file.content);
   }
 }
+
+export const sandboxCommands = { fastTest: 'npm ci && npm test', setup: 'npm ci' } as const;
