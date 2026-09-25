@@ -5,7 +5,7 @@ import { z } from 'zod';
 import type { Database } from '../../shared/db/client.ts';
 import { read, type Secret } from './kinds.ts';
 import type { SealingKey } from './seal.ts';
-import { open, replace } from './store.ts';
+import { open, replace, type Opened } from './store.ts';
 
 export type Owner = { readonly email: string; readonly logins: readonly Secret[] };
 
@@ -73,21 +73,34 @@ const textOf = (secret: Secret): string => {
   }
 };
 
-export function applyLogins(db: Database, key: SealingKey, admin: string, owners: readonly Owner[]): Promise<{ readonly sealed: number }> {
+type Plan = 'same' | 'kept' | 'seal';
+
+function planFor(opened: Opened, secret: Secret, replacing: boolean): Plan {
+  if (!('secret' in opened)) return 'seal';
+  if (opened.secret === textOf(secret)) return 'same';
+  const found = read(secret);
+  const older = 'expiresAt' in found && found.expiresAt !== null && opened.expiresAt !== null && found.expiresAt <= opened.expiresAt;
+  return older && !replacing ? 'kept' : 'seal';
+}
+
+export type AppliedLogins = { readonly sealed: number; readonly kept: number };
+
+export function applyLogins(db: Database, key: SealingKey, admin: string, owners: readonly Owner[], replacing: boolean): Promise<AppliedLogins> {
   return db.transaction().execute(async trx => {
     const person = async (address: string): Promise<string> => (await trx.selectFrom('person').select('id').where('email', '=', address).executeTakeFirstOrThrow()).id;
     const by = await person(admin);
-    let sealed = 0;
+    const plans: Plan[] = [];
     for (const { email, logins: secrets } of owners) {
       const owner = await person(email);
       for (const secret of secrets) {
-        const opened = await open(trx, key, { connector: secret.connector, owner });
-        if ('secret' in opened && opened.secret === textOf(secret)) continue;
+        await trx.selectFrom('credential').select('id').where('connector', '=', secret.connector).where('person_id', '=', owner).forUpdate().execute();
+        const plan = planFor(await open(trx, key, { connector: secret.connector, owner }), secret, replacing);
+        plans.push(plan);
+        if (plan !== 'seal') continue;
         const replaced = await replace(trx, key, { action: randomUUID(), by, at: new Date(), owner, secret });
         if ('refused' in replaced) throw new Error(`The ${secret.connector} login of ${email} was refused, so no login was sealed. ${replaced.reason}`);
-        sealed += 1;
       }
     }
-    return { sealed };
+    return { sealed: plans.filter(plan => plan === 'seal').length, kept: plans.filter(plan => plan === 'kept').length };
   });
 }

@@ -12,13 +12,14 @@ export const profileName = z.enum(['default', 'crashes']);
 
 export type ProfileName = z.infer<typeof profileName>;
 
-export const mutantName = z.enum(['one_environment_per_attempt', 'reconcile']);
+export const mutantName = z.enum(['one_environment_per_attempt', 'reconcile', 'provider_honours_deadline']);
 
 export type MutantName = z.infer<typeof mutantName>;
 
 export const mutants: Readonly<Record<MutantName, PropertyName>> = {
   one_environment_per_attempt: 'OneEnvironmentPerAttempt',
   reconcile: 'NoEnvironmentOutlivesItsAttempt',
+  provider_honours_deadline: 'NoEnvironmentOutlivesItsAttempt',
 };
 
 export const settings = { everyMs: 1_000, startDeadlineMs: 2_000 } as const;
@@ -226,9 +227,9 @@ function fakeFor(fake: Fake, engine: number, now: () => number): Provider {
   };
 }
 
-function answer(fake: Fake, pending: Pending, now: number): 'made' | 'refused' {
+function answer(fake: Fake, pending: Pending, now: number, deadlineHonoured: boolean): 'made' | 'refused' {
   fake.pending = fake.pending.filter(entry => entry !== pending);
-  if (now > pending.calledAt + settings.startDeadlineMs) {
+  if (deadlineHonoured && now > pending.calledAt + settings.startDeadlineMs) {
     pending.settle(new Error(`the start deadline of ${String(settings.startDeadlineMs)} ms passed before the environment was ready`));
     return 'refused';
   }
@@ -240,6 +241,8 @@ function answer(fake: Fake, pending: Pending, now: number): 'made' | 'refused' {
   pending.settle({ kind: 'address', url });
   return 'made';
 }
+
+const honoursDeadline = (world: World): boolean => world.plan.mutant !== 'provider_honours_deadline';
 
 function drop(fake: Fake, pending: Pending): void {
   fake.pending = fake.pending.filter(entry => entry !== pending);
@@ -282,7 +285,7 @@ async function crashEngine(world: World, slot: number, engine: Engine): Promise<
   const now = world.virtual.clock.now().getTime();
   for (const pending of own) {
     if (point === 'before-start') drop(world.fake, pending);
-    if (point === 'after-start') answer(world.fake, pending, now);
+    if (point === 'after-start') answer(world.fake, pending, now, honoursDeadline(world));
     if (point !== 'in-flight') await settleCall(world, pending.call);
   }
   return `engine ${String(engine.id)} died ${point === 'idle' ? 'with no start in flight' : `${point} for ${own.map(pending => `attempt ${pending.attemptId}`).join(', ')}`}`;
@@ -380,7 +383,7 @@ const rules: Readonly<Record<Move, Rule>> = {
     perform: async world => {
       const pending = pick(world.random, world.fake.pending);
       if (pending === undefined) return 'no start in flight';
-      const made = answer(world.fake, pending, world.virtual.clock.now().getTime());
+      const made = answer(world.fake, pending, world.virtual.clock.now().getTime(), honoursDeadline(world));
       const detail = await settleCall(world, pending.call);
       return `the provider ${made === 'made' ? 'made' : 'refused'} the environment for attempt ${pending.attemptId}, and engine ${String(pending.engine)} ${detail}`;
     },

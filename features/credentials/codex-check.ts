@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { z } from 'zod';
@@ -150,6 +150,19 @@ export function refreshUse({ ranToItsEnd, before, after }: CodexExit): RefreshUs
 }
 
 const ranToItsEnd = (finished: Finished): boolean => finished.spawnError !== null || (!finished.timedOut && finished.exit !== null);
+
+export async function clearLeftoverHomes(before: Date): Promise<readonly string[]> {
+  const folder = tmpdir();
+  const cleared: string[] = [];
+  for (const name of (await readdir(folder)).filter(entry => entry.startsWith(codexHomePrefix))) {
+    const path = join(folder, name);
+    const found = await stat(path).catch(() => undefined);
+    if (found === undefined || found.mtimeMs >= before.getTime()) continue;
+    await rm(path, { recursive: true, force: true });
+    cleared.push(path);
+  }
+  return cleared;
+}
 
 export async function probeCodex(settings: CodexCheckSettings, login: string): Promise<CodexProbe> {
   const home = await mkdtemp(join(tmpdir(), codexHomePrefix));

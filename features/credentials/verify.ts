@@ -1,6 +1,6 @@
 import { execFile, spawn, spawnSync } from 'node:child_process';
 import { randomBytes, randomUUID } from 'node:crypto';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { access, mkdtemp, rm, utimes, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -15,12 +15,13 @@ import { withPostgres, type TestPostgres } from '../../tools/verify/postgres.ts'
 import { provePlants } from './invariants.ts';
 import type { Secret } from './kinds.ts';
 import { checksModel } from './checks-model.ts';
+import { codexHomePrefix } from './codex-check.ts';
 import { laneChecks } from './lanes.ts';
 import { liveScenarios } from './live.ts';
 import { mutantName, mutants, noMutantYet, simulate, type MutantName, type Plan, type Run } from './simulate.ts';
 import { mutantEntries, mutantOption } from './mutants.ts';
 import { seal, sealingKey, unseal } from './seal.ts';
-import { expiring, open, replace, type Replaced, type Replacement, type Slot } from './store.ts';
+import { expiring, open, replace, writeBack, type Opened, type Replaced, type Replacement, type Slot } from './store.ts';
 import {
   accessProblems,
   codex,
@@ -462,7 +463,7 @@ const repositoryRoot = fileURLToPath(new URL('../../', import.meta.url));
 
 const setupCommand = join(repositoryRoot, 'services', 'engine', 'setup.ts');
 
-const setupBudget = { runs: 5, freshMs: 5000, repeatMs: 2000 };
+const setupBudget = { runs: 5, repeatToFresh: 1.5 };
 
 const setupTables = ['person', 'credential', 'human_action', 'repository', 'routine', 'routine_version', 'routine_step'] as const;
 
@@ -475,13 +476,13 @@ type SetupWorld = {
   readonly engine: Database;
   readonly env: Readonly<Record<string, string>>;
   readonly secrets: readonly string[];
-  readonly apply: (file: object, env?: Readonly<Record<string, string>>) => Promise<SetupRun>;
+  readonly apply: (file: object, env?: Readonly<Record<string, string>>, flags?: readonly string[]) => Promise<SetupRun>;
   readonly rows: () => Promise<Readonly<Record<string, number>>>;
 };
 
 const sandboxRepository = { github: 'example/sandbox', branch: 'main' };
 
-const adaLogins = { github: { env: 'ADA_GITHUB_TOKEN' }, codex: { file: 'ada-codex.json', madeForAutoWorker: true } };
+const adaLogins = { github: { env: 'ADA_GITHUB_TOKEN' }, codex: { file: 'ada-codex.json', madeForAutoWorker: true }, jira: { env: 'ADA_JIRA_LOGIN' } };
 
 const ada = { name: 'Ada', email: 'Ada@Example.com', jiraAccountId: 'jira-ada', logins: adaLogins };
 
@@ -506,7 +507,7 @@ const sandboxSettings = { ...sandboxRepository, image: sandboxImage, fastTestCom
 
 const setupFile = { admin: 'ada@example.com', people: [ada], repositories: [sandboxSettings], routines: [sandboxRoutine] };
 
-const firstRun = ['people 1 added, 0 changed', 'team accounts 0 added, 0 changed', 'logins 2 sealed', 'repositories 1 added, 0 changed', 'routines 1 added, 0 changed', ''].join('\n');
+const firstRun = ['people 1 added, 0 changed', 'team accounts 0 added, 0 changed', 'logins 3 sealed', 'repositories 1 added, 0 changed', 'routines 1 added, 0 changed', ''].join('\n');
 
 const repeatRun = ['people 0 added, 0 changed', 'team accounts 0 added, 0 changed', 'logins 0 sealed', 'repositories 0 added, 0 changed', 'routines 0 added, 0 changed', ''].join('\n');
 
@@ -520,11 +521,11 @@ const nothingWritten = (rows: Readonly<Record<string, number>>): readonly string
 
 const lineWith = (text: string, needle: string): string => text.split('\n').find(line => line.includes(needle))?.trim() ?? '';
 
-async function runSetup(folder: string, file: object, env: Readonly<Record<string, string>>): Promise<SetupRun> {
+async function runSetup(folder: string, file: object, env: Readonly<Record<string, string>>, flags: readonly string[]): Promise<SetupRun> {
   const path = join(folder, `setup-${randomUUID()}.json`);
   await writeFile(path, JSON.stringify(file, null, 2));
   const started = performance.now();
-  const finished = await promisify(execFile)(process.execPath, [setupCommand, path], { env, cwd: repositoryRoot, timeout: 60_000 }).then(
+  const finished = await promisify(execFile)(process.execPath, [setupCommand, ...flags, path], { env, cwd: repositoryRoot, timeout: 60_000 }).then(
     ({ stdout, stderr }) => ({ code: 0, stdout, stderr }),
     (error: unknown) => childFailure.parse(error),
   );
@@ -537,16 +538,18 @@ async function inSetupWorld<T>(postgres: TestPostgres, work: (world: SetupWorld)
   const folder = await mkdtemp(join(tmpdir(), 'setup-'));
   const login = fakeLogin(day(30), fakeRefreshToken());
   const token = fakeGithubToken();
+  const jiraToken = `ATATT3x${randomBytes(24).toString('hex')}`;
+  const jira = `ada@example.com:${jiraToken}`;
   const key = randomBytes(32).toString('base64');
   await writeFile(join(folder, 'ada-codex.json'), login.text);
-  const env = { DATABASE_URL: scratch.url, CREDENTIAL_KEY: key, CREDENTIAL_KEY_VERSION: '1', ADA_GITHUB_TOKEN: token };
+  const env = { DATABASE_URL: scratch.url, CREDENTIAL_KEY: key, CREDENTIAL_KEY_VERSION: '1', ADA_GITHUB_TOKEN: token, ADA_JIRA_LOGIN: jira };
   const rows = async (): Promise<Readonly<Record<string, number>>> => {
     const counted: Record<string, number> = {};
     for (const table of setupTables) counted[table] = Number((await sql<{ rows: string }>`select count(*) as rows from ${sql.table(table)}`.execute(engine)).rows[0]?.rows ?? -1);
     return counted;
   };
   try {
-    return await work({ url: scratch.url, engine, env, secrets: [login.text, ...login.tokens, token, key], apply: (file, changed = env) => runSetup(folder, file, changed), rows });
+    return await work({ url: scratch.url, engine, env, secrets: [login.text, ...login.tokens, token, jira, jiraToken, key], apply: (file, changed = env, flags = []) => runSetup(folder, file, changed, flags), rows });
   } finally {
     await rm(folder, { recursive: true, force: true });
     await engine.destroy();
@@ -593,7 +596,7 @@ async function appliesOnce(world: SetupWorld): Promise<Outcome> {
   const person = await world.engine.selectFrom('person').select(['id', 'email', 'jira_account_id', 'kind']).executeTakeFirst();
   const key = sealingKey(world.env);
   const owner = person?.id ?? '0';
-  const opened = [await open(world.engine, key, { connector: 'github', owner }), await open(world.engine, key, { connector: 'codex', owner })];
+  const opened = [await open(world.engine, key, { connector: 'github', owner }), await open(world.engine, key, { connector: 'codex', owner }), await open(world.engine, key, { connector: 'jira', owner })];
   const openedTexts = opened.map(item => ('secret' in item ? item.secret : item.reason));
   const expectedVersion = {
     workflow: 'code-change',
@@ -617,10 +620,10 @@ async function appliesOnce(world: SetupWorld): Promise<Outcome> {
       ...(isDeepStrictEqual(repository, expectedRepository) ? [] : [`the repositories are ${JSON.stringify(repository)}, not ${JSON.stringify(expectedRepository)}`]),
       ...(isDeepStrictEqual(steps, [{ step: 'implement', instructions: 'Keep the change small.', skills: ['typescript'] }]) ? [] : [`the routine steps are ${JSON.stringify(steps)}`]),
       ...(isDeepStrictEqual(person, { id: owner, email: 'ada@example.com', jira_account_id: 'jira-ada', kind: 'person' }) ? [] : [`the person is ${JSON.stringify(person)}`]),
-      ...(isDeepStrictEqual(openedTexts, [world.env['ADA_GITHUB_TOKEN'], world.secrets[0]]) ? [] : ['the engine did not open both logins to the made-up values the file named']),
+      ...(isDeepStrictEqual(openedTexts, [world.env['ADA_GITHUB_TOKEN'], world.secrets[0], world.env['ADA_JIRA_LOGIN']]) ? [] : ['the engine did not open the three logins to the made-up values the file named']),
       ...leaks(world.secrets, [first, second]),
     ],
-    detail: `first run printed ${JSON.stringify(first.stdout)}; second printed ${JSON.stringify(second.stdout)}; row counts ${JSON.stringify(afterSecond)} after both; the repository's saved_by names its add_repository action; the version holds the Jira search, statuses, later-reviews setting, and interval, and the repository its image, fast test command, and Verify provider; the engine opened both logins byte for byte`,
+    detail: `first run printed ${JSON.stringify(first.stdout)}; second printed ${JSON.stringify(second.stdout)}; row counts ${JSON.stringify(afterSecond)} after both; the repository's saved_by names its add_repository action; the version holds the Jira search, statuses, later-reviews setting, and interval, and the repository its image, fast test command, and Verify provider; the engine opened the GitHub, Codex, and Jira logins byte for byte`,
   };
 }
 
@@ -670,7 +673,7 @@ async function refreshNeedsSetupMark(world: SetupWorld): Promise<Outcome> {
     problems: [
       ...(unmarked.code === 1 && unmarked.stderr.includes('at people[0].logins.codex\n') && unmarked.stderr.includes('refresh token') ? [] : [`the unmarked login gave ${describeRun(unmarked)}`]),
       ...nothingWritten(written),
-      ...(marked.code === 0 && marked.stdout.includes('logins 2 sealed') ? [] : [`the marked login gave ${describeRun(marked)}`]),
+      ...(marked.code === 0 && marked.stdout.includes('logins 3 sealed') ? [] : [`the marked login gave ${describeRun(marked)}`]),
       ...(isDeepStrictEqual(codexRow?.detail, { owner: codexRow?.person_id, madeForAutoWorker: true }) ? [] : [`the stored Codex login records ${JSON.stringify(codexRow?.detail)}`]),
       ...(codexRow?.expires_at?.getTime() === day(30).getTime() ? [] : [`the stored Codex login expires ${codexRow?.expires_at?.toISOString() ?? 'never'}`]),
       ...leaks(world.secrets, [unmarked, marked]),
@@ -693,7 +696,7 @@ async function replacementRecorded(world: SetupWorld): Promise<Outcome> {
   return {
     problems: [
       ...(run.code === 0 && run.stdout.includes('logins 1 sealed') ? [] : [`the second apply gave ${describeRun(run)}`]),
-      ...(actions.length === 3 ? [] : [`${String(actions.length)} replace_credential actions are recorded, not 3`]),
+      ...(actions.length === 4 ? [] : [`${String(actions.length)} replace_credential actions are recorded, not 4`]),
       ...(latest?.connector === 'github' && latest.person_id === credential.person_id && latest.id === credential.action_id ? [] : ['the GitHub credential does not cite the newest replacement, made by Ada']),
       ...(at >= before && at <= after ? [] : [`the newest replacement is recorded at ${latest?.at.toISOString() ?? 'no time'}, outside the run`]),
       ...('secret' in opened && opened.secret === token ? [] : ['the engine did not open the replaced token']),
@@ -703,12 +706,41 @@ async function replacementRecorded(world: SetupWorld): Promise<Outcome> {
   };
 }
 
+async function reapplyKeepsRefreshed(world: SetupWorld): Promise<Outcome> {
+  const first = await world.apply(setupFile);
+  const key = sealingKey(world.env);
+  const { id: owner } = await world.engine.selectFrom('person').select('id').executeTakeFirstOrThrow();
+  const slot: Slot = { connector: 'codex', owner };
+  const opened = await open(world.engine, key, slot);
+  if (!('secret' in opened)) throw new Error(`setup stored no Codex login: ${opened.reason}`);
+  const refreshed = fakeLogin(day(31), fakeRefreshToken());
+  const written = await writeBack(world.engine, key, { credential: opened.credential, replacement: opened.replacement, expiresAt: opened.expiresAt, slot }, refreshed.text);
+  const again = await world.apply(setupFile);
+  const kept = await open(world.engine, key, slot);
+  const replaced = await world.apply(setupFile, world.env, ['--replace-logins']);
+  const back = await open(world.engine, key, slot);
+  const textOf = (found: Opened): string => ('secret' in found ? found.secret : found.reason);
+  const keptLine = "logins 1 kept, because the stored login expires later than the one the file names. Run setup with --replace-logins to store the file's login anyway.";
+  return {
+    problems: [
+      ...(first.code === 0 && first.stdout === firstRun ? [] : [`the first apply gave ${describeRun(first)}`]),
+      ...(written.written ? [] : [`the refresh was not written back: ${written.reason}`]),
+      ...(again.code === 0 && again.stdout.includes('logins 0 sealed\n') && again.stdout.includes(keptLine) ? [] : [`the same file applied again gave ${describeRun(again)}`]),
+      ...(textOf(kept) === refreshed.text ? [] : ['applying the same file again rolled the refreshed Codex login back to the older one in the file']),
+      ...(replaced.code === 0 && replaced.stdout.includes('logins 1 sealed\n') && !replaced.stdout.includes('kept') ? [] : [`--replace-logins gave ${describeRun(replaced)}`]),
+      ...(textOf(back) === world.secrets[0] ? [] : ['--replace-logins did not store the Codex login the file names']),
+      ...leaks([...world.secrets, refreshed.text, ...refreshed.tokens], [first, again, replaced]),
+    ],
+    detail: `after the engine wrote back a login expiring ${day(31).toISOString()}, the same file sealed nothing and said: ${lineWith(again.stdout, 'kept')} With --replace-logins, setup sealed the file's login, expiring ${day(30).toISOString()}`,
+  };
+}
+
 async function convergesOnChanges(world: SetupWorld): Promise<Outcome> {
   await world.apply(setupFile);
   const changed = {
     ...setupFile,
     people: [{ ...ada, name: 'Ada Lovelace' }],
-    repositories: [{ ...sandboxRepository, fastTestCommand: 'npm run test:fast', verifyProvider: 'preview-env' }],
+    repositories: [{ ...sandboxRepository, fastTestCommand: 'npm run test:fast' }],
     routines: [{ ...sandboxRoutine, gates: [], lastStep: 'implement', ignoreLaterReviews: false }],
   };
   const run = await world.apply(changed);
@@ -727,7 +759,7 @@ async function convergesOnChanges(world: SetupWorld): Promise<Outcome> {
     { version: 1, gates: ['specify'], last_step: null, ignore_later_reviews: true },
     { version: 2, gates: [], last_step: 'implement', ignore_later_reviews: false },
   ];
-  const expectedRepository = [{ job_image: null, fast_test_command: 'npm run test:fast', verify_provider: 'preview-env', kind: 'edit_repository', email: 'ada@example.com' }];
+  const expectedRepository = [{ job_image: null, fast_test_command: 'npm run test:fast', verify_provider: 'tests-only', kind: 'edit_repository', email: 'ada@example.com' }];
   const changedRun = ['people 0 added, 1 changed', 'team accounts 0 added, 0 changed', 'logins 0 sealed', 'repositories 0 added, 1 changed', 'routines 0 added, 1 changed', ''].join('\n');
   return {
     problems: [
@@ -739,7 +771,7 @@ async function convergesOnChanges(world: SetupWorld): Promise<Outcome> {
       ...(isDeepStrictEqual(repository, expectedRepository) ? [] : [`the repository is ${JSON.stringify(repository)}, not ${JSON.stringify(expectedRepository)}`]),
       ...(isDeepStrictEqual(repositoryActions, [{ kind: 'add_repository' }, { kind: 'edit_repository' }]) ? [] : [`the repository actions are ${JSON.stringify(repositoryActions)}`]),
     ],
-    detail: `a renamed person, a repository with no image and another fast test command and Verify provider, and a routine with other gates, last step, and later-reviews setting printed ${JSON.stringify(run.stdout)}; the repository now cites Ada's edit_repository action, the routine kept version 1 and gained version 2 under a second edit_routine action, and the same file again changed nothing`,
+    detail: `a renamed person, a repository with no image and another fast test command, and a routine with other gates, last step, and later-reviews setting printed ${JSON.stringify(run.stdout)}; the repository now cites Ada's edit_repository action, the routine kept version 1 and gained version 2 under a second edit_routine action, and the same file again changed nothing`,
   };
 }
 
@@ -755,6 +787,7 @@ async function refusesBadSettings(world: SetupWorld): Promise<Outcome> {
     { field: 'repositories[0].image', says: 'sha256 digest', repository: { ...sandboxSettings, image: 'registry.example.com/sandbox-job:latest' } },
     { field: 'repositories[0].fastTestCommand', says: 'must not be blank', repository: { ...sandboxSettings, fastTestCommand: '' } },
     { field: 'repositories[0].verifyProvider', says: 'lowercase letters', repository: { ...sandboxSettings, verifyProvider: 'Tests Only' } },
+    { field: 'repositories[0].verifyProvider', says: 'names the Verify provider preview-env, which this engine was not given. Use one of: tests-only', repository: { ...sandboxSettings, verifyProvider: 'preview-env' } },
     { field: 'repositories[0]', says: 'Unrecognized key: "reviewers"', repository: { ...sandboxSettings, reviewers: ['bot'] } },
     { field: 'repositories[0].draftLeaves', says: 'Invalid option', repository: { ...sandboxSettings, draftLeaves: 'never' } },
   ];
@@ -813,7 +846,7 @@ async function dashboardCannotReadSetupLogins(world: SetupWorld): Promise<Outcom
     return {
       problems: [
         ...(run.code === 0 ? [] : [`setup gave ${describeRun(run)}`]),
-        ...(visible.length === 2 ? [] : [`the dashboard role sees ${String(visible.length)} credentials, not 2`]),
+        ...(visible.length === 3 ? [] : [`the dashboard role sees ${String(visible.length)} credentials, not 3`]),
         ...(sealed.startsWith('permission denied') ? [] : [`selecting ciphertext as the dashboard role ${sealed}`]),
       ],
       detail: `the dashboard role lists ${String(visible.length)} set-up credentials, and selecting ciphertext answers: ${sealed}`,
@@ -824,7 +857,13 @@ async function dashboardCannotReadSetupLogins(world: SetupWorld): Promise<Outcom
   }
 }
 
-function setupSpeed(postgres: TestPostgres): Promise<Outcome> {
+const slowRepeatMs = 1500;
+
+const slowStart = `--import=data:text/javascript,await%20new%20Promise(done%3D%3EsetTimeout(done%2C${String(slowRepeatMs)}))`;
+
+const repeatLimit = `a repeat apply takes at most ${String(setupBudget.repeatToFresh)} times as long as a fresh apply, by the median of ${String(setupBudget.runs)} interleaved runs of each`;
+
+function setupSpeed(postgres: TestPostgres, repeatEnv: Readonly<Record<string, string>> = {}): Promise<Outcome> {
   return inSetupWorld(postgres, async repeated => {
     const seeded = await repeated.apply(setupFile);
     const fresh: number[] = [];
@@ -834,37 +873,42 @@ function setupSpeed(postgres: TestPostgres): Promise<Outcome> {
       const run = await inSetupWorld(postgres, world => world.apply(setupFile));
       if (run.stdout !== firstRun) problems.push(`a fresh apply gave ${describeRun(run)}`);
       fresh.push(run.ms);
-      const again = await repeated.apply(setupFile);
+      const again = await repeated.apply(setupFile, { ...repeated.env, ...repeatEnv });
       if (again.stdout !== repeatRun) problems.push(`a repeat apply gave ${describeRun(again)}`);
       repeats.push(again.ms);
     }
     const shown = (values: readonly number[]): string => values.map(ms => ms.toFixed(0)).join(', ');
+    const ratio = median(repeats) / median(fresh);
     return {
-      problems: [
-        ...problems,
-        ...fresh.filter(ms => ms > setupBudget.freshMs).map(ms => `a fresh apply took ${ms.toFixed(0)} ms, over ${String(setupBudget.freshMs)}`),
-        ...repeats.filter(ms => ms > setupBudget.repeatMs).map(ms => `a repeat apply took ${ms.toFixed(0)} ms, over ${String(setupBudget.repeatMs)}`),
-      ],
-      detail: `fresh applies ${shown(fresh)} ms (median ${median(fresh).toFixed(0)}, budget ${String(setupBudget.freshMs)}); repeat applies ${shown(repeats)} ms (median ${median(repeats).toFixed(0)}, budget ${String(setupBudget.repeatMs)}), each timing the whole node process`,
+      problems: [...problems, ...(ratio <= setupBudget.repeatToFresh ? [] : [`the median repeat apply took ${ratio.toFixed(2)} times the median fresh apply, over ${String(setupBudget.repeatToFresh)}`])],
+      detail: `fresh applies ${shown(fresh)} ms (median ${median(fresh).toFixed(0)}); repeat applies ${shown(repeats)} ms (median ${median(repeats).toFixed(0)}); ratio ${ratio.toFixed(2)} against ${String(setupBudget.repeatToFresh)}, each timing the whole node process`,
     };
   });
 }
 
+async function slowRepeatFails(postgres: TestPostgres): Promise<Outcome> {
+  const planted = await setupSpeed(postgres, { NODE_OPTIONS: slowStart });
+  const caught = planted.problems.find(problem => problem.startsWith('the median repeat apply took'));
+  return {
+    problems: caught === undefined ? [`the speed check passed a repeat apply slowed by ${String(slowRepeatMs)} ms: ${planted.detail}`] : [],
+    detail: `${caught ?? ''}; ${planted.detail}`,
+  };
+}
+
 const setupChecks: readonly Entry[] = [
-  { name: 'a first apply adds 1 person, seals 2 logins, adds 1 repository and 1 routine, and a second apply changes nothing', run: inSetup(appliesOnce) },
+  { name: 'a first apply adds 1 person, seals 3 logins, adds 1 repository and 1 routine, and a second apply changes nothing', run: inSetup(appliesOnce) },
   { name: 'pg_dump after setup holds no made-up login, no key, and no github_pat_, ATATT, or eyJ', run: inSetup(dumpHoldsNoSetupSecret) },
   { name: 'a token written inline is refused by field name, and nothing is written', run: inSetup(refusesInline) },
   { name: 'a Codex login with a refresh token is refused unless the file marks it made for AutoWorker', run: inSetup(refreshNeedsSetupMark) },
   { name: 'a changed login is sealed again, and its replace_credential action records who and when', run: inSetup(replacementRecorded) },
+  { name: "the same file applied again keeps a Codex login the engine refreshed since, and --replace-logins stores the file's login anyway", run: inSetup(reapplyKeepsRefreshed) },
   { name: 'a changed person and repository are updated, a changed routine saves a new version beside the old one, and a repeat changes nothing', run: inSetup(convergesOnChanges) },
-  { name: 'a Jira search without JQL, a tagged image, a blank command or status, and an unknown repository field are refused by field name, and nothing is written', run: inSetup(refusesBadSettings) },
+  { name: 'a Jira search without JQL, a tagged image, a blank command or status, an unknown Verify provider, and an unknown repository field are refused by field name, and nothing is written', run: inSetup(refusesBadSettings) },
   { name: 'a run-as person the file does not list is refused by name, and nothing is written', run: inSetup(refusesUnknownRunAs) },
   { name: 'two people with one Jira account id are refused by Postgres, and the people section rolls back', run: inSetup(duplicateAccountRollsBack) },
   { name: 'after setup, the dashboard role cannot select a sealed column', run: inSetup(dashboardCannotReadSetupLogins) },
-  {
-    name: `a fresh apply takes at most ${String(setupBudget.freshMs)} ms and a repeat apply at most ${String(setupBudget.repeatMs)} ms, over ${String(setupBudget.runs)} of each`,
-    run: setupSpeed,
-  },
+  { name: repeatLimit, run: postgres => setupSpeed(postgres) },
+  { name: `the speed check fails when each repeat apply starts ${String(slowRepeatMs)} ms late`, run: slowRepeatFails },
 ];
 
 async function settle(name: string, work: () => Promise<Outcome>): Promise<Check> {
@@ -1023,6 +1067,10 @@ async function engineChecksGithub(postgres: TestPostgres): Promise<readonly Chec
     const stored = await replace(db, key, { action: randomUUID(), by: ada, at: new Date(), owner: ada, secret: { connector: 'github', token: fakeGithubToken() } });
     if ('refused' in stored) throw new Error(stored.reason);
     const env = { ...process.env, DATABASE_URL: scratch.url, CREDENTIAL_KEY: keyText, CREDENTIAL_KEY_VERSION: '1', CHECKS_EVERY_MS: '500', GITHUB_API_URL: github.url };
+    const leftover = await mkdtemp(join(tmpdir(), codexHomePrefix));
+    await writeFile(join(leftover, 'auth.json'), 'a login a crashed check left behind');
+    const anHourAgo = new Date(Date.now() - 3_600_000);
+    await utimes(leftover, anHourAgo, anHourAgo);
     const child = spawn(process.execPath, [engineMain], { env, stdio: ['ignore', 'pipe', 'pipe'] });
     let said = '';
     child.stdout.on('data', (chunk: Buffer) => {
@@ -1040,6 +1088,11 @@ async function engineChecksGithub(postgres: TestPostgres): Promise<readonly Chec
     while (!said.includes('checks: checked the github credential') && performance.now() < deadline) await new Promise(done => setTimeout(done, 50));
     child.kill('SIGTERM');
     const code = await exited;
+    const leftoverGone = await access(leftover).then(
+      () => false,
+      () => true,
+    );
+    await rm(leftover, { recursive: true, force: true });
     const row = await db.selectFrom('credential').select(['state', 'checked_at', 'expires_at']).where('id', '=', stored.credential).executeTakeFirstOrThrow();
     const checks = await db.selectFrom('credential_check').select(['outcome', 'checker']).where('credential_id', '=', stored.credential).execute();
     const short = spawnSync(process.execPath, [engineMain], { env: { ...env, CREDENTIAL_KEY: randomBytes(31).toString('base64') }, encoding: 'utf8', timeout: 20_000 });
@@ -1047,17 +1100,49 @@ async function engineChecksGithub(postgres: TestPostgres): Promise<readonly Chec
     const recorded = { state: row.state, checked: row.checked_at !== null, expiresAt: row.expires_at?.toISOString() ?? null, outcomes: checks.map(check => check.outcome) };
     const ranName = 'the engine process checks a stored GitHub token on its checks loop, records valid with the expiry header, and exits 0 on SIGTERM';
     const shortName = 'the engine refuses to start with a 31-byte CREDENTIAL_KEY and names the variable';
+    const leftoverName = 'when its checks loop starts, the engine removes a Codex home an hour old that a crashed check left behind';
     return [
       code === 0 && isDeepStrictEqual(recorded, { state: 'valid', checked: true, expiresAt: expected, outcomes: ['valid'] })
         ? pass(ranName, `${JSON.stringify(recorded)}; checker ${checks[0]?.checker ?? 'none'}`)
         : fail(ranName, `exit ${String(code)}, recorded ${JSON.stringify(recorded)}; the engine said: ${said.trim().replaceAll('\n', ' | ')}`),
       short.status === 1 && short.stderr.includes('CREDENTIAL_KEY') ? pass(shortName, short.stderr.trim()) : fail(shortName, `exit ${String(short.status)}: ${short.stdout}${short.stderr}`),
+      leftoverGone && said.includes(`checks: removed ${leftover}`)
+        ? pass(leftoverName, lineWith(said, 'checks: removed'))
+        : fail(leftoverName, `${leftover} ${leftoverGone ? 'is gone' : 'is still there'}; the engine said: ${said.trim().replaceAll('\n', ' | ')}`),
     ];
   } finally {
     await github.close();
     await db.destroy();
     await scratch.drop();
   }
+}
+
+const refusedImage = `registry.example.com/job@sha256:${'b'.repeat(64)}`;
+
+const refusals: readonly { readonly setting: string; readonly because: string; readonly env: Readonly<Record<string, string>> }[] = [
+  { setting: 'CREDENTIAL_KEY', because: 'JOB_IMAGE is set without it', env: { JOB_IMAGE: refusedImage, JOB_ENGINE_URL: 'http://engine.example.com/' } },
+  { setting: 'JOB_ENGINE_URL', because: 'JOB_IMAGE is set without it', env: { JOB_IMAGE: refusedImage, CREDENTIAL_KEY: randomBytes(32).toString('base64'), CREDENTIAL_KEY_VERSION: '1' } },
+  { setting: 'CREDENTIAL_KEY', because: 'CREDENTIAL_KEY_VERSION is set without it', env: { CREDENTIAL_KEY_VERSION: '1' } },
+  { setting: 'ATTEMPT_START_LEASE_MS', because: 'the start lease of 300000 ms is not above the environment start deadline plus the Codex check timeout', env: { ATTEMPT_START_LEASE_MS: '300000' } },
+];
+
+const unrelatedTo = (names: readonly string[]): NodeJS.ProcessEnv => Object.fromEntries(Object.entries(process.env).filter(([name]) => !names.some(prefix => name.startsWith(prefix))));
+
+function engineRefusals(): readonly Check[] {
+  const quiet = unrelatedTo(['CREDENTIAL_', 'JOB_', 'ATTEMPT_', 'ENVIRONMENT_', 'CHECK_', 'DATABASE_']);
+  const closedUrl = 'postgres://autoworker:not-a-real-password@127.0.0.1:1/autoworker';
+  const refused = refusals.map(({ setting, because, env }) => {
+    const run = spawnSync(process.execPath, [engineMain], { env: { ...quiet, DATABASE_URL: closedUrl, ...env }, encoding: 'utf8', timeout: 20_000 });
+    const name = `the engine refuses to start and names ${setting} when ${because}`;
+    const secrets = Object.values(env).filter(value => value.length > 20);
+    return run.status === 1 && run.stderr.includes(`at ${setting}`) && !secrets.some(secret => run.stderr.includes(secret))
+      ? pass(name, run.stderr.trim().replaceAll('\n', ' '))
+      : fail(name, `exit ${String(run.status)}: ${run.stdout}${run.stderr}`);
+  });
+  const closed = spawnSync(process.execPath, [engineMain], { env: { ...quiet, DATABASE_URL: closedUrl, DATABASE_CONNECT_TIMEOUT_MS: '3000' }, encoding: 'utf8', timeout: 30_000 });
+  const closedName = "with Postgres unreachable, the engine exits 1 with one line naming DATABASE_URL's host and no stack trace or password";
+  const readable = closed.status === 1 && closed.stderr.includes('127.0.0.1:1') && closed.stderr.includes('DATABASE_URL') && !/^s+at /m.test(closed.stderr) && !closed.stderr.includes('not-a-real-password');
+  return [...refused, readable ? pass(closedName, closed.stderr.trim()) : fail(closedName, `exit ${String(closed.status)}: ${closed.stdout}${closed.stderr}`)];
 }
 
 function parseSimulationOptions(args: readonly string[]): SimulationOptions {
@@ -1071,8 +1156,8 @@ export const scenarios: readonly Scenario[] = [
   ...liveScenarios,
   {
     name: 'engine-checks',
-    summary: "starts the engine's entry point with a sealing key against Postgres and a fake GitHub API, and waits for its checks loop to record a stored token valid",
-    run: () => withPostgres(engineChecksGithub),
+    summary: "starts the engine's entry point with a sealing key against Postgres and a fake GitHub API, waits for its checks loop to record a stored token valid and remove a leftover Codex home, and proves it refuses settings that do not fit together and an unreachable Postgres by name",
+    run: async () => [...engineRefusals(), ...(await withPostgres(engineChecksGithub))],
   },
   {
     name: 'credentials-sim',
@@ -1094,7 +1179,7 @@ export const scenarios: readonly Scenario[] = [
   {
     name: 'setup',
     summary:
-      'runs node services/engine/setup.ts as a child process against fresh Postgres databases with made-up logins, and proves it applies a file once, refuses inline tokens and unmarked refreshable Codex logins, records each replacement, never prints or stores a secret in the clear, and stays within its time budget',
+      'runs node services/engine/setup.ts as a child process against fresh Postgres databases with made-up logins, and proves it applies a file once, refuses inline tokens and unmarked refreshable Codex logins, keeps a login the engine refreshed, records each replacement, never prints or stores a secret in the clear, and that a repeat apply takes at most 1.5 times as long as a fresh one',
     run: () => withPostgres(postgres => runEntries(postgres, setupChecks)),
   },
 ];
