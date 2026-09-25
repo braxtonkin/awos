@@ -4,8 +4,9 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { fail, pass, type Check, type Scenario } from './check.ts';
+import { plantAnchor, plantedFixture, plantIds, plants } from './screens/plants.ts';
 
-type Tool = 'tsc' | 'node' | 'eslint' | 'depcruise' | 'check' | 'shape' | 'sql-comments' | 'model-names' | 'step-names' | 'strict-schemas' | 'ci-plan' | 'db-types' | 'models' | 'migration-versions';
+type Tool = 'tsc' | 'node' | 'eslint' | 'depcruise' | 'check' | 'shape' | 'sql-comments' | 'model-names' | 'step-names' | 'strict-schemas' | 'ci-plan' | 'db-types' | 'models' | 'migration-versions' | 'screen-gates';
 
 type Edit = { readonly from: string; readonly to: string };
 
@@ -1293,6 +1294,27 @@ const violations: readonly Violation[] = [
   },
 ];
 
+const screenFixture = (name: string): string => `tools/verify/screens/fixtures/${name}.html`;
+
+const screenGateCases: readonly Violation[] = [
+  ...plantIds.map(
+    (id): Violation => ({
+      name: `screen-gates fails ${id} on a copy of ${plantedFixture} that holds its plant`,
+      file: screenFixture(plantedFixture),
+      edit: { from: plantAnchor, to: `${plantAnchor}${plants[id]}` },
+      tool: 'screen-gates',
+      expect: [`FAIL  ${plantedFixture} ${id}`],
+    }),
+  ),
+  {
+    name: 'screen-gates voids the run when the busy control stops failing every clutter gate',
+    file: screenFixture('task-a-live'),
+    edit: { from: '</style>', to: 'body > * { display: none; }</style>' },
+    tool: 'screen-gates',
+    expect: ['FAIL  control task-a-live fails at least one clutter gate'],
+  },
+];
+
 const plantedModel: Violation = {
   name: 'npm run verify -- models runs a failing model scenario from a new feature folder',
   file: 'features/planted/verify.ts',
@@ -1594,6 +1616,10 @@ const tools: Record<
     command: () => ['npm', 'run', '--silent', 'migration-versions'],
     caught: startsALine,
   },
+  'screen-gates': {
+    command: () => ['npm', 'run', '--silent', 'verify', '--', 'screen-gates', '--repeat', '1'],
+    caught: startsALine,
+  },
   models: {
     command: () => ['npm', 'run', '--silent', 'verify', '--', 'models'],
     caught: (outcome, _file, code) => outcome.output.includes(code),
@@ -1669,13 +1695,13 @@ export const guardrails: Scenario = {
   summary: 'plants each violation a check must reject and each line it must accept, and proves both',
   run: async () => [
     ...(await withCopy(async copy => {
-      const checks: Check[] = (['tsc', 'eslint', 'depcruise', 'shape', 'sql-comments', 'migration-versions', 'model-names', 'step-names', 'strict-schemas', 'ci-plan', 'db-types'] as const).map(tool => {
+      const checks: Check[] = (['tsc', 'eslint', 'depcruise', 'shape', 'sql-comments', 'migration-versions', 'model-names', 'step-names', 'strict-schemas', 'ci-plan', 'db-types', 'screen-gates'] as const).map(tool => {
         const clean = run(tool, copy, '.');
         const name = `the unplanted copy passes ${tool}`;
         const problem = clean.status === 0 ? tools[tool].unclean?.(clean) : (tools[tool].summary ?? firstLines)(clean);
         return problem === undefined ? pass(name, '') : fail(name, problem);
       });
-      for (const violation of violations) checks.push(await reject(copy, violation));
+      for (const violation of [...violations, ...screenGateCases]) checks.push(await reject(copy, violation));
       for (const allowance of allowances) checks.push(await accept(copy, allowance));
       return checks;
     })),

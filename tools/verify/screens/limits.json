@@ -1,0 +1,30 @@
+{
+  "width": 1440,
+  "fold": 900,
+  "reviewers": 2,
+  "rules": {
+    "greyChroma": 14,
+    "greenHue": [75, 170],
+    "labelGap": 16,
+    "minRegion": 16,
+    "spacingScale": [0, 2, 4, 6, 8, 12, 16, 20, 24, 32, 40, 48, 64],
+    "typeScale": [11, 12, 13, 14, 15, 17, 20, 24],
+    "maxPrimary": 1,
+    "maxButtonWords": 4,
+    "internalTerms": ["attempt id", "lease", "outbox", "verdict", "enum", "stage machine"],
+    "properNouns": ["AutoWorker", "Jira", "GitHub", "Codex", "Webex", "Slack", "Kubernetes", "Postgres", "Docker", "Specify", "Implement", "Verify", "Land"],
+    "contrast": {
+      "body": 4.5,
+      "large": 3,
+      "icon": 3
+    }
+  },
+  "limits": {
+    "boxes": 20,
+    "fontSizes": 7,
+    "fontWeights": 3,
+    "colors": 3,
+    "controls": 20,
+    "words": 244
+  }
+}

@@ -29,3 +29,6 @@ desktop.ini
 
 # Local CI results
 /ci-local/
+
+# Screenshots, videos, and review packets from the verify tool
+.shots/

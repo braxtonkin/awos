@@ -8,6 +8,8 @@ import { doctor } from './doctor.ts';
 import { guardrails } from './guardrails.ts';
 import { kind } from './kind.ts';
 import { migrations } from './migrations.ts';
+import { screenReview } from './screens/packet.ts';
+import { screen, screenGates, screens, type Screen } from './screens/screens.ts';
 
 const modelSuffix = '-model';
 
@@ -30,10 +32,13 @@ const exists = (path: string): Promise<boolean> =>
     () => false,
   );
 
-async function featureScenarios(root: string): Promise<readonly Scenario[]> {
+type Declared = { readonly scenarios: readonly Scenario[]; readonly screens: readonly Screen[] };
+
+async function featureModules(root: string): Promise<Declared> {
   const features = join(root, 'features');
-  if (!(await exists(features))) return [];
+  if (!(await exists(features))) return { scenarios: [], screens: [] };
   const found: Scenario[] = [];
+  const declared: Screen[] = [];
   for (const folder of await readdir(features, { withFileTypes: true })) {
     const file = join(features, folder.name, 'verify.ts');
     if (!folder.isDirectory() || !(await exists(file))) continue;
@@ -48,8 +53,13 @@ async function featureScenarios(root: string): Promise<readonly Scenario[]> {
       throw new Error(`${file} must export scenarios, a list of verify scenarios`);
     }
     found.push(...loaded.scenarios);
+    if ('screens' in loaded) {
+      const parsed = screen.array().safeParse(loaded.screens);
+      if (!parsed.success) throw new Error(`${file} must export screens, a list of screens as tools/verify/screens/screens.ts declares them: ${parsed.error.message}`);
+      declared.push(...parsed.data);
+    }
   }
-  return found;
+  return { scenarios: found, screens: declared };
 }
 
 export async function runScenario(scenario: Scenario, args: readonly string[]): Promise<readonly Line[]> {
@@ -116,9 +126,9 @@ const sims = (features: readonly Scenario[]): Scenario => ({
 });
 
 export async function loadScenarios(root: string): Promise<ReadonlyMap<string, Scenario>> {
-  const features = await featureScenarios(root);
+  const { scenarios: features, screens: declared } = await featureModules(root);
   const registry = new Map<string, Scenario>();
-  for (const scenario of [guardrails, doctor, migrations, kind, accounts, models(features), sims(features), ...features]) {
+  for (const scenario of [guardrails, doctor, migrations, kind, accounts, screens(declared), screenGates, screenReview, models(features), sims(features), ...features]) {
     if (registry.has(scenario.name)) throw new Error(`two scenarios are named ${scenario.name}`);
     registry.set(scenario.name, scenario);
   }

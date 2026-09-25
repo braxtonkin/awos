@@ -1,0 +1,43 @@
+{
+  "ownerSays": "Finding the work I want should be obvious and not messy.",
+  "groups": {
+    "agent": [
+      { "id": "agent-now", "question": "What is the agent doing right now, and why?" },
+      { "id": "agent-heard", "question": "Did the agent get your last message, and what did it do about it?" },
+      { "id": "agent-stop", "question": "How do you stop it, and what will stopping keep?" },
+      { "id": "agent-failed", "question": "Why did this task fail, in one sentence?" },
+      { "id": "agent-tried", "question": "What did the agent try before it failed?" },
+      { "id": "agent-differently", "question": "How do you tell the agent what to do differently, and where do you see that it heard you?" }
+    ],
+    "overview": [
+      { "id": "overview-approval", "question": "Which task needs your approval?" },
+      { "id": "overview-longest", "question": "Which task has waited longest for a person, and what does it need?" },
+      { "id": "overview-running", "question": "Which tasks are running right now, and what is each one doing?" }
+    ],
+    "task": [
+      { "id": "task-now", "question": "What is this task doing right now, and does it need you?" },
+      { "id": "task-next", "question": "What should you do next on this task, and where do you do it?" },
+      { "id": "task-why", "question": "Why did the last attempt fail, and where is the evidence?" }
+    ],
+    "routines": [
+      { "id": "routine-runs-as", "question": "Whose logins does this routine's work run as?" },
+      { "id": "routine-schedule", "question": "How often does this routine look for new tickets, and when did it last look?" },
+      { "id": "routine-gates", "question": "At which stages does this routine stop for a person's approval?" }
+    ],
+    "settings": [
+      { "id": "settings-broken", "question": "Whose login has stopped working, and how do you fix it?" },
+      { "id": "settings-expiring", "question": "Which token expires next, and whose is it?" },
+      { "id": "settings-branch", "question": "Which branch do this repository's changes land on, and which checks may stay red?" }
+    ],
+    "chrome": [
+      { "id": "chrome-acting", "question": "Who are you acting as right now?" },
+      { "id": "chrome-switch", "question": "How do you switch to acting as Priya Raman?" },
+      { "id": "chrome-back", "question": "How do you get back to the tasks that need you?" }
+    ],
+    "controls": [
+      { "id": "controls-now", "question": "What is this task doing right now, and does it need you?" },
+      { "id": "controls-next", "question": "What should you do next on this task, and where do you do it?" },
+      { "id": "controls-why", "question": "Why did the last attempt fail, and where is the evidence?" }
+    ]
+  }
+}
