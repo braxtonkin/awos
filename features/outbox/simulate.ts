@@ -83,7 +83,7 @@ export const profiles: Readonly<Record<ProfileName, Profile>> = {
     clockSkewMs: 0,
     weights: { ...calm, claimRow: 5, crash: 0.3, race: 2 },
   },
-  'always-fails': { engines: 2, performersPerEngine: 1, tasks: 3, fail: 1, landsLater: 0, refuse: 0, rollback: 0.1, failing: true, stepMs: 400, clockSkewMs: 0, weights: { ...calm, crash: 0.3, stop: 0 } },
+  'always-fails': { engines: 2, performersPerEngine: 1, tasks: 3, fail: 1, landsLater: 0, refuse: 0, rollback: 0.1, failing: true, stepMs: 400, clockSkewMs: 0, weights: { ...calm, crash: 0.3, approve: 0.2, stop: 0 } },
   skewed: { engines: 2, performersPerEngine: 1, tasks: 4, fail: 0.1, landsLater: 0.5, refuse: 0.02, rollback: 0.1, failing: false, stepMs: 400, clockSkewMs: 6_000, weights: { ...calm, expire: 3 } },
 };
 
