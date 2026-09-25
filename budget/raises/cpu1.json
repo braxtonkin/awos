@@ -1,0 +1,8 @@
+{
+  "why": "CPU1 caps test Postgres at the verify container's cores and documents it in the Queries paved path",
+  "raise": {
+    "characters/docs": 169,
+    "characters/tools": 764,
+    "lines/tools": 20
+  }
+}
