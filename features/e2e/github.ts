@@ -81,10 +81,15 @@ export type GitHubSettings = {
   readonly pushEnvironment: Readonly<Record<string, string>>;
 };
 
-export function githubFromEnvironment(env: NodeJS.ProcessEnv, repository: string): GitHub {
+export function githubTokenFromEnvironment(env: NodeJS.ProcessEnv): string {
   const keys = GitHubKeys.safeParse(env);
   if (!keys.success) throw new Error('GITHUB_TOKEN is not usable');
-  const token = keys.data.GITHUB_TOKEN;
+  return keys.data.GITHUB_TOKEN;
+}
+
+export const githubFromEnvironment = (env: NodeJS.ProcessEnv, repository: string): GitHub => githubWithToken(githubTokenFromEnvironment(env), repository);
+
+export function githubWithToken(token: string, repository: string): GitHub {
   return githubAt({
     apiUrl: api,
     token,

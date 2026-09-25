@@ -313,7 +313,7 @@ export async function runEndToEnd(world: World, options: Options, out: (line: st
         ...sideChecks,
         ...driverChecks,
         ...inspected,
-        pass('report posted', reportLink),
+        info('report posted', 'passed', reportLink),
         ...(cleanAt === undefined ? [] : [reportReadBack(posted, runs, result.reached)]),
       ];
       return { branch, ticket, checks, reportLink, toCleanMs, steps: runs };

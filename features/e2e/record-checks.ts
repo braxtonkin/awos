@@ -15,7 +15,7 @@ const agentSteps = new Set<string>(['specify', 'implement', 'verify']);
 
 const check = (name: string, ok: boolean, detail: string): Check => (ok ? pass(name, detail) : fail(name, detail));
 
-async function models(db: Database, attempt: string): Promise<readonly string[]> {
+export async function threadStartModels(db: Database, attempt: string): Promise<readonly string[]> {
   const rows = await db
     .selectFrom('attempt_event')
     .select(sql<string | null>`body -> 'result' ->> 'model'`.as('model'))
@@ -48,7 +48,7 @@ export async function recordChecks(db: Database, ticket: string, runAs: string, 
   const blind = prompts.filter(row => !(row.input ?? '').includes(description.trim())).map(row => row.id);
   checks.push(check("record: every agent prompt holds the ticket's description", prompts.length > 0 && blind.length === 0, blind.length === 0 ? `${String(prompts.length)} prompts` : `attempts ${blind.join(', ')} lack it`));
   const seen: string[] = [];
-  for (const attempt of attempts.filter(entry => agentSteps.has(entry.step))) seen.push(...(await models(db, attempt.id)).map(model => `${attempt.id} ${model}`));
+  for (const attempt of attempts.filter(entry => agentSteps.has(entry.step))) seen.push(...(await threadStartModels(db, attempt.id)).map(model => `${attempt.id} ${model}`));
   const agentAttempts = attempts.filter(entry => agentSteps.has(entry.step)).length;
   checks.push(check(`record: every agent attempt ran on ${agentModel}`, seen.length === agentAttempts && seen.every(entry => entry.endsWith(` ${agentModel}`)), seen.join(', ') || 'no thread/start answer stored'));
   const environments = await db
