@@ -97,7 +97,7 @@ const textBlockStartsWithBody: Edit = {
 
 const bodyFirst = `${codeChange} specify $.properties.blocks.items.anyOf[0] starts with body`;
 
-const plantedStep = "name: 'planted', reads: [], runBy: 'agent', prompt: 'Planted.', startsEnvironment: false, needsRepository: true, canEnd: true, owes: [], output: review, requires: ['text'], failures: { fail: { kind: 'fail' } }";
+const plantedStep = "name: 'planted', reads: [], runBy: 'agent', prompt: 'Planted.', startsEnvironment: false, afterTurn: 'push', needsRepository: true, canEnd: true, owes: [], output: review, requires: ['text'], failures: { fail: { kind: 'fail' } }";
 
 const noBrandAssertions = 'autoworker/no-brand-assertions';
 

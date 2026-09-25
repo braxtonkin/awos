@@ -33,7 +33,11 @@ const builtBySteps = new WeakSet<object>();
 
 type Judge = ((output: unknown) => StepVerdict) & { readonly [judged]: true };
 
-export type RunBy = { readonly runBy: 'agent'; readonly prompt: string; readonly startsEnvironment: boolean } | { readonly runBy: 'engine' };
+export type AfterTurn = 'push' | 'reproduce';
+
+export type JobAfterTurn = { readonly kind: 'push' } | { readonly kind: 'reproduce'; readonly base: string; readonly setup: string | null };
+
+export type RunBy = { readonly runBy: 'agent'; readonly prompt: string; readonly startsEnvironment: boolean; readonly afterTurn: AfterTurn } | { readonly runBy: 'engine' };
 
 type Common<K extends string> = {
   readonly name: string;

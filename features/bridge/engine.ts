@@ -129,6 +129,8 @@ function parseLine(line: Line): Parsed {
   switch (line.kind) {
     case 'pushed':
       return { method: null, itemId: null, fragment: false, body: { commit: line.commit, branch: line.branch }, clientId: null, responseTo: null };
+    case 'reproduced':
+      return { method: null, itemId: null, fragment: false, body: line.reproduction, clientId: null, responseTo: null };
     case 'end':
       return { method: null, itemId: null, fragment: false, body: {}, clientId: null, responseTo: null };
     case 'app': {

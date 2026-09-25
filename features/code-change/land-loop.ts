@@ -3,11 +3,11 @@ import { z } from 'zod';
 import { actionKinds, type Enqueue, type Owe } from '../../shared/actions.ts';
 import type { Database } from '../../shared/db/client.ts';
 import type { Clock, Loop } from '../../shared/loop.ts';
-import { review } from '../../shared/review.ts';
 import type { Transacting } from '../../shared/transaction.ts';
 import type { Unasked } from '../../shared/workflow.ts';
 import { guarded, landPass, landStep, type AtLand, type Follow, type LandOutput, type LandStore, type ReviewStep } from './land.ts';
 import type { ReadMergeState } from '../../shared/merge-state.ts';
+import { evidenceText } from '../../shared/reproduction.ts';
 import { workflow } from './workflow.ts';
 
 export type Standing = { readonly task: string; readonly actsAs: string; readonly state: string; readonly waitingOn: string | null };
@@ -43,13 +43,7 @@ const refusedRow = z.object({ row: z.string(), head: z.string().nullable() }).nu
 
 const verifyStep: (typeof workflow)['steps'][number]['name'] = 'verify';
 
-function evidenceOf(output: unknown): string {
-  const parsed = review.safeParse(output);
-  if (!parsed.success) return noEvidence;
-  const texts = parsed.data.blocks.flatMap(block => (block.kind === 'text' ? [block.body] : []));
-  const evidence = [parsed.data.summary, ...texts].filter(text => text.trim() !== '').join('\n\n');
-  return evidence === '' ? noEvidence : evidence;
-}
+const evidenceOf = (body: unknown): string => evidenceText(body) ?? noEvidence;
 
 async function atLand(db: Database, only: string | null): Promise<readonly AtLand[]> {
   const rows = await db
@@ -120,7 +114,8 @@ async function atLand(db: Database, only: string | null): Promise<readonly AtLan
         .as('opened'),
       eb
         .selectFrom('attempt as verified')
-        .select('verified.output')
+        .innerJoin('evidence', 'evidence.attempt_id', 'verified.id')
+        .select('evidence.body')
         .whereRef('verified.task_id', '=', 'task.id')
         .where('verified.verdict', '=', 'pass')
         .where('verified.step', '=', verifyStep)

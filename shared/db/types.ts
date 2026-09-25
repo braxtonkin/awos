@@ -3,7 +3,7 @@ import type { IPostgresInterval } from "postgres-interval";
 
 export type AttemptCommandKind = "turn.start" | "turn.steer" | "turn.stop";
 
-export type AttemptEventKind = "app" | "end" | "pushed";
+export type AttemptEventKind = "app" | "end" | "pushed" | "reproduced";
 
 export type CheckOutcome = "invalid" | "lost" | "unknown" | "valid";
 
@@ -187,6 +187,7 @@ export interface Repository {
   ignored_reviewers: Generated<string[]>;
   job_image: string | null;
   saved_by: string;
+  setup_command: string | null;
   verify_provider: Generated<string>;
 }
 

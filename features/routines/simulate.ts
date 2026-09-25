@@ -147,6 +147,7 @@ export const post: Workflow = {
       runBy: 'agent',
       prompt: 'Post the update.',
       startsEnvironment: false,
+      afterTurn: 'push',
       needsRepository: false,
       canEnd: true,
       owes: [],

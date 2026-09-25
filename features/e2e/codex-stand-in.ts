@@ -137,45 +137,13 @@ async function implement(work: Implementing): Promise<Review | undefined> {
   return review(`The stand-in added ${work.entry.name} in ${work.entry.file}.`, `Added \`${work.entry.name}\` in \`${work.entry.file}\`, exported by name, and checked it against the ticket's acceptance criteria.`);
 }
 
-type VerifyPlan = { readonly script: string; readonly show: string; readonly base: string; readonly baseFolder: string; readonly before: string; readonly after: string };
-
-function verifyPlan(prompt: string): VerifyPlan | undefined {
-  const script = /reproduction script at `([^`]+)`/.exec(prompt)?.[1];
-  const [show, before, after] = [...prompt.matchAll(/Run exactly `([^`]+)`/g)].map(found => found[1]);
-  const baseFolder = /Run `git worktree add --detach (\S+) <base commit>`/.exec(prompt)?.[1];
-  const base = /^Base commit: ([0-9a-f]{7,64})$/m.exec(prompt)?.[1];
-  if (script === undefined || show === undefined || before === undefined || after === undefined || baseFolder === undefined || base === undefined) return undefined;
-  return { script, show, base, baseFolder, before, after };
-}
-
-const behaviorOf = (before: Ran, after: Ran): Behavior => {
-  if (before.exitCode === 0) return null;
-  return after.exitCode === 0 ? 'fixed' : 'still_wrong';
-};
-
-const ranText = (what: string, ran: Ran): string => `${what}: \`${ran.command}\` exited ${String(ran.exitCode)}.\n\n\`\`\`\n${ran.output.trim()}\n\`\`\``;
-
 async function verify(work: Implementing, prompt: string): Promise<Review | undefined> {
-  const plan = verifyPlan(prompt);
-  if (plan === undefined) return { ...review('The Verify prompt did not name the script, the three runs, and the base commit.', 'The stand-in could not read its instructions.', 'blocked'), behavior: null };
-  const script = reproductionScript(work.entry, work.solution);
-  await write(plan.script, script);
-  const shown = await run(plan.show);
-  if (existsSync(plan.baseFolder)) await run(`rm -rf ${plan.baseFolder} && git worktree prune`);
-  const worktree = await run(`git worktree add --detach ${plan.baseFolder} ${plan.base}`);
+  const script = /reproduction script at `([^`]+)`/.exec(prompt)?.[1];
+  if (script === undefined) return { ...review('The Verify prompt did not name the script.', 'The stand-in could not read its instructions.', 'blocked'), behavior: null };
+  await write(script, reproductionScript(work.entry, work.solution));
+  const tried = await run(`sh ${script}`);
   if (stopped()) return undefined;
-  if (worktree.exitCode !== 0) return { ...review('The stand-in could not check out the base commit.', ranText('Checking out the base commit', worktree)), behavior: null };
-  const before = await run(plan.before);
-  const after = await run(plan.after);
-  if (stopped()) return undefined;
-  const behavior = behaviorOf(before, after);
-  const body = [`Reproduction script:\n\n\`\`\`sh\n${shown.output.trim()}\n\`\`\``, ranText('On the base commit', before), ranText('On the change', after)].join('\n\n');
-  const summaries = {
-    fixed: `${work.entry.name} fails on the base commit and passes on the change.`,
-    still_wrong: `${work.entry.name} still fails on the change.`,
-    none: `The reproduction script already passes on the base commit.`,
-  } as const;
-  return { ...review(summaries[behavior ?? 'none'], body), behavior };
+  return { ...review(`The stand-in wrote a script that checks ${work.entry.name}.`, `The script imports \`${work.entry.name}\` from \`${work.entry.file}\` and checks the ticket's examples. Here it exited ${String(tried.exitCode)}.`), behavior: null };
 }
 
 type Step = 'specify' | 'implement' | 'verify' | 'other';

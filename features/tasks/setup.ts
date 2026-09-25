@@ -37,6 +37,7 @@ const repositorySettings = z.strictObject({
   ...repositoryFields,
   image: imageByDigest.optional(),
   fastTestCommand: words.optional(),
+  setupCommand: words.optional(),
   verifyProvider: slug.default('tests-only'),
   ignorableChecks: z.array(words).default([]),
   draftLeaves: z.enum(['when-green', 'at-once']).default('when-green'),
@@ -207,13 +208,14 @@ export async function applyPeople<L>(db: Database, file: SetupFile<L>): Promise<
   return { people, teamAccounts };
 }
 
-const settingColumns = ['job_image', 'fast_test_command', 'verify_provider', 'ignorable_checks', 'draft_leaves', 'ignored_reviewers'] as const;
+const settingColumns = ['job_image', 'fast_test_command', 'setup_command', 'verify_provider', 'ignorable_checks', 'draft_leaves', 'ignored_reviewers'] as const;
 
 type SettingColumns = { readonly [Column in (typeof settingColumns)[number]]: Selectable<RepositoryRow>[Column] };
 
 const settingsOf = (planned: RepositorySettings): SettingColumns => ({
   job_image: planned.image ?? null,
   fast_test_command: planned.fastTestCommand ?? null,
+  setup_command: planned.setupCommand ?? null,
   verify_provider: planned.verifyProvider,
   ignorable_checks: [...planned.ignorableChecks],
   draft_leaves: planned.draftLeaves,

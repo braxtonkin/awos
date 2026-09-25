@@ -257,6 +257,25 @@ Rejected options:
 - **Record the change working, after only.** It takes one run instead of two, but it can't prove the bug existed or that the script would have caught it.
 - **A test in CI only, with no live run.** It repeats for free, but bugs that show only in a live environment slip past it.
 
+Reopened and refined 25 Sep 2026. The rule stays: the script fails on the base commit, passes on the change, and the verdict comes from trusted records. What changed is who runs the script. The agent only writes it, at `/tmp/autoworker-reproduce.sh`. After the turn, the Job's own code checks out the base commit and the change, each fresh, runs the repository's setup command and then the script in each, and posts both exit codes to the engine as one `reproduced` event. The engine settles the behavior from that event alone. Fixed means the base run failed and the change run passed, still wrong means the change run failed, and anything else, such as a base run that passes, a failed checkout or setup, or a run out of time, means Verify could not check it. A Verify Job pushes nothing.
+
+The script is the agent's code, so it runs as a third user, `reproduce`, not as `codex` and never as the bridge. It gets a scrubbed environment with its own home and temporary folder, a time limit per run, and a limit on kept output. It can read neither the bridge's environment nor its git folder, nor the Codex login in the `codex` home. The Job kills every `codex` and `reproduce` process before and between the runs, and each run gets a new folder that only `reproduce` can write, so nothing the agent left behind and nothing the first run did reaches the second.
+
+The evidence came from the old mechanism failing and a prototype of the new one, both on the local world with Codex on gpt-6-luna:
+
+- **Before, at 2445052.** The engine matched the agent's own shell commands word for word. 2 of 4 entries reached clean. On clamp, Verify ran the change in its workspace, where the dependencies weren't installed, and the run exited 127. On slugify, Verify ended `environment_fail` 4 times in a row, at 94k to 174k input tokens each, while every reply said the script failed on the base and passed on the change. The matcher failed, not the agent.
+- **An audit of the same mechanism** found that a missing base worktree read as a reproduction, because `cd` failed with a non-zero exit (F1), that the script and the workspace could change between the two runs, and Verify's edits were pushed to the attempt branch (F2), that an Implement push with no net change passed (F3), and that the pull request body held the agent's prose instead of the recorded evidence, and a later Verify never refreshed it (F4).
+- **After, with the Job running the script.** Verify passed on all 4 entries on its first attempt, with the script failing on the base commit and passing on the change each time. titleCase, slugify, and clamp reached clean. chunk merged, and missed clean only because its Verify transcript held a reasoning item that Codex started and never completed, which the replay check refuses, outside Verify's evidence. Verify took 60k to 94k input tokens where it had taken up to 174k.
+
+With the same change, Implement's no-change rule compares trees instead of commit ids (F3), and each passing Verify owes the pull request the engine's rendered evidence, which replaces any earlier evidence in its body (F4). A repository's new `setupCommand` installs what a fresh checkout needs, such as `npm ci`.
+
+What it doesn't close: the script is the agent's code, so it can still decide its result by something other than the behavior, such as a file it leaves in the shared `/tmp` during the base run. The evidence shows the whole script beside both runs so a reviewer can see that.
+
+Rejected options for the refinement:
+
+- **Keep matching the agent's commands, with a looser matcher.** Every fix to the matcher still trusts what the agent says it ran and where, and slugify failed 4 times on the matcher alone.
+- **Run the script as `codex`, the agent's own user.** It is one user fewer, but the script can then read the Codex login and write into folders the agent's leftover processes can reach.
+
 ### The core ships one public Job image
 
 Decided 23 Sep 2026. Every attempt's Job runs from one public image that the core ships, with the pinned Codex CLI. A repository may name its own image and a test command. Registries that need credentials, and images that aren't public, belong to a company's fork. Nothing more is built into the core until a second repository needs it.

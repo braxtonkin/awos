@@ -3,8 +3,9 @@ import { z } from 'zod';
 import { builtByStep, shapeOf, type StepVerdict, type Unasked } from '../../shared/workflow.ts';
 import { fail, pass, type Check, type Scenario } from '../../tools/verify/check.ts';
 import { modelShape, shapeDrift } from '../../tools/verify/model-shape.ts';
-import type { Change, Ran } from '../../shared/agent-step.ts';
-import { agentSteps, reproduction } from './stage-output.ts';
+import type { Change } from '../../shared/agent-step.ts';
+import { reproductionPath, type RanScript, type Reproduction, type Side } from '../../shared/reproduction.ts';
+import { agentSteps } from './stage-output.ts';
 import { defineModel, type Shape } from '../../tools/verify/models.ts';
 import type { TlcRun } from '../../tools/verify/tlc.ts';
 import { mutantName, mutants, runSeed, simulate, type MutantName, type Run } from './simulate.ts';
@@ -56,36 +57,36 @@ function builtCheck(): Check {
   return loose.length === 0 ? pass(name, `${String(workflow.steps.length)} steps`) : fail(name, `not built by step(): ${loose.join(', ')}`);
 }
 
-const run = (command: string, exitCode: number, wrap = true): Ran => ({ command: wrap ? `/bin/bash -lc '${command}'` : command, cwd: '/workspace', exitCode, output: `ran ${command}` });
+const base = 'b'.repeat(40);
 
-const script = run(reproduction.show, 0);
-const shownAgain = { ...script, output: 'a script swapped in after the runs' };
+const head = 'c'.repeat(40);
 
-const settleCases: readonly (readonly [string, readonly Ran[], 'fixed' | 'still_wrong' | null])[] = [
-  ['a failing base run then a passing change run, each wrapped by the shell', [script, run(reproduction.before, 1), run(reproduction.after, 0)], 'fixed'],
-  ['the same runs written without the shell wrapper', [script, run(reproduction.before, 1, false), run(reproduction.after, 0, false)], 'fixed'],
-  ['a change run that still fails', [script, run(reproduction.before, 1), run(reproduction.after, 1)], 'still_wrong'],
-  ['a base run that passes, so nothing was reproduced', [script, run(reproduction.before, 0), run(reproduction.after, 0)], null],
-  ['a change run that hides its exit with || true', [script, run(reproduction.before, 1), run(`${reproduction.after} || true`, 0)], null],
-  ['the change run before the base run', [script, run(reproduction.after, 0), run(reproduction.before, 1)], null],
-  ['no script shown before the runs', [run(reproduction.before, 1), run(reproduction.after, 0), script], null],
-  ['the script shown again after both runs', [script, run(reproduction.before, 1), run(reproduction.after, 0), shownAgain], 'fixed'],
+const ran = (exitCode: number | null, timedOut = false): RanScript => ({ exitCode, timedOut, output: `exited ${String(exitCode)}` });
+
+const side = (commit: string, run: RanScript | null, setup: RanScript | null = ran(0)): Side => ({ commit, checkout: null, setup, run });
+
+const ranBoth = (before: Side, after: Side): Reproduction => ({ state: 'ran', script: 'test -f src/fixed.ts', base: before, change: after });
+
+const settleCases: readonly (readonly [string, Reproduction | null, 'fixed' | 'still_wrong' | null])[] = [
+  ['the script fails on the base commit and passes on the change', ranBoth(side(base, ran(1)), side(head, ran(0))), 'fixed'],
+  ['the script fails on both', ranBoth(side(base, ran(1)), side(head, ran(1))), 'still_wrong'],
+  ['the script passes on the base commit, so nothing was reproduced', ranBoth(side(base, ran(0)), side(head, ran(0))), null],
+  ['the base commit could not be checked out, so its failure is no reproduction', ranBoth({ commit: base, checkout: 'checking out failed', setup: null, run: null }, side(head, ran(0))), null],
+  ["the base commit's setup failed, so the script never ran there", ranBoth(side(base, null, ran(1)), side(head, ran(0))), null],
+  ["the change's setup failed", ranBoth(side(base, ran(1)), side(head, null, ran(127))), null],
+  ['the base run ran out of time', ranBoth(side(base, ran(null, true)), side(head, ran(0))), null],
+  ['the change run ran out of time', ranBoth(side(base, ran(1)), side(head, ran(null, true))), null],
+  ['the agent left no script', { state: 'no_script', reason: 'the agent left no file' }, null],
+  ['the Job posted no reproduction', null, null],
 ];
 
-
-function evidenceCheck(): Check {
-  const name = "Verify's evidence keeps the script shown before the base run, when the script is shown again after both runs";
-  const settled = agentSteps.settle({ step: 'verify', output: { outcome: 'done', summary: 'Ran both.', blocks: [], behavior: 'fixed' }, commands: [script, run(reproduction.before, 1), run(reproduction.after, 0), shownAgain], change: { pushed: 'a'.repeat(40), carried: null } });
-  const kept = settled.evidence?.['script'];
-  return kept === script.output ? pass(name, kept) : fail(name, `the evidence holds ${JSON.stringify(kept ?? null)}, not ${script.output}`);
-}
-
 function settleChecks(): readonly Check[] {
-  return settleCases.map(([what, commands, expected]) => {
-    const name = `Verify's behavior comes from its stored runs: ${what}`;
-    const settled = agentSteps.settle({ step: 'verify', output: { outcome: 'done', summary: 'Ran both.', blocks: [], behavior: 'fixed' }, commands, change: { pushed: 'a'.repeat(40), carried: null } });
+  return settleCases.map(([what, reproduction, expected]) => {
+    const name = `Verify's behavior comes from the Job's own runs, whatever the agent says: ${what}`;
+    const settled = agentSteps.settle({ step: 'verify', output: { outcome: 'done', summary: 'Ran both.', blocks: [], behavior: 'fixed' }, change: { pushed: null, carried: null }, reproduction });
     const behavior = typeof settled.output === 'object' && settled.output !== null && 'behavior' in settled.output ? settled.output.behavior : 'missing';
-    return behavior === expected ? pass(name, `behavior ${String(expected)}, evidence ${settled.evidence === null ? 'none' : 'stored'}`) : fail(name, `behavior ${String(behavior)}, not ${String(expected)}`);
+    const kept = JSON.stringify(settled.evidence) === JSON.stringify(reproduction);
+    return behavior === expected && kept ? pass(name, `behavior ${String(expected)}, evidence ${settled.evidence === null ? 'none' : 'stored as posted'}`) : fail(name, `behavior ${String(behavior)}, not ${String(expected)}; evidence ${kept ? 'as posted' : 'changed'}`);
   });
 }
 
@@ -100,19 +101,51 @@ const implementCases: readonly (readonly [string, Change, Unasked | null])[] = [
 function implementChecks(): readonly Check[] {
   return implementCases.map(([what, change, expected]) => {
     const name = `Implement's verdict comes from its change: ${what}`;
-    const settled = agentSteps.settle({ step: 'implement', output: doneImplement, commands: [], change });
+    const settled = agentSteps.settle({ step: 'implement', output: doneImplement, change, reproduction: null });
     const said = JSON.stringify(settled.output);
     const explained = expected === null || said.includes('made no change');
     return settled.observed === expected && explained ? pass(name, `observed ${String(settled.observed)}`) : fail(name, `observed ${String(settled.observed)}, not ${String(expected)}; output ${said.slice(0, 200)}`);
   });
 }
 
+const verdictedVerify = (evidence: Reproduction, pullRequestOwed: boolean) => ({
+  step: 'verify',
+  verdict: 'pass' as const,
+  ticket: { key: 'SBX-1', title: 'Add clamp', description: null },
+  repository: { github: 'example/sandbox', branch: 'main' },
+  taskBranch: { name: 'autoworker/SBX-1', head: head },
+  attempt: { branch: 'autoworker/SBX-1-attempt-3', start: head, lastPushed: null },
+  branches: [],
+  pullRequestOwed,
+  firstPass: true,
+  startStatus: null,
+  endStatus: null,
+  ends: false,
+  output: { outcome: 'done', summary: 'The agent says anything it likes.', blocks: [], behavior: 'fixed' },
+  evidence,
+});
+
+const shownEvidence = z.object({ kind: z.literal('pr.evidence'), payload: z.object({ head: z.string(), evidence: z.string() }) });
+
+function pullEvidenceChecks(): readonly Check[] {
+  const rounds: readonly (readonly [string, string])[] = [
+    ['the first passing Verify', head],
+    ['a later passing Verify, after a return to Implement', 'd'.repeat(40)],
+  ];
+  return rounds.map(([what, commit]) => {
+    const name = `${what} owes the pull request the engine's recorded evidence, not the agent's prose (F4)`;
+    const owed = agentSteps.owes(verdictedVerify(ranBoth(side(base, ran(1)), side(commit, ran(0))), true)).flatMap(entry => shownEvidence.safeParse(entry).data ?? []);
+    const text = owed[0]?.payload.evidence ?? '';
+    const good = owed.length === 1 && owed[0]?.payload.head === 'autoworker/SBX-1' && text.includes(commit) && !text.includes('The agent says');
+    return good ? pass(name, `${String(text.length)} characters naming ${commit.slice(0, 8)}`) : fail(name, `${String(owed.length)} pr.evidence rows: ${text.slice(0, 200)}`);
+  });
+}
+
 function promptCheck(): Check {
-  const name = "Verify's core prompt names each command the engine matches exactly";
+  const name = "Verify's core prompt names the script path the Job reads";
   const found = workflow.steps.find(kind => kind.name === 'verify');
   const prompt = found?.runBy === 'agent' ? found.prompt : '';
-  const missing = [reproduction.show, reproduction.before, reproduction.after].filter(command => !prompt.includes(`\`${command}\``));
-  return missing.length === 0 ? pass(name, 'all 3') : fail(name, `missing ${missing.join(', ')}`);
+  return prompt.includes(`\`${reproductionPath}\``) ? pass(name, reproductionPath) : fail(name, `the prompt does not name ${reproductionPath}`);
 }
 
 const settings = { Checks: 2, Ignorable: 1, QueueSettings: 2, ReviewSettings: 2, DraftSettings: 2 } as const;
@@ -434,7 +467,7 @@ export const scenarios: readonly Scenario[] = [
   {
     name: 'code-change',
     summary: "checks the Code change declaration against the task model's shape and runs each step's judge on reviews of every outcome",
-    run: () => Promise.resolve([shapeCheck(), builtCheck(), ...judgeChecks(), ...settleChecks(), evidenceCheck(), ...implementChecks(), promptCheck()]),
+    run: () => Promise.resolve([shapeCheck(), builtCheck(), ...judgeChecks(), ...settleChecks(), ...pullEvidenceChecks(), ...implementChecks(), promptCheck()]),
   },
   landModel,
   {

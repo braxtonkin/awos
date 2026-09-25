@@ -9,7 +9,7 @@ const commit = z.string().regex(/^[0-9a-f]{40}$/, { error: 'must be a full 40-ch
 
 export const attemptBranch = (taskKey: string, attempt: number): string => `autoworker/${taskKey}-attempt-${String(attempt)}`;
 
-export const jobEnvironment = z.object({
+const common = z.object({
   ATTEMPT_ID: z.string().regex(/^[1-9][0-9]*$/, { error: 'must be an attempt id' }),
   ATTEMPT_TOKEN: z.string().min(32, { error: 'must be at least 32 characters' }),
   ENGINE_URL: z.url({ protocol: /^https?$/ }),
@@ -24,9 +24,18 @@ export const jobEnvironment = z.object({
   GIT_AUTHOR_EMAIL: z.email(),
 });
 
+const afterTurn = z.discriminatedUnion('AFTER_TURN', [
+  z.object({ AFTER_TURN: z.literal('push') }),
+  z.object({ AFTER_TURN: z.literal('reproduce'), BASE_COMMIT: commit, SETUP_COMMAND: z.string().trim().transform(text => (text === '' ? null : text)) }),
+]);
+
+export type AfterTurnKeys = z.input<typeof afterTurn>;
+
+export const jobEnvironment = common.and(afterTurn);
+
 export type JobEnvironment = z.infer<typeof jobEnvironment>;
 
-export type SecretKey = keyof JobEnvironment;
+export type SecretKeys = { readonly [Key in keyof z.infer<typeof common>]: string } & AfterTurnKeys;
 
 export function readJobEnvironment(env: NodeJS.ProcessEnv): JobEnvironment | { readonly problems: readonly string[] } {
   const parsed = jobEnvironment.safeParse(env);
@@ -35,7 +44,7 @@ export function readJobEnvironment(env: NodeJS.ProcessEnv): JobEnvironment | { r
 
 export type Account = { readonly uid: number; readonly gid: number; readonly home: string };
 
-export type Accounts = { readonly bridge: Account; readonly codex: Account };
+export type Accounts = { readonly bridge: Account; readonly codex: Account; readonly reproduce: Account };
 
 export async function accounts(): Promise<Accounts> {
   const found = new Map(
@@ -46,23 +55,24 @@ export async function accounts(): Promise<Accounts> {
   );
   const bridge = found.get('bridge');
   const codex = found.get('codex');
-  if (bridge === undefined || codex === undefined) throw new Error('this image has no bridge and codex users, so it does not extend the attempt image');
-  return { bridge, codex };
+  const reproduce = found.get('reproduce');
+  if (bridge === undefined || codex === undefined || reproduce === undefined) throw new Error('this image has no bridge, codex, and reproduce users, so it does not extend the attempt image');
+  return { bridge, codex, reproduce };
 }
 
 const credentialHelper = '!f() { test "$1" = get && printf "username=x-access-token\npassword=%s\n" "$GITHUB_TOKEN"; }; f';
 
-type Run = { readonly as: Account; readonly env: Readonly<Record<string, string>>; readonly input?: string };
+export type Run = { readonly as: Account; readonly env: Readonly<Record<string, string>>; readonly input?: string };
 
-const path = (): string => process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin';
+export const path = (): string => process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin';
 
-const quiet = { GIT_TERMINAL_PROMPT: '0', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' } as const;
+export const quiet = { GIT_TERMINAL_PROMPT: '0', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' } as const;
 
-const asBridge = (as: Account, env: JobEnvironment): Run => ({ as, env: { PATH: path(), HOME: as.home, GITHUB_TOKEN: env.GITHUB_TOKEN, ...quiet } });
+export const asBridge = (as: Account, env: JobEnvironment): Run => ({ as, env: { PATH: path(), HOME: as.home, GITHUB_TOKEN: env.GITHUB_TOKEN, ...quiet } });
 
-const asCodex = (as: Account): Run => ({ as, env: { PATH: path(), HOME: as.home, ...quiet } });
+export const asUser = (as: Account): Run => ({ as, env: { PATH: path(), HOME: as.home, ...quiet } });
 
-function run(command: string, args: readonly string[], { as, env, input }: Run, cwd = '/'): Promise<string> {
+export function run(command: string, args: readonly string[], { as, env, input }: Run, cwd = '/'): Promise<string> {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, { cwd, env, uid: as.uid, gid: as.gid, stdio: ['pipe', 'pipe', 'pipe'] });
     let out = '';
@@ -79,7 +89,7 @@ function run(command: string, args: readonly string[], { as, env, input }: Run, 
   });
 }
 
-const bridgeGit = (args: readonly string[], given: Run): Promise<string> => run('git', [`--git-dir=${layout.bridgeGit}`, `--work-tree=${layout.workspace}`, ...args], given);
+export const bridgeGit = (args: readonly string[], given: Run): Promise<string> => run('git', [`--git-dir=${layout.bridgeGit}`, `--work-tree=${layout.workspace}`, ...args], given);
 
 const codexGit = (args: readonly string[], given: Run): Promise<string> => run('git', ['-C', layout.workspace, ...args], given);
 
@@ -88,9 +98,10 @@ export type Ready = { readonly commit: string; readonly branch: string };
 export async function prepareWorkspace(env: JobEnvironment): Promise<Ready> {
   const { bridge, codex } = await accounts();
   const owner = asBridge(bridge, env);
-  const agent = asCodex(codex);
+  const agent = asUser(codex);
   const ref = `refs/heads/${env.ATTEMPT_BRANCH}`;
   await run('git', ['init', '--quiet', '--bare', layout.bridgeGit], owner);
+  await run('chmod', ['0700', layout.bridgeGit], owner);
   for (const [key, value] of [
     ['core.bare', 'false'],
     [`credential.${new URL(env.REPO_URL).origin}.helper`, credentialHelper],
@@ -127,7 +138,9 @@ export async function pushStep(env: JobEnvironment, message: string, lastPushed:
   const staged = await bridgeGit(['diff', '--cached', '--name-only'], owner);
   if (staged !== '') await bridgeGit(['commit', '--quiet', '--no-verify', '--message', message], owner);
   const head = await bridgeGit(['rev-parse', 'HEAD'], owner);
-  if (head === (lastPushed ?? env.START_COMMIT)) return { unchanged: head };
+  const trees = await bridgeGit(['rev-parse', 'HEAD^{tree}', `${lastPushed ?? env.START_COMMIT}^{tree}`], owner);
+  const [now, before] = trees.split('\n');
+  if (now === before) return { unchanged: head };
   const ref = `refs/heads/${env.ATTEMPT_BRANCH}`;
   try {
     await bridgeGit(['push', '--quiet', '--no-verify', `--force-with-lease=${ref}:${lastPushed ?? ''}`, env.REPO_URL, `HEAD:${ref}`], owner);
