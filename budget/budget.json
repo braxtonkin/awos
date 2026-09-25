@@ -71,8 +71,8 @@
         "tools/**",
         "eslint.config.ts"
       ],
-      "lines": 4900,
-      "characters": 213705,
+      "lines": 4957,
+      "characters": 215585,
       "longest-line": 547
     },
     {
@@ -83,7 +83,7 @@
         "*.md"
       ],
       "lines": 554,
-      "characters": 153281
+      "characters": 153563
     },
     {
       "name": "product",
