@@ -2,6 +2,7 @@ import { parseArgs } from 'node:util';
 import { sql } from 'kysely';
 import { connectCluster, labels } from '../../shared/cluster.ts';
 import { connect } from '../../shared/db/client.ts';
+import { deliveries } from '../../shared/deliveries.ts';
 import { fail, info, pass, type Line, type Scenario } from '../../tools/verify/check.ts';
 import { eventGaps } from './clean.ts';
 
@@ -42,22 +43,16 @@ async function readWorld(url: string, namespace: string | undefined, logs: boole
         const name = `attempt ${attempt.id} of ${task.key} stores its events with no gap`;
         const detail = `${attempt.step} ${attempt.verdict ?? 'live'}, turn ${attempt.turn ?? 'not completed'}, ${attempt.events ?? '0'} events, high water ${attempt.high_water}, finished ${attempt.finished_at?.toISOString() ?? 'not yet'}`;
         lines.push(gaps.length === 0 ? pass(name, detail) : fail(name, `${detail}; ${gaps.map(gap => `${gap.name} ${gap.detail}`).join('; ')}`));
-      }
-      const commands = await db
-        .selectFrom('attempt_command')
-        .innerJoin('attempt', 'attempt.id', 'attempt_command.attempt_id')
-        .select(['attempt_command.attempt_id', 'attempt_command.seq', 'attempt_command.kind', 'attempt_command.client_message_id', 'attempt_command.sent_at', 'attempt_command.received_at', 'attempt_command.acted_at'])
-        .where('attempt.task_id', '=', task.id)
-        .orderBy('attempt_command.sent_at')
-        .execute();
-      for (const command of commands) {
-        lines.push(
-          info(
-            `${command.kind} ${command.seq} to attempt ${command.attempt_id}${command.client_message_id === null ? '' : ` as ${command.client_message_id}`}`,
-            command.acted_at === null ? 'failed' : 'passed',
-            `sent ${command.sent_at.toISOString()}, received ${command.received_at?.toISOString() ?? 'not yet'}, acted on ${command.acted_at?.toISOString() ?? 'not yet'}`,
-          ),
-        );
+        for (const command of await deliveries(db, attempt.id)) {
+          const by = command.action === null ? undefined : await db.selectFrom('human_action').innerJoin('person', 'person.id', 'human_action.person_id').select(['human_action.kind', 'person.email']).where('human_action.id', '=', command.action).executeTakeFirst();
+          const inOrder = (command.receivedAt === null || command.sentAt <= command.receivedAt) && (command.actedAt === null || (command.receivedAt !== null && command.receivedAt <= command.actedAt));
+          lines.push(
+            (inOrder ? pass : fail)(
+              `${command.kind} ${String(command.seq)} to attempt ${attempt.id}${by === undefined ? '' : `, a ${by.kind} by ${by.email}`}`,
+              `${command.state}; sent ${command.sentAt.toISOString()}, received ${command.receivedAt?.toISOString() ?? 'not yet'}, acted on ${command.actedAt?.toISOString() ?? 'not yet'}`,
+            ),
+          );
+        }
       }
     }
   } finally {
@@ -78,8 +73,13 @@ async function readWorld(url: string, namespace: string | undefined, logs: boole
 
 export const localReadScenario: Scenario = {
   name: 'local-engine-read',
-  summary:
-    "reads a held local-engine world by its --database and --namespace: the Postgres clock, each task's state, step, and waiting reason, each attempt's verdict, last turn status, and stored events, which fail on a gap as the clean check does, each command, a start, a steer, or a stop, and when it was received and acted on, and the Jobs and Pods in the namespace, with each Pod's last log lines under --logs",
+  summary: [
+    "reads a held local-engine world by its --database and --namespace: the Postgres clock, each task's state, step, and waiting reason,",
+    "each attempt's verdict, last turn status, and stored events, which fail on a gap as the clean check does,",
+    'each command from deliveries in shared/deliveries.ts, a start, a steer, or a stop,',
+    'with the person action a steer names, its state, and its times, which fail when out of order,',
+    "and the Jobs and Pods in the namespace, with each Pod's last log lines under --logs",
+  ].join(' '),
   run: async args => {
     const { values } = parseArgs({ args: [...args], options: { database: { type: 'string' }, namespace: { type: 'string' }, logs: { type: 'boolean', default: false } }, strict: true });
     if (values.database === undefined) return [fail('database named', 'pass --database with the DATABASE_URL that local-engine printed')];

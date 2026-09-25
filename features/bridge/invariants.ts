@@ -1,7 +1,10 @@
+import { randomUUID } from 'node:crypto';
 import { sql, type RawBuilder } from 'kysely';
 import { z } from 'zod';
 import { connect, type Database } from '../../shared/db/client.ts';
 import type { TestPostgres } from '../../tools/verify/postgres.ts';
+import { numberCommand, type Sent, type Unsent } from './engine.ts';
+import type { AttemptId } from './protocol.ts';
 
 export type Moment = 'each-step' | 'after-quiet-phase';
 
@@ -103,7 +106,25 @@ const stopCommand = (seq: number): Statement =>
   sql`insert into attempt_command (attempt_id, seq, kind, sent_at) values (1, ${sql.lit(seq)}, 'turn.stop', ${t0})`;
 
 const steerCommand = (seq: number): Statement =>
-  sql`insert into attempt_command (attempt_id, seq, kind, input, client_message_id, sent_at) values (1, ${sql.lit(seq)}, 'turn.steer', 'Also check the edge case.', gen_random_uuid(), ${t0})`;
+  sql`with steer as (insert into human_action (id, at, person_id, kind, task_id) values (gen_random_uuid(), ${t0}, 1, 'steer_task', 1) returning id)
+      insert into attempt_command (attempt_id, seq, kind, input, client_message_id, action_id, sent_at)
+      select 1, ${sql.lit(seq)}, 'turn.steer', 'Also check the edge case.', gen_random_uuid(), id, ${t0} from steer`;
+
+const steerCiting = (action: RawBuilder<unknown>): Statement =>
+  sql`insert into attempt_command (attempt_id, seq, kind, input, client_message_id, action_id, sent_at) values (1, 1, 'turn.steer', 'Also check the edge case.', gen_random_uuid(), ${action}, ${t0})`;
+
+export const worldPerson = '1';
+
+export async function personSteers(db: Database, attempt: AttemptId, message: string, now: Date): Promise<Sent | Unsent> {
+  return db.transaction().execute(async writer => {
+    const action = randomUUID();
+    const sent = await numberCommand(writer, attempt, { kind: 'turn.steer', message, action }, now);
+    if (typeof sent === 'string') return sent;
+    const { task_id } = await writer.selectFrom('attempt').select('task_id').where('id', '=', attempt).executeTakeFirstOrThrow();
+    await writer.insertInto('human_action').values({ id: action, at: now, person_id: worldPerson, kind: 'steer_task', task_id }).execute();
+    return sent;
+  });
+}
 
 const applied = (seq: number): Statement => sql`insert into sim_applied (attempt_id, seq) values (1, ${sql.lit(seq)})`;
 
@@ -250,6 +271,17 @@ export const properties = {
       where l.was < l.renewed_to - make_interval(secs => ${sql.lit(worldLeaseMs / 1000)})
         and not exists (select 1 from sim_outage o where o.up_at = l.renewed_to - make_interval(secs => ${sql.lit(worldLeaseMs / 1000)}))`,
     plants: [{ setup: [], violation: sql`update attempt set lease_until = ${t0} + interval '100 seconds' where id = 1` }],
+  },
+  SteerNamesItsPerson: {
+    moment: 'each-step',
+    breaks: sql`select c.attempt_id, c.seq, h.kind as action_kind from attempt_command c
+      join attempt a on a.id = c.attempt_id
+      left join human_action h on h.id = c.action_id
+      where c.kind = 'turn.steer' and (h.id is null or h.kind <> 'steer_task' or h.task_id is distinct from a.task_id)`,
+    plants: [
+      { setup: [sql`alter table attempt_command drop constraint steer_names_its_person`], violation: steerCiting(sql`null`) },
+      { setup: [], violation: steerCiting(firstAction) },
+    ],
   },
   TokenIsAHash: {
     moment: 'each-step',

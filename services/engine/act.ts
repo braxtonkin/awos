@@ -4,7 +4,7 @@ import { parseArgs } from 'node:util';
 import { z } from 'zod';
 import { address } from '../../features/tasks/advance.ts';
 import { connect, type Database } from '../../shared/db/client.ts';
-import { answerOf, request, type Asked, type RequestAnswer } from '../../shared/requests.ts';
+import { answerOf, message, request, type Asked, type RequestAnswer } from '../../shared/requests.ts';
 import { answer, note } from '../../shared/review.ts';
 
 const settings = z.object({ DATABASE_URL: z.url({ protocol: /^postgres(ql)?$/ }) });
@@ -17,12 +17,13 @@ const usage = [
   '  answer <key> --step <step> --answer <json> --as <email>',
   '  stop <key> --as <email>',
   '  retry <key> [--note <text>] --as <email>',
+  '  steer <key> --message <text> --as <email>',
   '  pause <routine> --as <email>',
   '  resume <routine> --as <email>',
   '  run-now <routine> --as <email>',
 ].join('\n');
 
-const onTask = ['approve', 'send-back', 'answer', 'stop', 'retry'] as const;
+const onTask = ['approve', 'send-back', 'answer', 'stop', 'retry', 'steer'] as const;
 
 const onRoutine = ['pause', 'resume', 'run-now'] as const;
 
@@ -46,6 +47,7 @@ const command = z
       id: z.uuid().optional(),
       step: z.string().min(1).optional(),
       note: note.optional(),
+      message: message.optional(),
       answer: z
         .string()
         .transform((text, context) => {
@@ -96,6 +98,7 @@ function askedOf({ positionals: [kind], values }: Command, found: Target, who: W
   const base = { ...who, target: found.target };
   if (kind === 'stop') return { ...base, kind: 'stop', payload: {} };
   if (kind === 'retry') return { ...base, kind: 'retry', payload: { note: values.note ?? null } };
+  if (kind === 'steer') return values.message === undefined ? 'steer needs --message.' : { ...base, kind: 'steer', payload: { message: values.message } };
   if (kind === 'pause') return { ...base, kind: 'pause', payload: {} };
   if (kind === 'resume') return { ...base, kind: 'resume', payload: {} };
   if (kind === 'run-now') return { ...base, kind: 'run_now', payload: {} };
@@ -145,7 +148,7 @@ async function run(given: Command): Promise<Said> {
   }
 }
 
-const options = { as: { type: 'string' }, id: { type: 'string' }, step: { type: 'string' }, note: { type: 'string' }, answer: { type: 'string' } } as const;
+const options = { as: { type: 'string' }, id: { type: 'string' }, step: { type: 'string' }, note: { type: 'string' }, message: { type: 'string' }, answer: { type: 'string' } } as const;
 
 function argsOf(args: readonly string[]): unknown {
   try {

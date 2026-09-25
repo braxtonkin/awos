@@ -239,6 +239,8 @@ const notNow: Readonly<Record<PersonAction['kind'], Instruction>> = {
   answer: 'The task waits on no review.',
 };
 
+const idTaken: Instruction = 'Another action already has this id.';
+
 export function refusalOf(kind: PersonAction['kind'], refused: Extract<Acted, { readonly refused: unknown }>['refused']): Instruction {
   switch (refused) {
     case 'not-now':
@@ -248,8 +250,32 @@ export function refusalOf(kind: PersonAction['kind'], refused: Extract<Acted, { 
     case 'answer-does-not-fit':
       return 'The answer does not fit any block of that review.';
     case 'id-taken':
-      return 'Another action already has this id.';
+      return idTaken;
   }
+}
+
+export type SteerTurn = (writer: Writer, attempt: string, message: string, action: string, now: Date) => Promise<'sent' | 'not-running'>;
+
+export type Steered = { readonly recorded: string } | { readonly refused: Instruction };
+
+const notRunning: Instruction = 'The agent is not running, so it cannot read a message. Retry with a note instead.';
+
+export async function steerWithin(writer: Transacting, task: string, by: Person, message: string, steerTurn: SteerTurn): Promise<Steered> {
+  const earlier = await writer.selectFrom('human_action').select(['human_action.task_id', 'human_action.kind']).where('human_action.id', '=', by.id).executeTakeFirst();
+  if (earlier !== undefined) return earlier.task_id === task && earlier.kind === 'steer_task' ? { recorded: by.id } : { refused: idTaken };
+  const live = await writer
+    .selectFrom('attempt')
+    .select('attempt.id')
+    .where('attempt.task_id', '=', task)
+    .where('attempt.finished_at', 'is', null)
+    .forUpdate()
+    .executeTakeFirst();
+  if (live === undefined || (await steerTurn(writer, live.id, message, by.id, by.at)) === 'not-running') return { refused: notRunning };
+  await writer
+    .insertInto('human_action')
+    .values({ id: by.id, at: by.at, person_id: by.person, kind: 'steer_task', task_id: task })
+    .execute();
+  return { recorded: by.id };
 }
 
 export const act = (db: Database, workflows: Workflows, task: string, by: Person, action: PersonAction, stopTurn: StopTurn): Promise<Acted> =>

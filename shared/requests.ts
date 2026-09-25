@@ -7,12 +7,15 @@ const review = z.string().regex(/^[1-9]\d*$/, { error: 'must be the id of the at
 
 const nothing = z.strictObject({});
 
+export const message = z.string().trim().min(1).max(4000);
+
 export const requestKinds = {
   stop: { on: 'task', payload: nothing },
   retry: { on: 'task', payload: z.strictObject({ note: note.nullable() }) },
   approve: { on: 'task', payload: z.strictObject({ review }) },
   send_back: { on: 'task', payload: z.strictObject({ review, note }) },
   answer: { on: 'task', payload: z.strictObject({ review, answer }) },
+  steer: { on: 'task', payload: z.strictObject({ message }) },
   pause: { on: 'routine', payload: nothing },
   resume: { on: 'routine', payload: nothing },
   run_now: { on: 'routine', payload: nothing },
@@ -32,6 +35,7 @@ export const payloads: { readonly [K in RequestKind]: z.ZodType<PayloadOf<K>> } 
   approve: requestKinds.approve.payload,
   send_back: requestKinds.send_back.payload,
   answer: requestKinds.answer.payload,
+  steer: requestKinds.steer.payload,
   pause: requestKinds.pause.payload,
   resume: requestKinds.resume.payload,
   run_now: requestKinds.run_now.payload,

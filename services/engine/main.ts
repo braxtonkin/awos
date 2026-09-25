@@ -32,7 +32,7 @@ import { scheduler } from '../../features/routines/scheduler.ts';
 import { pauseWithin, resumeWithin, runNowWithin, type RoutineAction } from '../../features/routines/actions.ts';
 import { requests, type Applied, type Applying, type Handlers } from '../../features/requests/apply.ts';
 import { sourcesByKind } from '../../features/routines/source.ts';
-import { actWithin, advance, approveFromOutside, handOff, refusalOf, type PersonAction, type StopTurn } from '../../features/tasks/advance.ts';
+import { actWithin, advance, approveFromOutside, handOff, refusalOf, steerWithin, type PersonAction, type SteerTurn, type StopTurn } from '../../features/tasks/advance.ts';
 import { claim, renew } from '../../features/tasks/claim.ts';
 import { reaper } from '../../features/tasks/reaper.ts';
 import { coreRunAs, type RunAsRule } from '../../features/tasks/run-as.ts';
@@ -115,6 +115,11 @@ const stopTurn: StopTurn = async (writer, attempt, now) => {
   await numberCommand(writer, attemptId.parse(attempt), { kind: 'turn.stop' }, now);
 };
 
+const steerTurn: SteerTurn = async (writer, attempt, message, action, now) => {
+  const sent = await numberCommand(writer, attemptId.parse(attempt), { kind: 'turn.steer', message, action }, now);
+  return typeof sent === 'string' ? 'not-running' : 'sent';
+};
+
 const byWhom = (request: Applying<RequestKind>): RoutineAction => ({ id: request.action, person: request.person, at: request.at });
 
 const onTask = async (tx: Transacting, request: Applying<RequestKind>, action: PersonAction): Promise<Applied> => {
@@ -130,6 +135,10 @@ const handlers = {
   approve: (tx, request) => onTask(tx, request, { kind: 'approve', review: request.payload.review }),
   send_back: (tx, request) => onTask(tx, request, { kind: 'send_back', review: request.payload.review, note: request.payload.note }),
   answer: (tx, request) => onTask(tx, request, { kind: 'answer', review: request.payload.review, answer: request.payload.answer }),
+  steer: async (tx, request) => {
+    const steered = await steerWithin(tx, request.target, byWhom(request), request.payload.message, steerTurn);
+    return 'recorded' in steered ? 'recorded' : steered;
+  },
   pause: async (tx, request) => recordedOr((await pauseWithin(tx, request.target, byWhom(request))) === 'paused', 'The routine is already paused.'),
   resume: async (tx, request) => recordedOr((await resumeWithin(tx, request.target, byWhom(request))) === 'resumed', 'The routine is not paused.'),
   run_now: async (tx, request) => {

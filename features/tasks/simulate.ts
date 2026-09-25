@@ -1235,6 +1235,7 @@ const rules: Readonly<Record<Move, Rule>> = {
         { guard: 'one_target', what: 'a routine edit that also names a repository', values: { kind: 'edit_routine', routine_id: routine, repository_id: repository } },
         { guard: 'target_fits_kind', what: 'a credential replacement aimed at a repository', values: { kind: 'replace_credential', repository_id: repository } },
         { guard: 'target_fits_kind', what: 'a repository added to a connector', values: { kind: 'add_repository', connector: 'codex' } },
+        { guard: 'target_fits_kind', what: 'a steer aimed at a routine', values: { kind: 'steer_task', routine_id: routine } },
       ] as const;
       const stray = pick(random, strays);
       if (stray === undefined) return 'no stray target';

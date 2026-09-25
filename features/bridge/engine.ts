@@ -54,11 +54,9 @@ export const rules: Rules = {
 
 export type BridgeEngine = { readonly leaseMs: number; readonly finish: Finish; readonly now: () => Date; readonly rules: Rules };
 
-export type Command = { readonly kind: 'turn.start'; readonly prompt: string; readonly outputSchema: unknown } | { readonly kind: 'turn.steer'; readonly message: string } | { readonly kind: 'turn.stop' };
+export type Command = { readonly kind: 'turn.start'; readonly prompt: string; readonly outputSchema: unknown } | { readonly kind: 'turn.steer'; readonly message: string; readonly action: string } | { readonly kind: 'turn.stop' };
 
 export type Sent = { readonly seq: number; readonly clientMessageId: string | null };
-
-export type Delivery = 'sent' | 'received' | 'acted on';
 
 export type Polled = { readonly frames: readonly CommandFrame[]; readonly ended: boolean };
 
@@ -324,9 +322,15 @@ export async function pollCommands(db: Database, attempt: AttemptId, after: numb
   return { frames, ended };
 }
 
-export async function numberCommand(writer: Writer, attempt: AttemptId, command: Command, now: Date): Promise<Sent | 'ended'> {
+export type Unsent = 'ended' | 'no-turn';
+
+export async function numberCommand(writer: Writer, attempt: AttemptId, command: Command, now: Date): Promise<Sent | Unsent> {
   const held = await writer.selectFrom('attempt').select('finished_at').where('id', '=', attempt).forUpdate().executeTakeFirst();
   if (held === undefined || held.finished_at !== null) return 'ended';
+  if (command.kind === 'turn.steer') {
+    const start = await writer.selectFrom('attempt_command').select('seq').where('attempt_id', '=', attempt).where('kind', '=', 'turn.start').executeTakeFirst();
+    if (start === undefined) return 'no-turn';
+  }
   const last = await writer.selectFrom('attempt_command').select(sql<string>`coalesce(max(seq), 0)`.as('seq')).where('attempt_id', '=', attempt).executeTakeFirstOrThrow();
   const seq = Number(last.seq) + 1;
   const clientMessageId = command.kind === 'turn.stop' ? null : crypto.randomUUID();
@@ -339,19 +343,15 @@ export async function numberCommand(writer: Writer, attempt: AttemptId, command:
       input: command.kind === 'turn.start' ? command.prompt : command.kind === 'turn.steer' ? command.message : null,
       output_schema: command.kind === 'turn.start' && command.outputSchema !== undefined && command.outputSchema !== null ? JSON.stringify(command.outputSchema) : null,
       client_message_id: clientMessageId,
+      action_id: command.kind === 'turn.steer' ? command.action : null,
       sent_at: now,
     })
     .execute();
   return { seq, clientMessageId };
 }
 
-export function sendCommand(db: Database, attempt: AttemptId, command: Command, now: Date): Promise<Sent | 'ended'> {
+export function sendCommand(db: Database, attempt: AttemptId, command: Command, now: Date): Promise<Sent | Unsent> {
   return db.transaction().execute(writer => numberCommand(writer, attempt, command, now));
-}
-
-export async function deliveries(db: Database, attempt: AttemptId): Promise<readonly { readonly seq: number; readonly kind: AttemptCommandKind; readonly delivery: Delivery }[]> {
-  const rows = await db.selectFrom('attempt_command').select(['seq', 'kind', 'received_at', 'acted_at']).where('attempt_id', '=', attempt).orderBy('seq').execute();
-  return rows.map(row => ({ seq: Number(row.seq), kind: row.kind, delivery: row.acted_at !== null ? 'acted on' : row.received_at !== null ? 'received' : 'sent' }));
 }
 
 export async function storedLines(db: Database, attempt: AttemptId): Promise<readonly { readonly seq: number; readonly method: string | null; readonly body: unknown }[]> {

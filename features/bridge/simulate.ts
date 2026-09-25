@@ -5,7 +5,7 @@ import { connect, type Database } from '../../shared/db/client.ts';
 import type { FragmentMethod } from '../../shared/items.ts';
 import type { TestPostgres } from '../../tools/verify/postgres.ts';
 import { finalMessageOf, issueToken, numberCommand, openCommands, pollCommands, receive, rules, sendCommand, type BridgeEngine, type Finish, type Rules } from './engine.ts';
-import { simulatorSchema, violations, world, worldLeaseMs, worldStartsAt, type PropertyName, type Violation } from './invariants.ts';
+import { personSteers, simulatorSchema, violations, world, worldLeaseMs, worldStartsAt, type PropertyName, type Violation } from './invariants.ts';
 import { applier, outbox, threadStart, type Applier, type Outbox } from './job.ts';
 import {
   appMessage,
@@ -130,6 +130,8 @@ export const noMutantYet: Readonly<Record<string, readonly string[]>> = {
     'bridge_received_counts_commands',
   ],
   'numberCommand shapes each kind of command itself, so no move reaches a row these checks refuse': ['command_carries_its_message', 'only_a_start_has_a_schema'],
+  "numberCommand's Command type makes a steer carry its action, and personSteers writes that action in the steer's transaction, so no move reaches a steer without one; the SteerNamesItsPerson plants prove the check": ['steer_names_its_person'],
+  'personSteers and the engine write the action in the transaction that numbers the steer, so no move cites an action that does not exist': ['steer_cites_its_action'],
   'storeLine sets received_at in the statement that sets acted_at, so no move acts on a command before receiving it': ['acted_on_after_received'],
   'numberCommand numbers under the attempt row lock with a fresh random message id, and the simulator runs one engine at a time, so no move reaches a second command with one number or one message id': [
     'one_command_per_number',
@@ -577,12 +579,12 @@ async function stop(sim: Sim, attempt: AttemptId): Promise<string> {
   const now = new Date(sim.time);
   const sent = await sim.db.transaction().execute(async writer => {
     const numbered = await numberCommand(writer, attempt, { kind: 'turn.stop' }, now);
-    if (numbered === 'ended') return numbered;
+    if (typeof numbered === 'string') return numbered;
     await writer.updateTable('attempt').set({ finished_at: now, verdict: 'stopped' }).where('id', '=', attempt).where('finished_at', 'is', null).execute();
     return numbered;
   });
   count(sim, 'stops');
-  return sent === 'ended' ? `a person stopped attempt ${attempt}, which had already ended` : `a person stopped attempt ${attempt} and the engine sent turn.stop as command ${String(sent.seq)}`;
+  return typeof sent === 'string' ? `a person stopped attempt ${attempt}, which had already ended` : `a person stopped attempt ${attempt} and the engine sent turn.stop as command ${String(sent.seq)}`;
 }
 
 const expendable = attemptId.parse('2');
@@ -687,9 +689,9 @@ async function applyMove(sim: Sim, choice: Choice): Promise<string> {
     case 'steer': {
       const attempt = (await liveAttempts(sim))[Math.floor(sim.next() * 2)];
       if (attempt === undefined) return 'nobody to steer';
-      const sent = await sendCommand(sim.db, attempt, { kind: 'turn.steer', message: 'Also check the edge case.' }, new Date(sim.time));
+      const sent = await personSteers(sim.db, attempt, 'Also check the edge case.', new Date(sim.time));
       count(sim, 'steers');
-      return sent === 'ended' ? `a person steered attempt ${attempt}, which had ended` : `a person steered attempt ${attempt} as command ${String(sent.seq)}`;
+      return typeof sent === 'string' ? `a person steered attempt ${attempt}, which had ${sent === 'ended' ? 'ended' : 'no turn'}` : `a person steered attempt ${attempt} as command ${String(sent.seq)}`;
     }
     case 'stop': {
       return stop(sim, expendable);
@@ -801,7 +803,7 @@ async function simulateSeed(postgres: TestPostgres, plan: Plan, seed: number): P
     const sim: Sim = { db, next, mutant, faults: mutant?.faults ?? 'all', bridges, late: [], log: [], errors: [], counts: {}, time: worldStartsAt, engine: 'up' };
     for (const bridge of bridges) {
       const sent = await sendCommand(db, bridge.attempt, { kind: 'turn.start', prompt: 'Do the work.', outputSchema: null }, new Date(sim.time));
-      if (sent === 'ended') throw new Error(`attempt ${bridge.attempt} ended before its turn started`);
+      if (typeof sent === 'string') throw new Error(`attempt ${bridge.attempt} ended before its turn started`);
       await sql`insert into sim_bridge (attempt_id, state, emitted) values (${bridge.attempt}, 'up', 0)`.execute(db);
     }
     for (let step = 1; step <= plan.steps && failure === undefined; step += 1) {

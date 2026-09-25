@@ -299,6 +299,8 @@ const askFor = (world: World, id: string, target: Target, kind: RequestKind): As
       return { ...base, kind, payload: { review: '7', note: note.parse('Try again.') } };
     case 'answer':
       return { ...base, kind, payload: { review: '7', answer: { kind: 'pick', block: 0, option: 'a' } } };
+    case 'steer':
+      return { ...base, kind, payload: { message: 'Also check the edge case.' } };
   }
 };
 
@@ -509,7 +511,7 @@ const fakeHandler =
 function handlersFor(world: World, index: number): Handlers<RequestKind> {
   const onTask = fakeHandler(world, index, 'task');
   const onRoutine = fakeHandler(world, index, 'routine');
-  return { stop: onTask, retry: onTask, approve: onTask, send_back: onTask, answer: onTask, pause: onRoutine, resume: onRoutine, run_now: onRoutine };
+  return { stop: onTask, retry: onTask, approve: onTask, send_back: onTask, answer: onTask, steer: onTask, pause: onRoutine, resume: onRoutine, run_now: onRoutine };
 }
 
 const apartPass =

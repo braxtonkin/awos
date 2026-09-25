@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { randomBytes, randomUUID } from 'node:crypto';
+import { randomBytes } from 'node:crypto';
 import { once } from 'node:events';
 import { existsSync } from 'node:fs';
 import { writeFile } from 'node:fs/promises';
@@ -14,7 +14,7 @@ import { checksOf, fail, info, pass, type Check, type Line, type Scenario } from
 import { buildAttemptImage, ensureRegistry, jobNamespace, kindAddress, kubernetes, registry, repositoryRoot } from '../../tools/verify/cluster.ts';
 import { kind } from '../../tools/verify/kind.ts';
 import { withPostgres } from '../../tools/verify/postgres.ts';
-import { actAs, applySetup, closeStore, driverSettings, fakeCodexLogin, openStore, standInImage, startEngine, type Engine, type Store } from './autoworker.ts';
+import { accessCopy, actAs, applySetup, closeStore, driverSettings, fakeCodexLogin, openStore, standInImage, startEngine, type Engine, type Store } from './autoworker.ts';
 import { catalog, scripts, type Entry, type Script, type ScriptName } from './catalog.ts';
 import { ticking } from './codex-stand-in.ts';
 import { localLogins, startLocalWorld, type LocalWorld } from './local-world.ts';
@@ -252,26 +252,6 @@ function setupFile(login: string, wanted: readonly SeedName[], withRoutines: boo
   };
 }
 
-async function sendSteer(db: Database, key: string): Promise<boolean> {
-  return db.transaction().execute(async writer => {
-    const live = await writer
-      .selectFrom('attempt')
-      .innerJoin('task', 'task.id', 'attempt.task_id')
-      .select('attempt.id')
-      .where('task.key', '=', key)
-      .where('attempt.finished_at', 'is', null)
-      .forUpdate('attempt')
-      .executeTakeFirst();
-    if (live === undefined) return false;
-    const last = await writer.selectFrom('attempt_command').select(sql<string>`coalesce(max(seq), 0)`.as('seq')).where('attempt_id', '=', live.id).executeTakeFirstOrThrow();
-    await writer
-      .insertInto('attempt_command')
-      .values({ attempt_id: live.id, seq: String(Number(last.seq) + 1), kind: 'turn.steer', input: steerText, client_message_id: randomUUID(), sent_at: new Date() })
-      .execute();
-    return true;
-  });
-}
-
 type Supervised = { readonly stop: () => Promise<void>; readonly starts: () => number; readonly said: () => string };
 
 function supervise(store: Store, settings: Readonly<Record<string, string>>, stopping: AbortSignal, out: (line: string) => void): Supervised {
@@ -306,9 +286,13 @@ function supervise(store: Store, settings: Readonly<Record<string, string>>, sto
   };
 }
 
-type Options = { readonly wanted: readonly SeedName[]; readonly check: boolean; readonly plant: SeedName | undefined };
+const agents = ['stand-in', 'real'] as const;
 
-const optionsSpec = { seed: { type: 'string', multiple: true }, check: { type: 'boolean', default: false }, plant: { type: 'string' } } as const;
+type Agent = (typeof agents)[number];
+
+type Options = { readonly wanted: readonly SeedName[]; readonly check: boolean; readonly plant: SeedName | undefined; readonly agent: Agent };
+
+const optionsSpec = { seed: { type: 'string', multiple: true }, check: { type: 'boolean', default: false }, plant: { type: 'string' }, agent: { type: 'string', default: 'stand-in' } } as const;
 
 function optionsOf(args: readonly string[]): Options | Check {
   const { values } = parseArgs({ args: [...args], options: optionsSpec, strict: true });
@@ -322,7 +306,9 @@ function optionsOf(args: readonly string[]): Options | Check {
     return fail('plant named', '--plant takes one seeded task that waits or runs, which local-engine then stops so the check must name it');
   }
   if (plant !== undefined && !values.check) return fail('plant named', '--plant needs --check');
-  return { wanted, check: values.check, plant };
+  const agent = agents.find(name => name === values.agent);
+  if (agent === undefined) return fail('agent named', `--agent takes ${agents.join(' or ')}; real runs Codex from the live service's login`);
+  return { wanted, check: values.check, plant, agent };
 }
 
 async function pastSeed(store: Store, seed: SeedName, key: string): Promise<string> {
@@ -353,7 +339,8 @@ async function settle(store: Store, planted: readonly Planted[], signal: AbortSi
       const { plant, expect } = seeds[entry.name];
       entry.observed = await factsOf(store.db, entry);
       if (plant.kind === 'ticket' && plant.then !== undefined && !acted.has(entry.name) && entry.observed.kind === 'task' && entry.observed.streaming && entry.key !== undefined) {
-        const sent = plant.then === 'steer' ? await sendSteer(store.db, entry.key) : (await actAs(store, ['stop', entry.key, '--as', actingPerson.email])).code === 0;
+        const asked = plant.then === 'steer' ? ['steer', entry.key, '--message', steerText] : ['stop', entry.key];
+        const sent = (await actAs(store, [...asked, '--as', actingPerson.email])).code === 0;
         if (sent) {
           acted.add(entry.name);
           out(`seed ${entry.name}: ${plant.then === 'steer' ? 'steered' : 'stopped'} ${entry.key} while it streamed`);
@@ -371,9 +358,9 @@ async function settle(store: Store, planted: readonly Planted[], signal: AbortSi
 
 type Plants = { readonly planted: readonly Planted[]; readonly counts: readonly string[] };
 
-async function plantAll(store: Store, local: LocalWorld, wanted: readonly SeedName[], out: (line: string) => void): Promise<Plants> {
+async function plantAll(store: Store, local: LocalWorld, wanted: readonly SeedName[], agent: Agent, out: (line: string) => void): Promise<Plants> {
   const login = join(store.folder, 'codex.json');
-  await writeFile(login, fakeCodexLogin(), { mode: 0o600 });
+  await writeFile(login, agent === 'real' ? await accessCopy() : fakeCodexLogin(), { mode: 0o600 });
   const secrets = { GITHUB_TOKEN: local.engine.secrets.GITHUB_TOKEN, AUTOWORKER_JIRA_LOGIN: local.engine.secrets.AUTOWORKER_JIRA_LOGIN, [expiredTokenVariable]: 'expired-github-token' };
   const applied = async (withRoutines: boolean): Promise<string> => {
     const result = await applySetup(store, setupFile(login, wanted, withRoutines), secrets);
@@ -416,7 +403,8 @@ async function hold(signal: AbortSignal, out: (line: string) => void, options: O
   const up = checksOf(await kind.run(['up']));
   if (!up.every(check => check.passed)) return up;
   out(await ensureRegistry());
-  const image = await standInImage(await buildAttemptImage(`${registry.host}/autoworker-job:e2e`));
+  const attemptImage = await buildAttemptImage(`${registry.host}/autoworker-job:e2e`);
+  const image = options.agent === 'real' ? attemptImage : await standInImage(attemptImage);
   const address = await kindAddress();
   const namespace = `local-${randomBytes(4).toString('hex')}`;
   const core = kubernetes();
@@ -430,7 +418,7 @@ async function hold(signal: AbortSignal, out: (line: string) => void, options: O
       const scratch = await postgres.scratch();
       const store = await openStore(scratch.url);
       try {
-        const { planted, counts } = await plantAll(store, local, options.wanted, out);
+        const { planted, counts } = await plantAll(store, local, options.wanted, options.agent, out);
         const settings = { ...driverSettings(local.engine.settings, image, namespace, address), CHECKS_EVERY_MS: '5000' };
         const engine = supervise(store, settings, signal, out);
         try {
@@ -484,8 +472,13 @@ async function hold(signal: AbortSignal, out: (line: string) => void, options: O
 
 export const localEngineScenario: Scenario = {
   name: 'local-engine',
-  summary:
-    'starts Postgres, a fake GitHub, a fake Jira, the git daemon, and the engine with Jobs on kind and the Codex stand-in in its own JOB_NAMESPACE, applies a setup with Braxton Kinney and three made-up people, plants each --seed (or all), prints local engine ready, and holds until SIGTERM, restarting the engine whenever it exits; --check reads every seed back and exits instead, and --plant <seed> stops that seeded task first so the check must name it',
+  summary: [
+    'starts Postgres, a fake GitHub, a fake Jira, the git daemon, and the engine with Jobs on kind in its own JOB_NAMESPACE,',
+    'with the Codex stand-in, or real Codex under --agent real in the live service,',
+    'applies a setup with Braxton Kinney and three made-up people, plants each --seed (or all), prints local engine ready,',
+    'and holds until SIGTERM, restarting the engine whenever it exits;',
+    '--check reads every seed back and exits instead, and --plant <seed> stops that seeded task first so the check must name it',
+  ].join(' '),
   run: async args => {
     const options = optionsOf(args);
     if ('passed' in options) return [options];

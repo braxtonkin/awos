@@ -10,10 +10,12 @@ import { isDeepStrictEqual, parseArgs } from 'node:util';
 import { sql, type RawBuilder } from 'kysely';
 import { z } from 'zod';
 import { connect, type Database } from '../../shared/db/client.ts';
+import { deliveries, type DeliveryState } from '../../shared/deliveries.ts';
 import { reduce, type Item } from '../../shared/items.ts';
 import { fail, pass, type Check, type Scenario } from '../../tools/verify/check.ts';
 import { withPostgres, type TestPostgres } from '../../tools/verify/postgres.ts';
-import { bridgeListener, deliveries, issueToken, numberCommand, rules, sendCommand, type BridgeEngine, type Delivery, type Finish } from './engine.ts';
+import { bridgeListener, issueToken, numberCommand, rules, sendCommand, type BridgeEngine, type Finish } from './engine.ts';
+import { personSteers } from './invariants.ts';
 import { runBridge, type AfterTurn, type BridgeSettings, type Ending } from './job.ts';
 import { attemptId, bridgeRequestIds, headers, pinned, protocolVersion, type AttemptId, type Line } from './protocol.ts';
 
@@ -393,11 +395,11 @@ async function steerLane(world: World): Promise<readonly Check[]> {
   await sendCommand(world.db, world.attempt, { kind: 'turn.start', prompt: tickPrompt(20), outputSchema: null }, new Date());
   const run = startBridge(world);
   if (!(await until(120_000, () => commandStarted(world)))) return [fail('the turn starts a shell command', run.log.join(' | '))];
-  const sent = await sendCommand(world.db, world.attempt, { kind: 'turn.steer', message: 'When the command finishes, end your reply with the word banana.' }, new Date());
-  if (sent === 'ended') return [fail('the steer is stored', 'the attempt had ended')];
-  const seen: Delivery[] = [];
+  const sent = await personSteers(world.db, world.attempt, 'When the command finishes, end your reply with the word banana.', new Date());
+  if (typeof sent === 'string') return [fail('the steer is stored', `the attempt had ${sent === 'ended' ? 'ended' : 'no turn'}`)];
+  const seen: DeliveryState[] = [];
   await until(60_000, async () => {
-    const state = (await deliveries(world.db, world.attempt)).find(entry => entry.seq === sent.seq)?.delivery;
+    const state = (await deliveries(world.db, world.attempt)).find(entry => entry.seq === sent.seq)?.state;
     if (state !== undefined && seen.at(-1) !== state) seen.push(state);
     return state === 'acted on';
   });
@@ -410,10 +412,20 @@ async function steerLane(world: World): Promise<readonly Check[]> {
   const after = await storedWhere(world, sql<boolean>`seq > ${firstSeq} and body->>'method' = 'item/completed' and body->'params'->'item'->>'type' = 'agentMessage'`);
   const writes = (await tapped(world)).length;
   const stamps = await world.db.selectFrom('attempt_command').select(['sent_at', 'received_at', 'acted_at']).where('attempt_id', '=', world.attempt).where('seq', '=', String(sent.seq)).executeTakeFirst();
+  const action = await world.db
+    .selectFrom('attempt_command')
+    .innerJoin('human_action', 'human_action.id', 'attempt_command.action_id')
+    .innerJoin('person', 'person.id', 'human_action.person_id')
+    .select(['human_action.kind', 'person.email'])
+    .where('attempt_command.attempt_id', '=', world.attempt)
+    .where('attempt_command.seq', '=', String(sent.seq))
+    .executeTakeFirst();
+  const actionName = 'the steer names a steer_task action and the person who sent it';
   return [
     stamps !== undefined && stamps.received_at !== null && stamps.acted_at !== null && stamps.sent_at <= stamps.received_at && stamps.received_at <= stamps.acted_at && seen.at(-1) === 'acted on'
       ? pass('the steer reads sent, then received, then acted on', `polled ${seen.join(' -> ')}; sent ${stamps.sent_at.toISOString()}, received ${stamps.received_at.toISOString()}, acted on ${stamps.acted_at.toISOString()}`)
       : fail('the steer reads sent, then received, then acted on', `polled ${seen.join(' -> ') || 'nothing'}; ${JSON.stringify(stamps)}`),
+    action?.kind === 'steer_task' ? pass(actionName, `${action.kind} by ${action.email}`) : fail(actionName, JSON.stringify(action ?? 'no action')),
     itemIds.length === 1 ? pass('the app server took the steer once, as one userMessage item carrying the command id', `item ${itemIds[0] ?? ''}, lines ${userItems.map(row => `${row.seq} ${row.method}`).join(', ')}`) : fail('the app server took the steer once, as one userMessage item carrying the command id', `items ${itemIds.join(', ') || 'none'}`),
     after > 0 ? pass("the agent's next message follows the steer", `${String(after)} agent messages completed after line ${String(firstSeq)} of ${String(writes)}`) : fail("the agent's next message follows the steer", 'no agent message after it'),
     ended,
@@ -452,7 +464,7 @@ async function stopLane(world: World): Promise<readonly Check[]> {
   const row = await world.db.selectFrom('attempt').select(['verdict']).where('id', '=', world.attempt).executeTakeFirstOrThrow();
   const withinName = 'turn/completed arrives as interrupted within 1 s of the stop';
   return [
-    stopped === 'ended' ? fail('the engine sends turn.stop', 'the attempt had ended') : pass('the engine sends turn.stop', `command ${String(stopped.seq)}, stored with the stop in one transaction`),
+    typeof stopped === 'string' ? fail('the engine sends turn.stop', 'the attempt had ended') : pass('the engine sends turn.stop', `command ${String(stopped.seq)}, stored with the stop in one transaction`),
     interrupted !== undefined && interrupted.at - stoppedAt <= 1000 ? pass(withinName, `${String(interrupted.at - stoppedAt)} ms`) : fail(withinName, interrupted === undefined ? 'no interrupted turn/completed' : `${String(interrupted.at - stoppedAt)} ms`),
     row.verdict === 'stopped' ? pass('the attempt ends stopped', 'verdict stopped') : fail('the attempt ends stopped', `verdict ${String(row.verdict)}`),
     ended,
@@ -484,13 +496,13 @@ async function finishingLane(world: World): Promise<readonly Check[]> {
   await sendCommand(world.db, world.attempt, { kind: 'turn.start', prompt: tickPrompt(2), outputSchema: null }, new Date());
   let steer: number | undefined;
   const run = startBridge(world, async () => {
-    const sent = await sendCommand(world.db, world.attempt, { kind: 'turn.steer', message: 'Also check the edge case.' }, new Date());
-    steer = sent === 'ended' ? undefined : sent.seq;
+    const sent = await personSteers(world.db, world.attempt, 'Also check the edge case.', new Date());
+    steer = typeof sent === 'string' ? undefined : sent.seq;
     await wait(3000);
     return [];
   });
   const ended = await endingCheck(run, 0);
-  const delivery = (await deliveries(world.db, world.attempt)).find(command => command.seq === steer)?.delivery;
+  const delivery = (await deliveries(world.db, world.attempt)).find(command => command.seq === steer)?.state;
   const name = 'a steer that arrives after the turn completed stays sent, because the bridge never gives it to the app server';
   return [ended, delivery === 'sent' ? pass(name, `command ${String(steer)} is ${delivery}`) : fail(name, `command ${String(steer)} is ${String(delivery)}; log: ${run.log.join(' | ')}`)];
 }

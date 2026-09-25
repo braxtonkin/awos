@@ -19,7 +19,7 @@ export type Generated<T> = T extends ColumnType<infer S, infer I, infer U>
   ? ColumnType<S, I | undefined, U>
   : ColumnType<T, T | undefined, T>;
 
-export type HumanActionKind = "add_repository" | "approve" | "edit_draft" | "edit_repository" | "edit_routine" | "pause_routine" | "pick_choice" | "replace_credential" | "resume_routine" | "retry_task" | "run_now" | "send_back" | "stop_task" | "untick_items";
+export type HumanActionKind = "add_repository" | "approve" | "edit_draft" | "edit_repository" | "edit_routine" | "pause_routine" | "pick_choice" | "replace_credential" | "resume_routine" | "retry_task" | "run_now" | "send_back" | "steer_task" | "stop_task" | "untick_items";
 
 export type Int8 = ColumnType<string, bigint | number | string, bigint | number | string>;
 
@@ -81,6 +81,7 @@ export interface Attempt {
 
 export interface AttemptCommand {
   acted_at: Timestamp | null;
+  action_id: string | null;
   attempt_id: Int8;
   client_message_id: string | null;
   input: string | null;

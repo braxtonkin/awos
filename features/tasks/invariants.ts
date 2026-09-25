@@ -375,7 +375,7 @@ export const properties = {
   ActionTargetFitsItsKind: {
     moment: 'each-step',
     breaks: sql`select h.id, h.kind from targeted h where not coalesce(case
-        when h.kind in ('stop_task', 'retry_task', 'approve', 'send_back', 'pick_choice', 'untick_items', 'edit_draft') then h.task_id is not null
+        when h.kind in ('stop_task', 'retry_task', 'approve', 'send_back', 'pick_choice', 'untick_items', 'edit_draft', 'steer_task') then h.task_id is not null
         when h.kind in ('add_repository', 'edit_repository') then h.repository_id is not null
         when h.kind = 'replace_credential' then h.connector is not null
         else h.routine_id is not null
@@ -390,6 +390,11 @@ export const properties = {
         setup: [sql`alter table human_action drop constraint target_fits_kind`],
         violation: sql`insert into human_action (id, at, person_id, kind, connector)
           values ('00000000-0000-4000-8000-00000000000e', ${t0} + interval '20 seconds', 1, 'add_repository', 'codex')`,
+      },
+      {
+        setup: [sql`alter table human_action drop constraint target_fits_kind`],
+        violation: sql`insert into human_action (id, at, person_id, kind, routine_id)
+          values ('00000000-0000-4000-8000-00000000000f', ${t0} + interval '20 seconds', 1, 'steer_task', 1)`,
       },
     ],
   },
