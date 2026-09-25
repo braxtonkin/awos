@@ -1,5 +1,6 @@
 import type { IncomingHttpHeaders } from 'node:http';
 import { z } from 'zod';
+import { ticket as ticketKey } from '../../shared/actions.ts';
 import { json, serve, type Answer, type Asked, type Route, type Served } from './fake-http.ts';
 
 const statuses = ['To Do', 'In Progress', 'Done'] as const;
@@ -229,12 +230,15 @@ export async function startFakeJira(settings: FakeJiraSettings): Promise<Served>
     return { status: 204 };
   });
 
-  const issue = '/rest/api/([23])/issue/([A-Z][A-Z0-9_]*-\\d+)';
   const routes: readonly Route[] = [
     { method: 'GET', path: /^\/rest\/api\/[23]\/myself$/, answer: () => json(account) },
     { method: 'POST', path: /^\/rest\/api\/2\/issue$/, answer: createIssue },
     { method: 'POST', path: /^\/rest\/api\/3\/search\/jql$/, answer: search },
-    { method: 'GET', path: new RegExp(`^${issue}$`), answer: (asked, [version, key]) => withTicket((_asked, ticket) => json(issueJson(ticket, version === '2' ? 2 : 3)))(asked, [key ?? '']) },
+    {
+      method: 'GET',
+      path: /^\/rest\/api\/([23])\/issue\/([^/]+)$/,
+      answer: (asked, [version, key]) => (ticketKey.safeParse(key).success ? withTicket((_asked, ticket) => json(issueJson(ticket, version === '2' ? 2 : 3)))(asked, [key ?? '']) : missing()),
+    },
     { method: 'GET', path: /^\/rest\/api\/2\/issue\/([^/]+)\/comment$/, answer: listComments(2) },
     { method: 'GET', path: /^\/rest\/api\/3\/issue\/([^/]+)\/comment$/, answer: listComments(3) },
     { method: 'POST', path: /^\/rest\/api\/2\/issue\/([^/]+)\/comment$/, answer: addComment(2) },

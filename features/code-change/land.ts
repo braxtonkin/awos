@@ -1,4 +1,4 @@
-import { actionKinds, owe, type ActionSpec, type Owe, type Stands } from '../../shared/actions.ts';
+import { actionKinds, owe, ticket, type ActionSpec, type Owe, type Stands } from '../../shared/actions.ts';
 import { mergeState, type Answered, type MergeState, type ReadMergeState } from '../../shared/merge-state.ts';
 import type { Review } from '../../shared/review.ts';
 import type { Instruction, Unasked } from '../../shared/workflow.ts';
@@ -10,7 +10,7 @@ export type DraftSetting = 'when-green' | 'at-once';
 
 export type PullRequest = { readonly repository: string; readonly repositoryId: string; readonly branch: string; readonly number: number | null; readonly actsAs: string | null };
 
-export type Reading = { readonly state: MergeState; readonly draft: DraftSetting };
+export type Reading = { readonly number: number; readonly state: MergeState; readonly draft: DraftSetting };
 
 export type Answer = { readonly kind: 'ejection' | 'review' | 'refusal'; readonly id: string };
 
@@ -46,13 +46,13 @@ export type LandRecord = {
   readonly evidence: string;
 };
 
-type NoApproval<K extends string> = K extends `${string}approve${string}` ? never : unknown;
+type ReviewKind = (typeof actionKinds.ticketComment | typeof actionKinds.ticketTransition)['kind'];
 
 const reviewed = Symbol('reviewed');
 
-export type ReviewAction = Owe & { readonly [reviewed]: true };
+export type ReviewAction = Owe<ReviewKind> & { readonly [reviewed]: true };
 
-export const reviewOwes = <K extends string, P, R>(kind: ActionSpec<K, P, R> & NoApproval<K>, payload: P): ReviewAction => ({ ...owe(kind, payload), [reviewed]: true });
+export const reviewOwes = <K extends ReviewKind, P, R>(kind: ActionSpec<K, P, R>, payload: P): ReviewAction => ({ ...owe(kind, payload), [reviewed]: true });
 
 export type ReviewAnswer = { readonly actions: readonly ReviewAction[]; readonly note: Instruction };
 
@@ -218,8 +218,6 @@ export type Land = { readonly store: LandStore; readonly read: ReadMergeState; r
 
 const nothingFollows: Follow = { whenDone: [], whenAwaiting: null };
 
-const ticketKey = /^[A-Z][A-Z0-9_]*-\d+$/;
-
 function owedFor(action: Owing, task: AtLand, reading: Reading): Owe {
   const { repository, branch } = task.pull;
   switch (action) {
@@ -228,15 +226,15 @@ function owedFor(action: Owing, task: AtLand, reading: Reading): Owe {
     case 'update-branch':
       return owe(actionKinds.prUpdateBranch, { repository, head: branch, commit: reading.state.head });
     case 'merge':
-      return owe(actionKinds.prMerge, { repository, head: branch, commit: reading.state.head });
+      return owe(actionKinds.prMerge, { repository, number: reading.number, commit: reading.state.head });
   }
 }
 
 function afterMerge(task: AtLand, reading: Reading): readonly Owe[] {
-  const pull = task.pull.number === null ? 'the pull request' : `pull request #${String(task.pull.number)}`;
-  const ticket = ticketKey.test(task.key);
-  const comment = ticket ? [owe(actionKinds.ticketComment, { ticket: task.key, text: `AutoWorker merged ${pull} at ${reading.state.head}.`, linkPullRequest: true })] : [];
-  const ended = ticket && task.statuses.end !== null ? [owe(actionKinds.ticketTransition, { ticket: task.key, status: task.statuses.end, from: task.statuses.start })] : [];
+  const pull = `pull request #${String(reading.number)}`;
+  const isTicket = ticket.safeParse(task.key).success;
+  const comment = isTicket ? [owe(actionKinds.ticketComment, { ticket: task.key, text: `AutoWorker merged ${pull} at ${reading.state.head}.`, linkPullRequest: true })] : [];
+  const ended = isTicket && task.statuses.end !== null ? [owe(actionKinds.ticketTransition, { ticket: task.key, status: task.statuses.end, from: task.statuses.start })] : [];
   return [...comment, ...ended, owe(actionKinds.branchDelete, { repository: task.pull.repository, branch: task.pull.branch })];
 }
 
@@ -283,7 +281,7 @@ async function readState(land: Land, pull: PullRequest, record: LandRecord): Pro
     const read = await land.read({ repositoryId: pull.repositoryId, number: pull.number, actsAs: pull.actsAs }, latestAnswered(record), AbortSignal.timeout(land.readTimeoutMs));
     if ('failed' in read) return `reading the pull request failed: ${read.failed}`;
     const parsed = mergeState.safeParse(read.state);
-    return parsed.success ? { state: parsed.data, draft: record.draftLeaves } : `the merge state did not parse: ${parsed.error.message}`;
+    return parsed.success ? { number: pull.number, state: parsed.data, draft: record.draftLeaves } : `the merge state did not parse: ${parsed.error.message}`;
   } catch (error) {
     return `reading the pull request failed: ${error instanceof Error ? error.message : String(error)}`;
   }

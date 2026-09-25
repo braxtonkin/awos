@@ -125,20 +125,31 @@ const fragmentOf = z.object({ params: z.object({ itemId: z.string() }) });
 
 type Parsed = { readonly method: string | null; readonly itemId: string | null; readonly fragment: boolean; readonly body: unknown; readonly clientId: string | null; readonly responseTo: string | null };
 
+export const nulStandIn = '�';
+
+const withoutNul = (text: string): string => text.replaceAll('\u0000', nulStandIn);
+
+function nulFree(value: unknown): unknown {
+  if (typeof value === 'string') return withoutNul(value);
+  if (Array.isArray(value)) return value.map(nulFree);
+  if (value !== null && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, inner]) => [withoutNul(key), nulFree(inner)]));
+  return value;
+}
+
 function parseLine(line: Line): Parsed {
   switch (line.kind) {
     case 'pushed':
-      return { method: null, itemId: null, fragment: false, body: { commit: line.commit, branch: line.branch }, clientId: null, responseTo: null };
+      return { method: null, itemId: null, fragment: false, body: { commit: line.commit, branch: withoutNul(line.branch) }, clientId: null, responseTo: null };
     case 'reproduced':
-      return { method: null, itemId: null, fragment: false, body: line.reproduction, clientId: null, responseTo: null };
+      return { method: null, itemId: null, fragment: false, body: nulFree(line.reproduction), clientId: null, responseTo: null };
     case 'end':
       return { method: null, itemId: null, fragment: false, body: {}, clientId: null, responseTo: null };
     case 'app': {
       let json: unknown;
       try {
-        json = JSON.parse(line.text);
+        json = nulFree(JSON.parse(line.text));
       } catch {
-        return { method: null, itemId: null, fragment: false, body: line.text, clientId: null, responseTo: null };
+        return { method: null, itemId: null, fragment: false, body: withoutNul(line.text), clientId: null, responseTo: null };
       }
       const message = appMessage.safeParse(json);
       const method = message.success ? (message.data.method ?? null) : null;
@@ -173,7 +184,7 @@ async function storeLine(writer: Writer, attempt: AttemptId, line: Line, now: Da
     })
     .execute();
   if (line.kind === 'pushed') {
-    await writer.updateTable('attempt').set({ last_pushed: line.commit }).where('id', '=', attempt).where('branch', '=', line.branch).execute();
+    await writer.updateTable('attempt').set({ last_pushed: line.commit }).where('id', '=', attempt).where('branch', '=', withoutNul(line.branch)).execute();
   }
   if (parsed.method === 'item/completed' && parsed.itemId !== null) {
     await writer.deleteFrom('attempt_event').where('attempt_id', '=', attempt).where('item_id', '=', parsed.itemId).where('fragment', '=', true).execute();
@@ -283,15 +294,17 @@ function frameOf(command: Stored, thread: string, turn: string | undefined): Com
 }
 
 export async function pollCommands(db: Database, attempt: AttemptId, after: number): Promise<Polled> {
-  const row = await db.selectFrom('attempt').select('finished_at').where('id', '=', attempt).executeTakeFirst();
-  const commands = await db
+  const numbered = await db
     .selectFrom('attempt_command')
     .select(['seq', 'kind', 'input', 'output_schema', 'client_message_id'])
     .where('attempt_id', '=', attempt)
     .where('seq', '>', String(after))
     .orderBy('seq')
     .execute();
+  const row = await db.selectFrom('attempt').select('finished_at').where('id', '=', attempt).executeTakeFirst();
   const ended = row === undefined || row.finished_at !== null;
+  const firstNotStop = numbered.findIndex(command => command.kind !== 'turn.stop');
+  const commands = ended && firstNotStop !== -1 ? numbered.slice(0, firstNotStop) : numbered;
   if (commands.length === 0) return { frames: [], ended };
   const starts = await db.selectFrom('attempt_command').select('seq').where('attempt_id', '=', attempt).where('kind', '=', 'turn.start').orderBy('seq').execute();
   const answered = await answeredIds(db, attempt, [bridgeRequestIds.threadStart, ...starts.map(start => commandRequestId(Number(start.seq)))]);

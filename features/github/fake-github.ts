@@ -18,6 +18,7 @@ export type FakePull = {
   readonly number: number;
   readonly nodeId: string;
   readonly branch: string;
+  readonly base: string;
   body: string;
   draft: boolean;
   closed: boolean;
@@ -25,6 +26,7 @@ export type FakePull = {
   conflict: boolean;
   behind: boolean;
   mergeabilityKnown: boolean;
+  ruleBlocks: boolean;
   readonly reviews: FakeReview[];
   queued: { readonly head: string } | null;
   readonly ejections: Ejection[];
@@ -42,6 +44,7 @@ export type World = {
   settings: Settings;
   readonly commits: Map<string, readonly string[]>;
   readonly checks: Map<string, Map<string, CheckResult>>;
+  readonly earlier: Map<string, Map<string, CheckResult>>;
   readonly branches: Map<string, string>;
   readonly pulls: FakePull[];
   readonly merges: Merged[];
@@ -61,6 +64,7 @@ export function newWorld(settings: Settings): World {
     settings,
     commits: new Map([[root, []]]),
     checks: new Map(),
+    earlier: new Map(),
     branches: new Map([[base, root]]),
     pulls: [],
     merges: [],
@@ -80,6 +84,14 @@ export function commitOn(world: World, parents: readonly string[]): string {
 export const headOf = (world: World, pull: FakePull): string => (pull.merged === null ? (world.branches.get(pull.branch) ?? '') : pull.merged.head);
 
 export const checksAt = (world: World, head: string): Map<string, CheckResult> => world.checks.get(head) ?? new Map<string, CheckResult>();
+
+export function rerun(world: World, head: string, name: string): void {
+  const checks = checksAt(world, head);
+  const result = checks.get(name);
+  if (result === undefined || result === 'pending') return;
+  world.earlier.set(head, new Map([...(world.earlier.get(head) ?? []), [name, result]]));
+  checks.set(name, 'pending');
+}
 
 function ancestors(world: World, commit: string): ReadonlySet<string> {
   const seen = new Set<string>();
@@ -110,7 +122,7 @@ export function moveBranch(world: World, branch: string, to: string): void {
 
 const latestByReviewer = (pull: FakePull): readonly FakeReview[] => [...Map.groupBy(pull.reviews, review => review.reviewer).values()].flatMap(reviews => reviews.slice(-1));
 
-const reviewDecision = (world: World, pull: FakePull): 'APPROVED' | 'CHANGES_REQUESTED' | 'REVIEW_REQUIRED' | null => {
+export const reviewDecision = (world: World, pull: FakePull): 'APPROVED' | 'CHANGES_REQUESTED' | 'REVIEW_REQUIRED' | null => {
   if (!world.settings.requireReviews) return null;
   const latest = latestByReviewer(pull);
   if (latest.some(review => review.state === 'CHANGES_REQUESTED')) return 'CHANGES_REQUESTED';
@@ -124,6 +136,7 @@ export const allows = (world: World, pull: FakePull, head: string): boolean =>
   pull.merged === null &&
   !pull.draft &&
   !pull.conflict &&
+  !pull.ruleBlocks &&
   headOf(world, pull) === head &&
   requiredGreen(world, head) &&
   (reviewDecision(world, pull) ?? 'APPROVED') === 'APPROVED' &&
@@ -134,7 +147,7 @@ function mergeStateStatus(world: World, pull: FakePull): string {
   if (pull.draft) return 'DRAFT';
   if (!pull.mergeabilityKnown) return 'UNKNOWN';
   if (pull.conflict) return 'DIRTY';
-  if (!requiredGreen(world, head) || (reviewDecision(world, pull) ?? 'APPROVED') !== 'APPROVED') return 'BLOCKED';
+  if (pull.ruleBlocks || !requiredGreen(world, head) || (reviewDecision(world, pull) ?? 'APPROVED') !== 'APPROVED') return 'BLOCKED';
   if (world.settings.strict && pull.behind) return 'BEHIND';
   return [...checksAt(world, head).values()].includes('red') ? 'UNSTABLE' : 'CLEAN';
 }
@@ -162,7 +175,7 @@ const restPull = (world: World, pull: FakePull) => ({
   merged_at: pull.merged === null ? null : at(world.time),
   body: pull.body,
   head: { ref: pull.branch, sha: headOf(world, pull) },
-  base: { ref: base },
+  base: { ref: pull.base },
 });
 
 const page = <T>(items: readonly T[], first: number, after: string | undefined) => {
@@ -171,15 +184,19 @@ const page = <T>(items: readonly T[], first: number, after: string | undefined) 
   return { pageInfo: { hasNextPage: end < items.length, endCursor: String(end) }, nodes: items.slice(start, end) };
 };
 
-const contextsOf = (world: World, head: string) => [
-  ...[...checksAt(world, head)].map(([name, result]) => ({
-    __typename: 'CheckRun',
-    name,
-    status: result === 'pending' ? 'IN_PROGRESS' : 'COMPLETED',
-    conclusion: result === 'pending' ? null : result === 'green' ? 'SUCCESS' : 'FAILURE',
-    startedAt: at(0),
-  })),
-];
+const checkRun = (name: string, result: CheckResult, startedAt: string | null) => ({
+  __typename: 'CheckRun',
+  name,
+  status: result !== 'pending' ? 'COMPLETED' : startedAt === null ? 'QUEUED' : 'IN_PROGRESS',
+  conclusion: result === 'pending' ? null : result === 'green' ? 'SUCCESS' : 'FAILURE',
+  startedAt,
+});
+
+const contextsOf = (world: World, head: string) =>
+  [...checksAt(world, head)].flatMap(([name, result]) => {
+    const earlier = result === 'pending' ? world.earlier.get(head)?.get(name) : undefined;
+    return earlier === undefined ? [checkRun(name, result, at(0))] : [checkRun(name, earlier, at(0)), checkRun(name, result, null)];
+  });
 
 const reviewNode = (review: FakeReview, first: number) => ({
   id: review.id,
@@ -275,7 +292,30 @@ function graphql(world: World, body: unknown): Answer {
   return graphqlError('The fake GitHub does not know this query.');
 }
 
-const openPullOn = (world: World, branch: string): FakePull | undefined => world.pulls.find(pull => pull.branch === branch && !pull.closed && pull.merged === null);
+const openPullOn = (world: World, branch: string, into: string): FakePull | undefined => world.pulls.find(pull => pull.branch === branch && pull.base === into && !pull.closed && pull.merged === null);
+
+export function openPullRequest(world: World, branch: string, into: string, body: string, draft: boolean): FakePull {
+  world.serial += 1;
+  const pull: FakePull = {
+    number: world.pulls.length + 1,
+    nodeId: `PR_${String(world.serial)}`,
+    branch,
+    base: into,
+    body,
+    draft,
+    closed: false,
+    merged: null,
+    conflict: false,
+    behind: false,
+    mergeabilityKnown: false,
+    ruleBlocks: false,
+    reviews: [],
+    queued: null,
+    ejections: [],
+  };
+  world.pulls.push(pull);
+  return pull;
+}
 
 const jsonBody = z.record(z.string(), z.unknown());
 
@@ -296,26 +336,10 @@ function rest(world: World, method: string, path: string, query: URLSearchParams
   }
   if (method === 'POST' && route === '/pulls') {
     const head = String(body['head']);
+    const into = String(body['base']);
     if (!world.branches.has(head)) return refuse(422, 'Validation Failed', `The head ${head} does not exist.`);
-    if (openPullOn(world, head) !== undefined) return refuse(422, 'Validation Failed', `A pull request already exists for sim:${head}.`);
-    world.serial += 1;
-    const pull: FakePull = {
-      number: world.pulls.length + 1,
-      nodeId: `PR_${String(world.serial)}`,
-      branch: head,
-      body: String(body['body']),
-      draft: body['draft'] === true,
-      closed: false,
-      merged: null,
-      conflict: false,
-      behind: false,
-      mergeabilityKnown: false,
-      reviews: [],
-      queued: null,
-      ejections: [],
-    };
-    world.pulls.push(pull);
-    return ok(restPull(world, pull), 201);
+    if (openPullOn(world, head, into) !== undefined) return refuse(422, 'Validation Failed', `A pull request already exists for sim:${head}.`);
+    return ok(restPull(world, openPullRequest(world, head, into, String(body['body']), body['draft'] === true)), 201);
   }
   if (pullRoute !== null) {
     const pull = world.pulls.find(entry => entry.number === Number.parseInt(pullRoute[1] ?? '', 10));
@@ -370,9 +394,24 @@ function rest(world: World, method: string, path: string, query: URLSearchParams
   return refuse(404, 'Not Found');
 }
 
-export type Faults = { readonly loseReply: (method: string, path: string) => boolean; readonly rewrite: (method: string, path: string, body: Readonly<Record<string, unknown>>) => Readonly<Record<string, unknown>> };
+export type Faults = {
+  readonly loseReply: (method: string, path: string) => boolean;
+  readonly rewrite: (method: string, path: string, body: Readonly<Record<string, unknown>>) => Readonly<Record<string, unknown>>;
+  readonly racePush: () => boolean;
+};
 
-export const noFaults: Faults = { loseReply: () => false, rewrite: (_method, _path, body) => body };
+const mergeTarget = (world: World, method: string, path: string, body: Readonly<Record<string, unknown>>): FakePull | undefined => {
+  const merging = method === 'PUT' ? /\/pulls\/(\d+)\/merge$/.exec(path) : null;
+  if (merging !== null) return world.pulls.find(pull => pull.number === Number.parseInt(merging[1] ?? '', 10));
+  const parsed = path === '/graphql' ? graphqlBody.safeParse(body) : undefined;
+  return parsed?.success === true && parsed.data.query.includes('enqueuePullRequest') ? world.pulls.find(pull => pull.nodeId === parsed.data.variables.id) : undefined;
+};
+
+function pushTested(world: World, pull: FakePull): void {
+  const tested = commitOn(world, [headOf(world, pull)]);
+  world.checks.set(tested, new Map([[checkNames.required, 'green'], [checkNames.counted, 'green'], [checkNames.ignorable, 'green']]));
+  moveBranch(world, pull.branch, tested);
+}
 
 export const fakeFetch =
   (world: World, faults: Faults): typeof fetch =>
@@ -382,6 +421,8 @@ export const fakeFetch =
     const method = init?.method ?? 'GET';
     const text = typeof init?.body === 'string' ? init.body : '';
     const given = faults.rewrite(method, url.pathname, text === '' ? {} : jsonBody.parse(JSON.parse(text)));
+    const raced = mergeTarget(world, method, url.pathname, given);
+    if (raced !== undefined && raced.merged === null && !raced.closed && faults.racePush()) pushTested(world, raced);
     const answer = url.pathname === '/graphql' ? graphql(world, given) : rest(world, method, url.pathname, url.searchParams, given);
     if (method !== 'GET' && !url.pathname.endsWith('/graphql') && faults.loseReply(method, url.pathname)) throw new TypeError('fetch failed, because the reply was lost');
     if (url.pathname === '/graphql' && /mutation/.test(text) && faults.loseReply(method, url.pathname)) throw new TypeError('fetch failed, because the reply was lost');

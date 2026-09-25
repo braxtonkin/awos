@@ -1,6 +1,7 @@
 import { actionKinds, performer, type Limits, type Outcome, type Owed, type Performers } from '../../shared/actions.ts';
 import type { Database } from '../../shared/db/client.ts';
-import type { ClientFor, GithubClient, Pull, Reply } from './client.ts';
+import type { ClientFor, GithubClient, Pull, PullFacts, Reply } from './client.ts';
+import { reduce, rulesOf, viewOf, type Rules } from './merge-state.ts';
 
 export const githubKinds = [
   actionKinds.prOpenDraft.kind,
@@ -14,9 +15,15 @@ export const githubKinds = [
 
 export type GithubKind = (typeof githubKinds)[number];
 
-export type OwedAt = (row: string) => Promise<Date | undefined>;
+export type OwedMerge = { readonly owedAt: Date; readonly rules: Rules };
 
-export type Connector = { readonly clientFor: ClientFor; readonly owedAt: OwedAt };
+export type MergeRowOf = (row: string) => Promise<OwedMerge | undefined>;
+
+export type Connector = { readonly clientFor: ClientFor; readonly mergeRowOf: MergeRowOf };
+
+export type MergeGuards = { readonly MergeRereadsFacts: boolean };
+
+export const mergeGuarded: MergeGuards = { MergeRereadsFacts: true };
 
 type Answer = Extract<Reply<unknown>, { readonly status: number }>;
 
@@ -115,29 +122,32 @@ type MergeOutcome = Outcome<
   | { readonly outcome: 'ejected'; readonly head: string; readonly ejection: string; readonly reason: string }
 >;
 
-async function merge(client: GithubClient, owedAt: OwedAt, owed: Owed<{ readonly repository: string; readonly head: string; readonly commit: string }>, { signal }: Limits): Promise<MergeOutcome> {
-  const { repository, head, commit } = owed.payload;
-  const pulls = await client.pullsByHead(repository, head, 'all', signal);
-  if (!('ok' in pulls)) return failed('the pull request lookup', pulls);
-  const pull = pulls.ok.toSorted((one, other) => other.number - one.number)[0];
-  if (pull === undefined) return missing(head);
-  if (pull.merged_at !== null) return { done: { outcome: 'merged', head: pull.head.sha } };
-  const facts = await client.pullFacts(repository, pull.number, null, signal);
+const weighedBefore = (facts: PullFacts, owedAt: Date): PullFacts => ({ ...facts, reviews: facts.reviews.filter(review => new Date(review.submittedAt) >= owedAt) });
+
+type Merging = { readonly client: GithubClient; readonly mergeRowOf: MergeRowOf; readonly guards: MergeGuards };
+
+async function merge({ client, mergeRowOf, guards }: Merging, owed: Owed<{ readonly repository: string; readonly number: number; readonly commit: string }>, { signal }: Limits): Promise<MergeOutcome> {
+  const { repository, number, commit } = owed.payload;
+  const row = await mergeRowOf(owed.row);
+  if (row === undefined) return { failed: `Outbox row ${owed.row} does not exist.` };
+  const facts = await client.pullFacts(repository, number, null, signal);
   if (!('ok' in facts)) return failed('the pull request read', facts);
+  if (facts.ok.state === 'MERGED') return { done: { outcome: 'merged', head: facts.ok.head } };
   if (facts.ok.queuedAt !== null) return { done: { outcome: 'queued', head: facts.ok.queuedAt } };
-  const since = await owedAt(owed.row);
   const ejection = facts.ok.ejection;
-  if (ejection !== null && since !== undefined && new Date(ejection.at) >= since) {
+  if (ejection !== null && new Date(ejection.at) >= row.owedAt) {
     return { done: { outcome: 'ejected', head: ejection.head ?? commit, ejection: ejection.id, reason: ejection.reason } };
   }
-  if (facts.ok.state === 'CLOSED') return { refused: { reason: `Pull request ${String(pull.number)} is closed.`, head: commit } };
+  if (facts.ok.state === 'CLOSED') return { refused: { reason: `Pull request ${String(number)} is closed.`, head: commit } };
+  const value = reduce(viewOf(weighedBefore(facts.ok, row.owedAt), row.rules, { ejection: ejection?.id ?? null, review: null }));
+  if (guards.MergeRereadsFacts && value.kind !== 'ready') return { refused: { reason: `Pull request ${String(number)} reads as ${value.kind} at ${facts.ok.head}, not ready.`, head: commit } };
   if (facts.ok.usesMergeQueue) {
     const queued = await client.enqueue(facts.ok.id, commit, signal);
     if ('ok' in queued) return { done: { outcome: 'queued', head: queued.ok.head ?? commit } };
     return queued.status === 422 ? { refused: { reason: said('joining the merge queue', queued), head: commit } } : failed('joining the merge queue', queued);
   }
-  const merged = await client.merge(repository, pull.number, commit, signal);
-  if ('ok' in merged) return merged.ok.merged ? { done: { outcome: 'merged', head: commit } } : { failed: `GitHub did not merge pull request ${String(pull.number)}.` };
+  const merged = await client.merge(repository, number, commit, signal);
+  if ('ok' in merged) return merged.ok.merged ? { done: { outcome: 'merged', head: commit } } : { failed: `GitHub did not merge pull request ${String(number)}.` };
   return merged.status === 405 || merged.status === 409 || merged.status === 422 ? { refused: { reason: said('the merge', merged), head: commit } } : failed('the merge', merged);
 }
 
@@ -158,20 +168,29 @@ async function remove(client: GithubClient, owed: Owed<{ readonly repository: st
   return deleted.status === 404 || already(deleted, /does not exist/i) ? { done: { deleted: false } } : failed('the branch delete', deleted);
 }
 
-export const githubPerformers = (connector: Connector): Performers<GithubKind> => ({
+export const githubPerformers = (connector: Connector, guards: MergeGuards = mergeGuarded): Performers<GithubKind> => ({
   'pr.open-draft': performer(actionKinds.prOpenDraft, { catches: 'duplicates', call: (owed, limits) => withClient(connector, owed, client => openDraft(client, owed, limits)) }),
   'pr.mark-ready': performer(actionKinds.prMarkReady, { catches: 'duplicates', call: (owed, limits) => withClient(connector, owed, client => markReady(client, owed, limits)) }),
   'pr.evidence': performer(actionKinds.prEvidence, { catches: 'duplicates', call: (owed, limits) => withClient(connector, owed, client => showEvidence(client, owed, limits)) }),
   'pr.update-branch': performer(actionKinds.prUpdateBranch, { catches: 'duplicates', call: (owed, limits) => withClient(connector, owed, client => updateBranch(client, owed, limits)) }),
   'pr.merge': performer(
     actionKinds.prMerge,
-    { catches: 'duplicates', call: (owed, limits) => withClient(connector, owed, client => merge(client, connector.owedAt, owed, limits)) },
+    { catches: 'duplicates', call: (owed, limits) => withClient(connector, owed, client => merge({ client, mergeRowOf: connector.mergeRowOf, guards }, owed, limits)) },
     eb => eb('task.step', '=', 'land'),
   ),
   'branch.advance': performer(actionKinds.branchAdvance, { catches: 'duplicates', call: (owed, limits) => withClient(connector, owed, client => advance(client, owed, limits)) }),
   'branch.delete': performer(actionKinds.branchDelete, { catches: 'duplicates', call: (owed, limits) => withClient(connector, owed, client => remove(client, owed, limits)) }),
 });
 
-export const outboxOwedAt =
-  (db: Database): OwedAt =>
-  async row => (await db.selectFrom('outbox').select('owed_at').where('id', '=', row).executeTakeFirst())?.owed_at;
+export const outboxMergeRow =
+  (db: Database): MergeRowOf =>
+  async row => {
+    const found = await db
+      .selectFrom('outbox')
+      .innerJoin('task', 'task.id', 'outbox.task_id')
+      .innerJoin('repository', 'repository.id', 'task.repository_id')
+      .select(['outbox.owed_at', 'repository.ignorable_checks', 'repository.ignored_reviewers', 'repository.draft_leaves'])
+      .where('outbox.id', '=', row)
+      .executeTakeFirst();
+    return found === undefined ? undefined : { owedAt: found.owed_at, rules: rulesOf(found) };
+  };

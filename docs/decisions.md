@@ -531,6 +531,35 @@ Rejected options:
 - **A second list of local steps.** It is quicker to write, but it drifts from `ci.yml` the first time someone adds a step to one and not the other.
 - **Run the workflow with a GitHub Actions emulator.** It would run the `uses:` steps too, but it adds a tool the Stack doesn't list and a second way to run CI, and `ci.yml` needs only its `run:` steps.
 
+### Land's rules for a lagging branch or draft sit outside Land.tla
+
+Decided 25 Sep 2026 after the audit before the merge of the end-to-end branch (FX4, finding F9). Three rows of `rules` in `features/code-change/land.ts` have no counterpart in `features/code-change/Land.tla`:
+
+- **Behind.** A pull request whose branch is behind its base owes `pr.update-branch` at the head Land read.
+- **Still behind.** A branch still behind after AutoWorker updated it at the same head fails the attempt.
+- **Still a draft.** A draft that is still a draft after AutoWorker marked it ready fails the attempt.
+
+The model has no base branch that moves ahead, and its `MarkReady` clears the draft in the same step, so none of these states exist in it. They stay outside the model, for these reasons:
+
+- **They guard progress, not safety.** None of them owes a merge. An update moves the head, so a merge still needs a later ready read at the new head, and the merge performer reads the pull request again and refuses unless that read is ready (F5). The two "still" rows only fail an attempt, which `FailAttempt` already models with its retry cap. So `MergedHeadWasMergeable`, `PerformedMergeWasAllowed`, and `ReadyOnlyWhenChecksGreen` hold with or without them.
+- **They answer GitHub's lag, which the model can't bound.** Each row exists so that an update or a ready call that GitHub accepted but did not apply costs one retry instead of an owed action without end. Modeling that needs a base branch, an update row, and a lag between the call and GitHub's state. That multiplies the states TLC explores, and it was more work than this unit's timebox allowed.
+
+What checks them now: `github-sim` reads `behind` and performs `pr.update-branch` through the real client against the fake GitHub, whose update is refused when the head moved and answers "no new commits" when the branch is current. `land-sim` never reads `behind`, and its record's `updatedAt` is always null, so no simulation runs the "still behind" or "still a draft" rows through `decideLand`. That gap stays open.
+
+Rejected options:
+
+- **Model them now.** It is the stronger check, and the next change to these rows should add it. It needs a guard per row, a mutant per guard in `verify.ts`, and matching moves in `land-sim`.
+
+### The engine stores a NUL character from the bridge as U+FFFD
+
+Decided 25 Sep 2026. Postgres can't hold the NUL character (`\u0000`) in `jsonb` or `text`, and the app server can write one, for example in a command's output. Before this decision, one NUL in one line made the engine refuse the whole batch. The bridge resent it until the lease ran out, and the reaper marked the attempt lost. The engine now replaces every NUL with U+FFFD, the Unicode replacement character, where it parses a line and before it stores it. The replacement covers every string and every object key in an app-server line, the text of a line that isn't JSON, a reproduced line, and a pushed line's branch. The stored line then differs from what the app server wrote only where a NUL was, and it shows a visible mark there. `bridge-sim` checks this directly, and its fake app server writes NUL into every step it streams.
+
+Rejected options:
+
+- **Refuse a line that carries NUL.** The attempt would still die, only with a clearer reason.
+- **Drop the NUL character.** It hides that anything was there, and it can join two words.
+- **Store the escaped text `\u0000` as six characters.** A reader can't tell it from an app server that wrote those six characters.
+
 ## Open
 
 Each open question names the current lean or default. A lean is not a decision.

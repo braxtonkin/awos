@@ -140,6 +140,7 @@ export async function runBridge(settings: BridgeSettings, afterTurn: AfterTurn, 
   const stop = new AbortController();
   let ending: Ending | undefined;
   let finishing = false;
+  let fenced = false;
   let endLine: number | undefined;
   let settle = (): void => undefined;
   const settled = new Promise<void>(resolve => (settle = resolve));
@@ -153,6 +154,7 @@ export async function runBridge(settings: BridgeSettings, afterTurn: AfterTurn, 
   const turnEnded = new Promise<void>(resolve => (turnDone = resolve));
   const refusedBy = (from: string, refusal: Refused): void => {
     const result: Ending = { code: 1, reason: `the engine refused the ${from} (${refusal.refused}): ${refusal.reason}` };
+    fenced ||= refusal.refused === 'ended';
     if (refusal.refused !== 'ended') {
       end(result);
       return;
@@ -194,6 +196,10 @@ export async function runBridge(settings: BridgeSettings, afterTurn: AfterTurn, 
     app.kill('SIGTERM');
     await Promise.race([drained, wait(settings.stopGraceMs)]);
   };
+  const storedOrFenced = async (): Promise<void> => {
+    posting.nudge();
+    while (box.pending() > 0 && !fenced && ending === undefined) await wait(settings.retryMs);
+  };
   reader.on('line', text => {
     if (endLine !== undefined) return;
     box.push({ kind: 'app', text });
@@ -214,16 +220,20 @@ export async function runBridge(settings: BridgeSettings, afterTurn: AfterTurn, 
     if (completed.success) turnDone();
     if (completed.success && !finishing) {
       finishing = true;
-      void quiet().then(() => afterTurn(completed.data.params)).then(
-        lines => {
-          for (const body of lines) box.push(body);
-          endLine = box.push({ kind: 'end' });
-          posting.nudge();
-        },
-        (error: unknown) => {
-          end({ code: 1, reason: `the step after the turn failed: ${error instanceof Error ? error.message : String(error)}` });
-        },
-      );
+      const interrupted = completed.data.params.turn.status === 'interrupted';
+      void quiet()
+        .then(() => storedOrFenced())
+        .then(() => (interrupted || fenced ? [] : afterTurn(completed.data.params)))
+        .then(
+          lines => {
+            for (const body of lines) box.push(body);
+            endLine = box.push({ kind: 'end' });
+            posting.nudge();
+          },
+          (error: unknown) => {
+            end({ code: 1, reason: `the step after the turn failed: ${error instanceof Error ? error.message : String(error)}` });
+          },
+        );
     }
   });
   write(initialize);
@@ -310,13 +320,14 @@ export async function runBridge(settings: BridgeSettings, afterTurn: AfterTurn, 
             connection.abort();
             break;
           }
+          if (finishing) continue;
           const accepted = commands.accept(parsed.data);
           if (accepted === 'gap') {
             say(`command ${String(parsed.data.seq)} arrived after ${String(commands.applied())}, so the bridge reconnects from ${String(commands.applied())}`);
             connection.abort();
             break;
           }
-          if (accepted === 'apply' && !finishing) {
+          if (accepted === 'apply') {
             write(parsed.data.request);
             posting.nudge();
           }

@@ -101,12 +101,39 @@ const optionalVerifyField: Edit = {
 
 const optionalExtra = `${codeChange} verify $.properties.extra is not in required`;
 
+const textBlock = "z.strictObject({ kind: z.enum(['text']), title: z.string().nullable(), body: z.string() })";
+
 const textBlockStartsWithBody: Edit = {
-  from: "z.strictObject({ kind: z.enum(['text']), title: z.string().nullable(), body: z.string() })",
+  from: textBlock,
   to: "z.strictObject({ body: z.string(), kind: z.enum(['text']), title: z.string().nullable() })",
 };
 
 const bodyFirst = `${codeChange} specify $.properties.blocks.items.anyOf[0] starts with body`;
+
+const refToSummary = (ref: string): Edit => ({ from: 'summary: z.string(),', to: `summary: z.string().meta({ $ref: '${ref}' }),` });
+
+const schemaPlants: readonly (readonly [string, string, Edit, string])[] = [
+  [
+    'an object that allows keys it does not declare',
+    'shared/review.ts',
+    { from: textBlock, to: "z.looseObject({ kind: z.enum(['text']), title: z.string().nullable(), body: z.string() })" },
+    `${codeChange} specify $.properties.blocks.items.anyOf[0] does not set additionalProperties to false`,
+  ],
+  ['a oneOf from z.discriminatedUnion', 'shared/review.ts', { from: 'const block = z.union([', to: "const block = z.discriminatedUnion('kind', [" }, `${codeChange} specify $.properties.blocks.items uses oneOf`],
+  [
+    'an allOf from .and',
+    'shared/review.ts',
+    { from: textBlock, to: "z.strictObject({ kind: z.enum(['text']), title: z.string().nullable(), body: z.string().and(z.string().min(1)) })" },
+    `${codeChange} specify $.properties.blocks.items.anyOf[0].properties.body uses allOf`,
+  ],
+  ['a $ref the schema does not define', 'shared/review.ts', refToSummary('#/definitions/missing'), `${codeChange} specify $.properties.summary refers to "#/definitions/missing"`],
+  [
+    'an output whose root is not an object',
+    `features/${codeChange}/workflow.ts`,
+    { from: optionalVerifyField.from, to: "behavior: z.enum(['fixed', 'still_wrong']).nullable() }).nullable()" },
+    `${codeChange} verify $ is not type "object"`,
+  ],
+];
 
 const plantedStep = "name: 'planted', reads: [], runBy: 'agent', prompt: 'Planted.', startsEnvironment: false, afterTurn: 'push', needsRepository: true, canEnd: true, owes: [], output: review, requires: ['text'], failures: { fail: { kind: 'fail' } }";
 
@@ -129,6 +156,10 @@ const accessOnlyLoginFrom = "import { accessOnly, type AccessOnlyLogin } from '.
 
 const plantedCheck = "import type { Checks } from './checks.ts';\nimport type { Check } from './kinds.ts';\n\nconst check: Check = { rotates: () => false, run: () => Promise.reject(new Error('planted')) };\n";
 
+const ticketKeyPattern = ['^[A-Z]', '[A-Z0-9_]*', '-\\d+$'].join('');
+
+const ticketKeyCopy = 'Import ticket from shared/actions.ts';
+
 const violations: readonly Violation[] = [
   {
     name: 'tsc rejects a review step that owes an approval',
@@ -138,9 +169,18 @@ const violations: readonly Violation[] = [
     expect: ['TS2345'],
   },
   {
-    name: 'tsc rejects a review step that owes an action it did not build with reviewOwes',
+    name: 'tsc rejects a review step that owes pr.merge, which would bypass the ready rule and the gates',
+    file: 'features/planted/merges.ts',
+    source:
+      "import { actionKinds } from '../../shared/actions.ts';\nimport { reviewOwes, type ReviewStep } from '../code-change/land.ts';\n\nexport const merging: ReviewStep = pull => ({ actions: [reviewOwes(actionKinds.prMerge, { repository: pull.repository, number: pull.number ?? 1, commit: 'a'.repeat(40) })], note: 'The planted step merged.' });\n",
+    tool: 'tsc',
+    expect: ['TS2345'],
+  },
+  {
+    name: 'tsc rejects a review step that owes an allowed kind it did not build with reviewOwes',
     file: 'features/planted/owes.ts',
-    source: "import { z } from 'zod';\nimport { owe, type ActionSpec } from '../../shared/actions.ts';\nimport type { ReviewStep } from '../code-change/land.ts';\n\nconst approve: ActionSpec<'pr.approve', { readonly repository: string }, { readonly review: string }> = { kind: 'pr.approve', payload: z.object({ repository: z.string() }), result: z.object({ review: z.string() }) };\n\nexport const approving: ReviewStep = pull => ({ actions: [owe(approve, { repository: pull.repository })], note: 'The planted step approved.' });\n",
+    source:
+      "import { actionKinds, owe } from '../../shared/actions.ts';\nimport type { ReviewStep } from '../code-change/land.ts';\n\nexport const commenting: ReviewStep = (_pull, task) => ({ actions: [owe(actionKinds.ticketComment, { ticket: task.key, text: 'Please review.', linkPullRequest: true })], note: 'The planted step commented.' });\n",
     tool: 'tsc',
     expect: ['TS2322'],
   },
@@ -148,7 +188,7 @@ const violations: readonly Violation[] = [
     name: 'tsc rejects a GitHub performer map without pr.merge',
     file: 'features/github/planted.ts',
     source:
-      "import type { Performers } from '../../shared/actions.ts';\nimport { githubPerformers, type GithubKind } from './performers.ts';\n\nconst { 'pr.merge': merge, ...others } = githubPerformers({ clientFor: () => Promise.resolve({ failed: 'planted' }), owedAt: () => Promise.resolve(undefined) });\n\nexport const withoutMerge: Performers<GithubKind> = others;\n\nexport const planted = merge;\n",
+      "import type { Performers } from '../../shared/actions.ts';\nimport { githubPerformers, type GithubKind } from './performers.ts';\n\nconst { 'pr.merge': merge, ...others } = githubPerformers({ clientFor: () => Promise.resolve({ failed: 'planted' }), mergeRowOf: () => Promise.resolve(undefined) });\n\nexport const withoutMerge: Performers<GithubKind> = others;\n\nexport const planted = merge;\n",
     tool: 'tsc',
     expect: ['TS2741'],
   },
@@ -293,6 +333,27 @@ const violations: readonly Violation[] = [
     source: "import { pass } from '../../tools/verify/check.js';\nexport const planted = pass('planted', 'tsc resolves this import and node cannot');\n",
     tool: 'eslint',
     expect: ['no-restricted-syntax'],
+  },
+  {
+    name: 'eslint rejects a regular expression that copies the ticket-key pattern',
+    file: 'features/planted/ticket-key.ts',
+    source: `export const key = /${ticketKeyPattern}/;\n`,
+    tool: 'eslint',
+    expect: [ticketKeyCopy],
+  },
+  {
+    name: 'eslint rejects a string that copies the ticket-key pattern',
+    file: 'features/planted/ticket-key-text.ts',
+    source: `export const key = new RegExp('${ticketKeyPattern.replaceAll('\\', '\\\\')}');\n`,
+    tool: 'eslint',
+    expect: [ticketKeyCopy],
+  },
+  {
+    name: 'eslint rejects a copy of the ticket-key pattern in shared/ outside shared/actions.ts, which alone may hold it',
+    file: 'shared/planted-ticket-key.ts',
+    source: `export const key = /${ticketKeyPattern}/;\n`,
+    tool: 'eslint',
+    expect: [ticketKeyCopy],
   },
   {
     name: 'eslint rejects a dynamic import by its .js name',
@@ -1030,6 +1091,7 @@ const violations: readonly Violation[] = [
     tool: 'strict-schemas',
     expect: [bodyFirst],
   },
+  ...schemaPlants.map(([what, file, edit, line]): Violation => ({ name: `strict-schemas rejects ${what}`, file, edit, tool: 'strict-schemas', expect: [line] })),
   {
     name: 'npm run check runs the strict-schemas check',
     file: `features/${codeChange}/workflow.ts`,
@@ -1214,6 +1276,12 @@ const plantedLiveness: Violation = {
 
 const allowances: readonly Allowance[] = [
   {
+    name: 'strict-schemas accepts a $ref that the schema defines',
+    file: 'shared/review.ts',
+    edit: refToSummary('#/properties/outcome'),
+    tool: 'strict-schemas',
+  },
+  {
     name: 'ci-plan runs a new run: step in the verify container with no code change',
     file: ciWorkflow,
     edit: {
@@ -1224,9 +1292,10 @@ const allowances: readonly Allowance[] = [
     shows: 'simulation: docker compose run --rm -T verify npm run verify -- planted --seeds 3\n',
   },
   {
-    name: 'tsc accepts a review step that owes a review request',
+    name: 'tsc accepts a review step that owes a ticket comment, a kind the review allow-list holds',
     file: 'features/planted/requests.ts',
-    source: "import { z } from 'zod';\nimport type { ActionSpec } from '../../shared/actions.ts';\nimport { reviewOwes, type ReviewStep } from '../code-change/land.ts';\n\nconst request: ActionSpec<'pr.request-review', { readonly repository: string }, { readonly requested: boolean }> = { kind: 'pr.request-review', payload: z.object({ repository: z.string() }), result: z.object({ requested: z.boolean() }) };\n\nexport const requesting: ReviewStep = pull => ({ actions: [reviewOwes(request, { repository: pull.repository })], note: 'The planted step asked for a review.' });\n",
+    source:
+      "import { actionKinds } from '../../shared/actions.ts';\nimport { reviewOwes, type ReviewStep } from '../code-change/land.ts';\n\nexport const requesting: ReviewStep = (pull, task) => ({ actions: [reviewOwes(actionKinds.ticketComment, { ticket: task.key, text: `Please review ${pull.repository}.`, linkPullRequest: true })], note: 'The planted step asked for a review.' });\n",
     tool: 'tsc',
   },
   {

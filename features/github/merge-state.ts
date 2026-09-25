@@ -49,8 +49,9 @@ export const ranking: readonly Rank[] = [
 
 const severity: Readonly<Record<CheckResult, number>> = { green: 0, pending: 1, red: 2 };
 
-const latest = (runs: readonly Ran[]): Ran | undefined =>
-  runs.toSorted((one, other) => one.at.localeCompare(other.at) || severity[one.result] - severity[other.result]).at(-1);
+const started = (one: Ran, other: Ran): number => (one.at === null || other.at === null ? Number(one.at === null) - Number(other.at === null) : one.at.localeCompare(other.at));
+
+const latest = (runs: readonly Ran[]): Ran | undefined => runs.toSorted((one, other) => started(one, other) || severity[one.result] - severity[other.result]).at(-1);
 
 function countedResults(facts: PullFacts, rules: Rules): ReadonlyMap<string, CheckResult> {
   const byName = Map.groupBy(
@@ -88,7 +89,7 @@ export function viewOf(facts: PullFacts, rules: Rules, answered: Answered): View
     checksPending: facts.checkedHead !== facts.head || results.includes('pending') || facts.required.some(name => !reported.has(name)),
     mergeabilityKnown: facts.mergeable !== 'UNKNOWN',
     changes: unansweredChanges(facts, rules, answered),
-    reviewBlocks: facts.reviewDecision === 'REVIEW_REQUIRED' || facts.reviewDecision === 'CHANGES_REQUESTED' || facts.mergeStateStatus === 'BLOCKED',
+    reviewBlocks: facts.reviewDecision === 'REVIEW_REQUIRED' || facts.reviewDecision === 'CHANGES_REQUESTED' || (facts.mergeStateStatus === 'BLOCKED' && facts.reviewDecision !== 'APPROVED'),
     behind: facts.mergeStateStatus === 'BEHIND',
     mergeable: facts.mergeable === 'MERGEABLE' && mergeableStatuses.has(facts.mergeStateStatus),
   };
@@ -106,18 +107,17 @@ export async function readWith(client: GithubClient, target: Target, answered: A
   return { state: { head: facts.ok.head, value: reduce(viewOf(facts.ok, target.rules, answered), ranks) } };
 }
 
+type RulesRow = { readonly ignorable_checks: readonly string[]; readonly ignored_reviewers: readonly string[]; readonly draft_leaves: DraftLeaves };
+
+export const rulesOf = (row: RulesRow): Rules => ({ ignorableChecks: new Set(row.ignorable_checks), ignoredReviewers: new Set(row.ignored_reviewers), draftLeaves: row.draft_leaves });
+
 async function targetOf(db: Database, pullRequest: PullRequest): Promise<Target | undefined> {
   const row = await db
     .selectFrom('repository')
     .select(['github', 'ignorable_checks', 'ignored_reviewers', 'draft_leaves'])
     .where('id', '=', pullRequest.repositoryId)
     .executeTakeFirst();
-  if (row === undefined) return undefined;
-  return {
-    github: row.github,
-    number: pullRequest.number,
-    rules: { ignorableChecks: new Set(row.ignorable_checks), ignoredReviewers: new Set(row.ignored_reviewers), draftLeaves: row.draft_leaves },
-  };
+  return row === undefined ? undefined : { github: row.github, number: pullRequest.number, rules: rulesOf(row) };
 }
 
 export const mergeStateReader =
