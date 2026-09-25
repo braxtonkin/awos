@@ -1,8 +1,9 @@
 import { ApiException, type V1Job, type V1Pod, type V1Secret } from '@kubernetes/client-node';
 import { labels, type Cluster } from '../../shared/cluster.ts';
 import type { AccessOnlyLogin } from '../../shared/codex-login.ts';
+import type { JobAfterTurn } from '../../shared/workflow.ts';
 import type { ImageReference, JobSettings } from './settings.ts';
-import type { SecretKey } from './workspace.ts';
+import type { AfterTurnKeys, SecretKeys } from './workspace.ts';
 
 export type RunAs = {
   readonly name: string;
@@ -19,6 +20,7 @@ export type LaunchInput = {
   readonly image: ImageReference;
   readonly repositoryUrl: string;
   readonly startCommit: string;
+  readonly afterTurn: JobAfterTurn;
   readonly attemptToken: string;
   readonly engineUrl: string;
   readonly runAs: RunAs;
@@ -38,6 +40,9 @@ const labelValue = (text: string): string =>
 
 export const imageFor = (settings: JobSettings, repositoryImage: ImageReference | null): ImageReference => repositoryImage ?? settings.image;
 
+const afterTurnKeys = (plan: JobAfterTurn): AfterTurnKeys =>
+  plan.kind === 'push' ? { AFTER_TURN: 'push' } : { AFTER_TURN: 'reproduce', BASE_COMMIT: plan.base, SETUP_COMMAND: plan.setup ?? '' };
+
 export function manifests(input: LaunchInput, settings: JobSettings): Manifests {
   const name = jobName(input.attempt);
   const metadata = {
@@ -46,7 +51,7 @@ export function manifests(input: LaunchInput, settings: JobSettings): Manifests 
     labels: { [labels.attempt]: input.attempt, [labels.task]: labelValue(input.taskKey), [labels.step]: labelValue(input.step) },
     annotations: { 'autoworker.dev/task-key': input.taskKey },
   };
-  const keys: Record<SecretKey, string> = {
+  const keys: SecretKeys = {
     ATTEMPT_ID: input.attempt,
     ATTEMPT_TOKEN: input.attemptToken,
     ENGINE_URL: input.engineUrl,
@@ -57,6 +62,7 @@ export function manifests(input: LaunchInput, settings: JobSettings): Manifests 
     CODEX_AUTH_JSON: input.runAs.codexLogin,
     GIT_AUTHOR_NAME: input.runAs.name,
     GIT_AUTHOR_EMAIL: input.runAs.email,
+    ...afterTurnKeys(input.afterTurn),
   };
   return {
     secret: { apiVersion: 'v1', kind: 'Secret', metadata, type: 'Opaque', stringData: keys },

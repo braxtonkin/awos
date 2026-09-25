@@ -244,7 +244,7 @@ function setupFile(drive: Drive, login: string, accountId: string): object {
   return {
     admin: owner,
     people,
-    repositories: [{ github: drive.github.repository, branch: drive.branch, fastTestCommand: 'npm ci && npm test' }],
+    repositories: [{ github: drive.github.repository, branch: drive.branch, fastTestCommand: 'npm ci && npm test', setupCommand: 'npm ci' }],
     routines: [
       {
         name: 'End to end',

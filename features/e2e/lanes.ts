@@ -91,8 +91,8 @@ export const lanes: readonly Lane[] = [
     ...run,
     number: 6,
     slug: 'verify',
-    procedure: "Read the Verify attempt's environment row and evidence. Pass when the tests-only environment started and stopped once, and the evidence holds the reproduction script and its two runs, failing first and passing second.",
-    decidedBy: named({ exactly: ['record: each Verify attempt started and stopped its environment once', 'record: Verify evidence holds the reproduction script and its two runs, failing first and passing second'] }),
+    procedure: "Read the Verify attempt's environment row, evidence, and reproduced event. Pass when the tests-only environment started and stopped once, and the evidence is the Job's one reproduction, failing on the base commit and passing on the change.",
+    decidedBy: named({ exactly: ['record: each Verify attempt started and stopped its environment once', "record: Verify evidence is the Job's one reproduction, failing on the base commit and passing on the change"] }),
   },
   {
     ...run,

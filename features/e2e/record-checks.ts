@@ -1,8 +1,8 @@
 import { sql } from 'kysely';
-import { z } from 'zod';
 import { labels } from '../../shared/cluster.ts';
 import type { Database } from '../../shared/db/client.ts';
 import { reduce } from '../../shared/items.ts';
+import { behaviorOf, reproduction } from '../../shared/reproduction.ts';
 import { fail, pass, type Check } from '../../tools/verify/check.ts';
 import { leftovers, type CleanSources } from './clean.ts';
 import { attemptsInOrder, evidenceRows, taskFor } from './record.ts';
@@ -12,12 +12,6 @@ export const agentModel = 'gpt-6-luna';
 const stepOrder = ['specify', 'implement', 'verify', 'land'] as const;
 
 const agentSteps = new Set<string>(['specify', 'implement', 'verify']);
-
-const reproduction = z.object({
-  script: z.string().min(1),
-  before: z.object({ exitCode: z.int().nullable() }),
-  after: z.object({ exitCode: z.int().nullable() }),
-});
 
 const check = (name: string, ok: boolean, detail: string): Check => (ok ? pass(name, detail) : fail(name, detail));
 
@@ -75,11 +69,14 @@ export async function recordChecks(db: Database, ticket: string, runAs: string, 
   const verifyPass = attempts.findLast(attempt => attempt.step === 'verify' && attempt.verdict === 'pass');
   const evidence = (await evidenceRows(db, task.id)).find(row => row.attempt === verifyPass?.id);
   const runs = reproduction.safeParse(evidence?.body);
+  const posted = verifyPass === undefined ? [] : await db.selectFrom('attempt_event').select('body').where('attempt_id', '=', verifyPass.id).where('kind', '=', 'reproduced').execute();
+  const fromJob = posted.length === 1 && JSON.stringify(posted[0]?.body) === JSON.stringify(evidence?.body);
+  const exits = runs.success && runs.data.state === 'ran' ? `base exited ${String(runs.data.base.run?.exitCode)}, change exited ${String(runs.data.change.run?.exitCode)}, script ${String(runs.data.script.length)} characters` : null;
   checks.push(
     check(
-      'record: Verify evidence holds the reproduction script and its two runs, failing first and passing second',
-      runs.success && runs.data.before.exitCode !== 0 && runs.data.before.exitCode !== null && runs.data.after.exitCode === 0,
-      runs.success ? `before exited ${String(runs.data.before.exitCode)}, after exited ${String(runs.data.after.exitCode)}, script ${String(runs.data.script.length)} characters` : `attempt ${verifyPass?.id ?? 'none'} has no reproduction evidence`,
+      "record: Verify evidence is the Job's one reproduction, failing on the base commit and passing on the change",
+      runs.success && behaviorOf(runs.data) === 'fixed' && fromJob,
+      exits === null ? `attempt ${verifyPass?.id ?? 'none'} has no reproduction evidence` : `${exits}; ${fromJob ? 'the evidence is the posted reproduction' : `${String(posted.length)} reproductions posted, and the evidence differs`}`,
     ),
   );
   const replays: string[] = [];

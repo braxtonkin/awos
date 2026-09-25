@@ -1,11 +1,11 @@
 import type { Database } from '../../shared/db/client.ts';
 import type { Loop } from '../../shared/loop.ts';
-import type { Instruction } from '../../shared/workflow.ts';
+import type { Instruction, JobAfterTurn } from '../../shared/workflow.ts';
 import { abandon, advance } from './advance.ts';
 import { claim, claimable, park, renew, unlaunched, type Start } from './claim.ts';
 import { continuation } from './continuation.ts';
 import type { RunAsRule } from './run-as.ts';
-import { promptFor, stepOf, type Prompt, type StepRunner } from './step-runner.ts';
+import { baseOf, promptFor, stepOf, type Prompt, type StepRunner } from './step-runner.ts';
 
 export type JobRequest = {
   readonly attempt: string;
@@ -15,6 +15,7 @@ export type JobRequest = {
   readonly image: string | null;
   readonly repository: string;
   readonly startCommit: string;
+  readonly afterTurn: JobAfterTurn;
   readonly attemptToken: string;
   readonly runAs: { readonly id: string; readonly name: string; readonly email: string };
 };
@@ -94,6 +95,7 @@ async function launchAttempt(db: Database, settings: WorkerSettings, attempt: st
     image: step.repository.jobImage,
     repository: step.repository.github,
     startCommit: step.start,
+    afterTurn: step.kind.afterTurn === 'reproduce' ? { kind: 'reproduce', base: (await baseOf(db, step.task)) ?? step.start, setup: step.repository.setupCommand } : { kind: 'push' },
     attemptToken: token,
     runAs: step.runAs,
   });

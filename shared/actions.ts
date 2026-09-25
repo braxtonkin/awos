@@ -31,6 +31,7 @@ export const actionKinds = {
     z.object({ number: z.int().positive(), url: z.url() }),
   ),
   prMarkReady: spec('pr.mark-ready', z.object({ repository, head: branch, evidence: z.string().min(1) }), z.object({ number: z.int().positive() })),
+  prEvidence: spec('pr.evidence', z.object({ repository, head: branch, evidence: z.string().min(1) }), z.object({ number: z.int().positive() })),
   prUpdateBranch: spec('pr.update-branch', z.object({ repository, head: branch, commit }), z.object({ head: commit })),
   prMerge: spec('pr.merge', z.object({ repository, head: branch, commit }), mergeResult),
   branchAdvance: spec('branch.advance', z.object({ repository, branch, from: commit.nullable(), to: commit }), z.object({ head: commit })),

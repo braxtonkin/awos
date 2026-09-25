@@ -1,8 +1,7 @@
 import type { Owe } from './actions.ts';
 import type { Verdict } from './db/types.ts';
+import type { Reproduction } from './reproduction.ts';
 import type { Unasked } from './workflow.ts';
-
-export type Ran = { readonly command: string; readonly cwd: string | null; readonly exitCode: number | null; readonly output: string };
 
 export type Evidence = Readonly<Record<string, unknown>>;
 
@@ -13,13 +12,12 @@ export type Ticket = { readonly key: string; readonly title: string; readonly de
 export type StepInput = {
   readonly step: string;
   readonly ticket: Ticket;
-  readonly base: string | null;
   readonly earlier: readonly Earlier[];
 };
 
 export type Change = { readonly pushed: string | null; readonly carried: string | null };
 
-export type Reply = { readonly step: string; readonly output: unknown; readonly commands: readonly Ran[]; readonly change: Change };
+export type Reply = { readonly step: string; readonly output: unknown; readonly change: Change; readonly reproduction: Reproduction | null };
 
 export type Settled = { readonly output: unknown; readonly evidence: Evidence | null; readonly observed: Unasked | null };
 

@@ -1,9 +1,10 @@
 import { sql } from 'kysely';
 import { z } from 'zod';
 import { actionKinds, type Enqueue } from '../../shared/actions.ts';
-import type { AgentSteps, Change, Earlier, Evidence, Ran } from '../../shared/agent-step.ts';
+import type { AgentSteps, Change, Earlier, Evidence } from '../../shared/agent-step.ts';
 import type { Database } from '../../shared/db/client.ts';
 import { finalMessage, reduce } from '../../shared/items.ts';
+import { reproduction } from '../../shared/reproduction.ts';
 import type { Transacting } from '../../shared/transaction.ts';
 import { outputSchema, runByAgent, type AgentStepKind, type Workflow } from '../../shared/workflow.ts';
 import { advanceWithin, type Then } from './advance.ts';
@@ -28,7 +29,7 @@ export type Step = {
   readonly goal: string;
   readonly startStatus: string | null;
   readonly endStatus: string | null;
-  readonly repository: { readonly github: string; readonly branch: string; readonly fastTestCommand: string | null; readonly jobImage: string | null } | null;
+  readonly repository: { readonly github: string; readonly branch: string; readonly fastTestCommand: string | null; readonly setupCommand: string | null; readonly jobImage: string | null } | null;
   readonly runAs: { readonly id: string; readonly name: string; readonly email: string };
   readonly branch: string | null;
   readonly start: string | null;
@@ -67,6 +68,7 @@ export async function stepOf(db: Database, runner: StepRunner, attempt: string):
       'repository.github',
       'repository.branch as repository_branch',
       'repository.fast_test_command',
+      'repository.setup_command',
       'repository.job_image',
       eb.selectFrom('attempt as earlier').select(earlier => earlier.fn.countAll<string>().as('count')).whereRef('earlier.task_id', '=', 'attempt.task_id').whereRef('earlier.id', '<=', 'attempt.id').as('number'),
     ])
@@ -95,7 +97,7 @@ export async function stepOf(db: Database, runner: StepRunner, attempt: string):
     repository:
       row.github === null || row.repository_branch === null
         ? null
-        : { github: row.github, branch: row.repository_branch, fastTestCommand: row.fast_test_command, jobImage: row.job_image },
+        : { github: row.github, branch: row.repository_branch, fastTestCommand: row.fast_test_command, setupCommand: row.setup_command, jobImage: row.job_image },
     runAs: { id: row.person_id, name: row.person_name, email: row.person_email },
     branch: row.branch,
     start: row.start_commit,
@@ -196,7 +198,7 @@ async function routineStep(db: Database, step: Step): Promise<{ readonly instruc
   return { instructions: row?.instructions.trim() ?? '', skills: row?.skills ?? [] };
 }
 
-async function baseOf(db: Database, task: string): Promise<string | null> {
+export async function baseOf(db: Database, task: string): Promise<string | null> {
   const row = await db
     .selectFrom('attempt')
     .select('attempt.start_commit')
@@ -212,7 +214,7 @@ export type Prompt = { readonly prompt: string; readonly outputSchema: Readonly<
 
 export async function promptFor(db: Database, step: Step, environment: string | null, description: string | null): Promise<Prompt> {
   const { instructions, skills } = await routineStep(db, step);
-  const input = step.agent.input({ step: step.kind.name, ticket: { key: step.key, title: step.title, description }, base: await baseOf(db, step.task), earlier: await earlierOf(db, step) });
+  const input = step.agent.input({ step: step.kind.name, ticket: { key: step.key, title: step.title, description }, earlier: await earlierOf(db, step) });
   const sections = [
     step.kind.prompt.trim(),
     ...(instructions === '' ? [] : [section("The routine's instructions", instructions)]),
@@ -220,6 +222,7 @@ export async function promptFor(db: Database, step: Step, environment: string | 
     ...(await answersFor(db, step)),
     section('Goal', step.goal),
     ...(step.repository?.fastTestCommand == null ? [] : [section('Fast test command', `\`${step.repository.fastTestCommand}\``)]),
+    ...(step.repository?.setupCommand == null ? [] : [section('Setup command', `\`${step.repository.setupCommand}\``)]),
     ...(environment === null ? [] : [section('Environment', environment)]),
     section('Input', input),
     ...skills.map(skillLine),
@@ -227,26 +230,6 @@ export async function promptFor(db: Database, step: Step, environment: string | 
   ];
   return { prompt: `${sections.join('\n\n')}\n`, outputSchema: outputSchema(step.kind) };
 }
-
-const commandItem = z.object({
-  method: z.literal('item/completed'),
-  params: z.object({
-    item: z.looseObject({
-      type: z.literal('commandExecution'),
-      command: z.string(),
-      cwd: z.string().nullable().optional(),
-      exitCode: z.int().nullable().optional(),
-      aggregatedOutput: z.string().nullable().optional(),
-    }),
-  }),
-});
-
-const ranOf = (body: unknown): readonly Ran[] => {
-  const parsed = commandItem.safeParse(body);
-  if (!parsed.success) return [];
-  const { item } = parsed.data.params;
-  return [{ command: item.command, cwd: item.cwd ?? null, exitCode: item.exitCode ?? null, output: item.aggregatedOutput ?? '' }];
-};
 
 const replyOf = (final: string | undefined): unknown => {
   if (final === undefined) return null;
@@ -330,7 +313,13 @@ async function changeOf(tx: Transacting, step: Step): Promise<Change> {
 export async function finishStep(runner: StepRunner, tx: Transacting, attempt: string, now: Date): Promise<void> {
   const step = await stepOf(tx, runner, attempt);
   const lines = await tx.selectFrom('attempt_event').select('body').where('attempt_id', '=', attempt).where('kind', '=', 'app').orderBy('seq').execute();
-  const settled = step.agent.settle({ step: step.kind.name, output: replyOf(finalMessage(reduce(lines))), commands: lines.flatMap(line => ranOf(line.body)), change: await changeOf(tx, step) });
+  const reproduced = await tx.selectFrom('attempt_event').select('body').where('attempt_id', '=', attempt).where('kind', '=', 'reproduced').orderBy('seq', 'desc').executeTakeFirst();
+  const settled = step.agent.settle({
+    step: step.kind.name,
+    output: replyOf(finalMessage(reduce(lines))),
+    change: await changeOf(tx, step),
+    reproduction: reproduced === undefined ? null : reproduction.parse(reproduced.body),
+  });
   if (settled.evidence !== null) {
     await tx
       .insertInto('evidence')

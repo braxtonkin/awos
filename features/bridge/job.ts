@@ -66,9 +66,7 @@ export function applier(): Applier {
   };
 }
 
-export type Pushed = { readonly commit: string; readonly branch: string };
-
-export type AfterTurn = (turn: TurnCompleted) => Promise<Pushed | undefined>;
+export type AfterTurn = (turn: TurnCompleted) => Promise<readonly LineBody[]>;
 
 export type BridgeSettings = {
   readonly engineUrl: URL;
@@ -217,8 +215,8 @@ export async function runBridge(settings: BridgeSettings, afterTurn: AfterTurn, 
     if (completed.success && !finishing) {
       finishing = true;
       void quiet().then(() => afterTurn(completed.data.params)).then(
-        pushed => {
-          if (pushed !== undefined) box.push({ kind: 'pushed', commit: pushed.commit, branch: pushed.branch });
+        lines => {
+          for (const body of lines) box.push(body);
           endLine = box.push({ kind: 'end' });
           posting.nudge();
         },

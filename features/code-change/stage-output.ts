@@ -1,23 +1,11 @@
 import { z } from 'zod';
 import { actionKinds, owe, ticket, type Owe, type OwedKinds } from '../../shared/actions.ts';
-import type { AgentSteps, Change, Earlier, Evidence, Ran, Reply, Settled, StepInput, Verdicted } from '../../shared/agent-step.ts';
+import type { AgentSteps, Change, Earlier, Reply, Settled, StepInput, Verdicted } from '../../shared/agent-step.ts';
+import { behaviorOf, evidenceText, type Reproduction } from '../../shared/reproduction.ts';
 import { review } from '../../shared/review.ts';
 import { workflow } from './workflow.ts';
 
 type Kind = OwedKinds<typeof workflow>;
-
-export const reproduction = {
-  script: '/tmp/autoworker-reproduce.sh',
-  show: 'cat /tmp/autoworker-reproduce.sh',
-  before: 'cd /tmp/autoworker-base && sh /tmp/autoworker-reproduce.sh',
-  after: 'cd /workspace && sh /tmp/autoworker-reproduce.sh',
-} as const;
-
-const reproductionEvidence = z.object({
-  script: z.string(),
-  before: z.object({ command: z.string(), exitCode: z.int().nullable(), output: z.string() }),
-  after: z.object({ command: z.string(), exitCode: z.int().nullable(), output: z.string() }),
-});
 
 const planEvidence = z.object({ plan: z.string().min(1) });
 
@@ -36,24 +24,6 @@ const planOf = (earlier: readonly Earlier[]): string => {
   return plan.success ? plan.data.plan : 'No plan was recorded.';
 };
 
-const shownLimit = 4000;
-
-const tokenShapes = /\b(?:gh[pousr]_\w+|github_pat_\w+|ATATT[\w=-]+|eyJ[\w-]+\.[\w.-]+)/g;
-
-const shown = (text: string): string => {
-  const redacted = text.trim().replace(tokenShapes, '[redacted]');
-  return redacted.length <= shownLimit ? redacted : `${redacted.slice(0, shownLimit)}\n[cut after ${String(shownLimit)} characters]`;
-};
-
-const ranText = (what: string, ran: z.infer<typeof reproductionEvidence>['before']): string =>
-  `${what}: \`${ran.command}\` exited ${ran.exitCode === null ? 'without a code' : String(ran.exitCode)}.\n\n\`\`\`\n${shown(ran.output)}\n\`\`\``;
-
-const evidenceText = (evidence: Evidence | null): string | null => {
-  const parsed = reproductionEvidence.safeParse(evidence);
-  if (!parsed.success) return null;
-  return [`Reproduction script:\n\n\`\`\`sh\n${shown(parsed.data.script)}\n\`\`\``, ranText('On the base commit', parsed.data.before), ranText('On the change', parsed.data.after)].join('\n\n');
-};
-
 function cameBack(earlier: readonly Earlier[]): string | null {
   const lastImplement = earlier.findLastIndex(entry => entry.step === 'implement');
   const after = earlier.slice(lastImplement + 1).findLast(entry => entry.step !== 'specify' && entry.step !== 'implement' && entry.verdict !== 'pass');
@@ -62,7 +32,7 @@ function cameBack(earlier: readonly Earlier[]): string | null {
   return [`The task came back from ${after.step} with ${after.verdict}.`, evidence ?? textOf(after.output) ?? JSON.stringify(after.output)].join('\n\n');
 }
 
-function input({ step, ticket: { key, title, description }, base, earlier }: StepInput): string {
+function input({ step, ticket: { key, title, description }, earlier }: StepInput): string {
   const named = description === null ? `Ticket ${key}: ${title}` : `Ticket ${key}: ${title}\n\n${description.trim()}`;
   switch (step) {
     case 'specify':
@@ -72,47 +42,16 @@ function input({ step, ticket: { key, title, description }, base, earlier }: Ste
       return [named, `Plan:\n\n${planOf(earlier)}`, ...(back === null ? [] : [back])].join('\n\n');
     }
     case 'verify':
-      return [named, `Plan:\n\n${planOf(earlier)}`, `Base commit: ${base ?? 'unknown'}`].join('\n\n');
+      return [named, `Plan:\n\n${planOf(earlier)}`].join('\n\n');
     default:
       throw new Error(`Code change has no agent step ${step}.`);
   }
 }
 
-const wrapped = /^(?:\S*\/)?(?:ba)?sh\s+-l?c\s+(['"])([\s\S]*)\1$/;
-
-const unwrapped = (command: string): string => wrapped.exec(command.trim())?.[2] ?? command.trim();
-
-const lastRun = (commands: readonly Ran[], text: string): number => commands.findLastIndex(ran => unwrapped(ran.command) === text);
-
-const behaviorOf = (before: Ran, after: Ran): 'fixed' | 'still_wrong' | null => {
-  if (before.exitCode === null || after.exitCode === null || before.exitCode === 0) return null;
-  return after.exitCode === 0 ? 'fixed' : 'still_wrong';
-};
-
-type Runs = { readonly script: Ran; readonly before: Ran; readonly after: Ran };
-
-function runsOf(commands: readonly Ran[]): Runs | undefined {
-  const at = lastRun(commands, reproduction.before);
-  const after = commands.slice(at + 1)[lastRun(commands.slice(at + 1), reproduction.after)];
-  const script = commands.slice(0, at)[lastRun(commands.slice(0, at), reproduction.show)];
-  const before = commands[at];
-  if (at < 0 || script === undefined || before === undefined || after === undefined) return undefined;
-  return { script, before, after };
-}
-
-function settleVerify(output: unknown, commands: readonly Ran[]): Settled {
-  const runs = runsOf(commands);
-  const evidence =
-    runs === undefined
-      ? null
-      : {
-          script: runs.script.output,
-          before: { command: runs.before.command, exitCode: runs.before.exitCode, output: runs.before.output },
-          after: { command: runs.after.command, exitCode: runs.after.exitCode, output: runs.after.output },
-        };
-  const behavior = runs === undefined ? null : behaviorOf(runs.before, runs.after);
+function settleVerify(output: unknown, reproduced: Reproduction | null): Settled {
+  const behavior = reproduced === null ? null : behaviorOf(reproduced);
   const judged = typeof output === 'object' && output !== null && !Array.isArray(output) ? { ...output, behavior } : output;
-  return { output: judged, evidence, observed: null };
+  return { output: judged, evidence: reproduced, observed: null };
 }
 
 const madeNoChange = "Implement made no change: the attempt pushed no commit, and it did not start from a lost attempt's push. Verify can only compare a change with the base, so the attempt failed.";
@@ -124,7 +63,7 @@ function settleImplement(output: unknown, change: Change): Settled {
   return changed ? { output, evidence: null, observed: null } : { output: noChange, evidence: null, observed: 'fail' };
 }
 
-function settle({ step, output, commands, change }: Reply): Settled {
+function settle({ step, output, change, reproduction: reproduced }: Reply): Settled {
   switch (step) {
     case 'specify': {
       const plan = textOf(output);
@@ -133,7 +72,7 @@ function settle({ step, output, commands, change }: Reply): Settled {
     case 'implement':
       return settleImplement(output, change);
     case 'verify':
-      return settleVerify(output, commands);
+      return settleVerify(output, reproduced);
     default:
       throw new Error(`Code change has no agent step ${step}.`);
   }
@@ -178,7 +117,8 @@ function stepOwes(verdicted: Verdicted): readonly Owe<Kind>[] {
       return verdict === 'pass' ? implemented(verdicted) : [];
     case 'verify': {
       const text = evidenceText(evidence);
-      return [...(text === null ? [] : comment(named.key, `AutoWorker's evidence:\n\n${text}`, true)), ...(verdict === 'pass' ? deletions(verdicted) : [])];
+      const onPull = verdict === 'pass' && text !== null && verdicted.pullRequestOwed ? [owe(actionKinds.prEvidence, { repository: verdicted.repository.github, head: verdicted.taskBranch.name, evidence: text })] : [];
+      return [...(text === null ? [] : comment(named.key, `AutoWorker's evidence:\n\n${text}`, true)), ...onPull, ...(verdict === 'pass' ? deletions(verdicted) : [])];
     }
     default:
       throw new Error(`Code change has no agent step ${step}.`);

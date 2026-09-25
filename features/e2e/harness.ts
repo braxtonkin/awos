@@ -5,6 +5,7 @@ import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { connectCluster } from '../../shared/cluster.ts';
 import { connect, type Database } from '../../shared/db/client.ts';
+import { evidenceText } from '../../shared/reproduction.ts';
 import { review } from '../../shared/review.ts';
 import { fail, info, pass, type Check, type Line } from '../../tools/verify/check.ts';
 import { withPostgres } from '../../tools/verify/postgres.ts';
@@ -136,6 +137,25 @@ async function endStatusCheck(jira: Jira, ticket: string): Promise<Check> {
   return status === endStatus ? pass(name, `${ticket} is ${status}`) : fail(name, `${ticket} is ${status}`);
 }
 
+async function pullEvidenceCheck(github: GitHub, database: Database, branch: string, ticket: string): Promise<Check> {
+  const name = "the pull request's body shows the last passing Verify's recorded evidence, once (F4)";
+  const [pull] = (await github.pulls(branch)).filter(found => found.title.includes(ticket));
+  const row = await database
+    .selectFrom('evidence')
+    .innerJoin('attempt', 'attempt.id', 'evidence.attempt_id')
+    .innerJoin('task', 'task.id', 'attempt.task_id')
+    .select('evidence.body')
+    .where('task.key', '=', ticket)
+    .where('attempt.step', '=', 'verify')
+    .where('attempt.verdict', '=', 'pass')
+    .orderBy('attempt.id', 'desc')
+    .executeTakeFirst();
+  const text = evidenceText(row?.body);
+  const body = pull?.body ?? '';
+  const sections = body.split('\n## Evidence\n').length - 1;
+  return text !== null && body.includes(text) && sections === 1 ? pass(name, `pull request ${String(pull?.number)} holds ${String(text.length)} characters of evidence`) : fail(name, `${text === null ? 'no evidence row' : `${String(sections)} evidence sections`}: ${body.slice(0, 300)}`);
+}
+
 async function pullRequestCheck(github: GitHub, branch: string, ticket: string): Promise<Check> {
   const naming = (await github.pulls(branch)).filter(pull => pull.title.includes(ticket) || (pull.body ?? '').includes(ticket));
   const name = `pull requests ${String(naming.length)}`;
@@ -257,7 +277,7 @@ export async function runEndToEnd(world: World, options: Options, out: (line: st
       const filedAt = result.reached.find(step => step.name === 'ticket filed')?.at;
       const toCleanMs = cleanAt === undefined || filedAt === undefined ? undefined : cleanAt.getTime() - filedAt.getTime();
       const expectedRunAs = options.runAs === 'team' ? teamAccount : jira.email.toLowerCase();
-      const recorded = cleanAt === undefined || options.driver !== 'autoworker' ? [] : [...(await recordChecks(database, ticket, expectedRunAs, options.entry.description)), await endStatusCheck(jira, ticket), await plantedSecretCheck(clean, ticket)];
+      const recorded = cleanAt === undefined || options.driver !== 'autoworker' ? [] : [...(await recordChecks(database, ticket, expectedRunAs, options.entry.description)), await endStatusCheck(jira, ticket), await pullEvidenceCheck(github, database, branch, ticket), await plantedSecretCheck(clean, ticket)];
       const autoworkerOverheadMs = toCleanMs === undefined || options.driver !== 'autoworker' ? undefined : toCleanMs - (await agentTurnMs(database, ticket));
       const inspected = options.inspect === undefined ? [] : await options.inspect({ database, clean, ticket });
       driverStop.abort();
