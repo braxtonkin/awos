@@ -1,0 +1,7 @@
+{
+  "why": "bridge-sim times out a post, resends on wake, and replays its 11 recorded seeds (BS196)",
+  "raise": {
+    "characters/feature-verification": 1669,
+    "lines/feature-verification": 25
+  }
+}
