@@ -3,7 +3,11 @@ name: ci
 on:
   pull_request:
   push:
-    branches: [main, 'build/**', 'feat/**']
+    branches: [main, build/e2e]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
