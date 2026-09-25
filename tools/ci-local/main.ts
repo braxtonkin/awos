@@ -1,8 +1,10 @@
 import { spawn, spawnSync } from 'node:child_process';
-import { closeSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { randomUUID } from 'node:crypto';
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { basename, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
+import { ownerLabel } from '../verify/owner-label.ts';
 
 type Yaml = null | string | readonly Yaml[] | { readonly [key: string]: Yaml };
 
@@ -127,8 +129,8 @@ const runStep = z.strictObject({ name: z.string().optional(), run: z.string() })
 const workflowSchema = z.strictObject({
   name: z.string().optional(),
   on: z.unknown(),
-  concurrency: z.unknown(),
-  permissions: z.unknown(),
+  concurrency: z.unknown().optional(),
+  permissions: z.unknown().optional(),
   jobs: z.record(z.string(), z.strictObject({ 'runs-on': z.string(), 'timeout-minutes': z.string().optional(), steps: z.array(z.unknown()).min(1) })),
 });
 
@@ -186,14 +188,95 @@ function git(args: readonly string[]): string {
   return result.stdout.trim();
 }
 
-async function runStepOf(step: Step, index: number, folder: string): Promise<Result> {
+const runRecord = z.strictObject({ pid: z.number().int().positive(), sha: z.string(), startedAt: z.string(), project: z.string(), run: z.string() });
+
+type RunRecord = z.infer<typeof runRecord>;
+
+const results = join(root, 'ci-local');
+const recordFile = join(results, 'run.json');
+const stopFile = join(results, 'stop');
+const runLabel = 'autoworker.ci-local.run';
+const stopWaitMs = 60_000;
+
+const composeProject = (): string => process.env['COMPOSE_PROJECT_NAME'] ?? basename(root).toLowerCase().replace(/[^a-z0-9_-]/g, '');
+
+function recorded(): RunRecord | undefined {
+  if (!existsSync(recordFile)) return undefined;
+  const parsed = runRecord.safeParse(JSON.parse(readFileSync(recordFile, 'utf8')));
+  if (!parsed.success) throw new Error(`${recordFile} is not a ci-local run record. Delete it only after checking that no run in this worktree is alive.`);
+  return parsed.data;
+}
+
+function isAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error instanceof Error && 'code' in error && error.code === 'EPERM';
+  }
+}
+
+const describedRun = (record: RunRecord): string => `run ${record.run}, pid ${String(record.pid)}, at ${record.sha}, started ${record.startedAt}, compose project ${record.project}`;
+
+function dockerLines(args: readonly string[]): readonly string[] {
+  const result = spawnSync('docker', args, { encoding: 'utf8' });
+  if (result.status !== 0) throw new Error(`docker ${args.join(' ')} failed: ${result.stderr.trim()}`);
+  return result.stdout.split('\n').map(line => line.trim()).filter(line => line !== '');
+}
+
+function removeStepContainers(project: string, run: string | undefined): readonly string[] {
+  const steps = dockerLines(['ps', '--all', '--quiet', '--no-trunc', '--filter', `label=com.docker.compose.project=${project}`, '--filter', run === undefined ? `label=${runLabel}` : `label=${runLabel}=${run}`]);
+  const owned = steps.flatMap(id => dockerLines(['ps', '--all', '--quiet', '--no-trunc', '--filter', `label=${ownerLabel}=${id}`]));
+  const doomed = [...steps, ...owned];
+  if (doomed.length > 0) dockerLines(['rm', '--force', '--volumes', ...doomed]);
+  return doomed;
+}
+
+function clearStale(record: RunRecord | undefined): void {
+  const removed = removeStepContainers(record?.project ?? composeProject(), undefined);
+  if (record !== undefined) process.stdout.write(`The recorded ${describedRun(record)} is no longer alive.\n`);
+  if (removed.length > 0) process.stdout.write(`Removed ${String(removed.length)} containers that an earlier run in this worktree left behind: ${removed.map(id => id.slice(0, 12)).join(', ')}\n`);
+  rmSync(recordFile, { force: true });
+  rmSync(stopFile, { force: true });
+}
+
+async function stop(): Promise<number> {
+  const record = recorded();
+  if (record === undefined) {
+    process.stdout.write(`No ci-local run is recorded in ${root}, so there is nothing to stop.\n`);
+    return 0;
+  }
+  if (!isAlive(record.pid)) {
+    clearStale(record);
+    return 0;
+  }
+  writeFileSync(stopFile, record.run);
+  process.stdout.write(`Asked ${describedRun(record)} to stop.\n`);
+  const deadline = Date.now() + stopWaitMs;
+  while (Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 500));
+    if (recorded()?.run !== record.run) {
+      process.stdout.write(`Run ${record.run} stopped and removed its containers.\n`);
+      return 0;
+    }
+  }
+  process.stderr.write(`Run ${record.run} did not stop within ${String(stopWaitMs / 1000)}s. Its pid ${String(record.pid)} is still alive, and ${stopFile} still asks it to stop.\n`);
+  return 1;
+}
+
+const labeled = (args: readonly string[], run: string): readonly string[] => {
+  const [compose, verb, ...rest] = args;
+  return compose === 'compose' && verb === 'run' ? [compose, verb, '--label', `${runLabel}=${run}`, ...rest] : args;
+};
+
+async function runStepOf(step: Step, index: number, folder: string, run: string): Promise<Result> {
   const log = join(folder, `${String(index + 1).padStart(2, '0')}-${step.name.replace(/[^A-Za-z0-9]+/g, '-').replace(/^-|-$/g, '').toLowerCase()}.log`);
   const fd = openSync(log, 'w');
   const started = performance.now();
   try {
     writeFileSync(fd, `$ docker ${step.args.join(' ')}\n`);
     const exit = await new Promise<number | null>(resolve => {
-      const child = spawn('docker', step.args, {
+      const child = spawn('docker', labeled(step.args, run), {
         cwd: root,
         stdio: ['ignore', fd, fd],
         env: process.platform === 'win32' ? { ...process.env, MSYS_NO_PATHCONV: '1' } : process.env,
@@ -218,50 +301,85 @@ async function runAll(plan: readonly Step[]): Promise<number> {
     process.stderr.write(`The worktree has uncommitted changes, so a result could not be tied to ${sha}. Commit or stash them first:\n${dirty}\n`);
     return 2;
   }
-  const folder = join(root, 'ci-local', sha);
-  rmSync(folder, { recursive: true, force: true });
-  mkdirSync(folder, { recursive: true });
-  const started = performance.now();
-  const header = `ci-local at ${sha}, started ${new Date().toISOString()}\n`;
-  const results: (Result | undefined)[] = plan.map(() => undefined);
-  let printed = 0;
-  const run = async (index: number): Promise<void> => {
-    const step = plan[index];
-    if (step === undefined) return;
-    results[index] = await runStepOf(step, index, folder);
-    for (let next = results[printed]; next !== undefined; next = results[printed]) {
-      process.stdout.write(`${next.name}\n  exit ${String(next.exit)} in ${String(next.seconds)}s, log ${next.log}\n`);
-      printed += 1;
-    }
-  };
-  const indexesOf = (job: string): readonly number[] => plan.flatMap((step, index) => (step.job === job ? [index] : []));
-  for (const index of indexesOf(setupJob)) await run(index);
-  const jobs = [...new Set(plan.map(step => step.job))].filter(job => job !== setupJob);
-  await Promise.all(
-    jobs.map(async job => {
-      for (const index of indexesOf(job)) await run(index);
-    }),
-  );
-  const finished = results.filter(result => result !== undefined);
-  const passed = finished.length === plan.length && finished.every(result => result.exit === 0);
-  const rows = finished.map(result => `${String(result.exit).padEnd(6)}${String(result.seconds).padStart(7)}s  ${result.name}`);
-  const wall = Math.round((performance.now() - started) / 1000);
-  const summary = `${header}exit  seconds  step\n${rows.join('\n')}\nwall time ${String(wall)}s, with setup first and then each job's steps in order, the jobs at the same time\n${passed ? 'PASS' : 'FAIL'}\n`;
-  writeFileSync(join(folder, 'summary.txt'), summary);
-  process.stdout.write(`\n${summary}`);
-  return passed ? 0 : 1;
+  const earlier = recorded();
+  if (earlier !== undefined && isAlive(earlier.pid)) {
+    process.stderr.write(`Another ci-local run is alive in this worktree: ${describedRun(earlier)}. Wait for it, or stop it with node tools/ci-local/main.ts --stop.\n`);
+    return 2;
+  }
+  clearStale(earlier);
+  const record: RunRecord = { pid: process.pid, sha, startedAt: new Date().toISOString(), project: composeProject(), run: randomUUID() };
+  mkdirSync(results, { recursive: true });
+  try {
+    writeFileSync(recordFile, `${JSON.stringify(record)}\n`, { flag: 'wx' });
+  } catch {
+    process.stderr.write(`Another ci-local run recorded itself in ${recordFile} at the same moment. Run node tools/ci-local/main.ts again once it ends.\n`);
+    return 2;
+  }
+  process.stdout.write(`Recorded ${describedRun(record)} in ${recordFile}. Stop it only with node tools/ci-local/main.ts --stop.\n`);
+  const stopping = new AbortController();
+  const watch = setInterval(() => {
+    if (stopping.signal.aborted || !existsSync(stopFile) || readFileSync(stopFile, 'utf8') !== record.run) return;
+    stopping.abort();
+    removeStepContainers(record.project, record.run);
+  }, 1000);
+  try {
+    const folder = join(results, sha);
+    rmSync(folder, { recursive: true, force: true });
+    mkdirSync(folder, { recursive: true });
+    const started = performance.now();
+    const header = `ci-local at ${sha}, started ${record.startedAt}\n`;
+    const finished: (Result | undefined)[] = plan.map(() => undefined);
+    let printed = 0;
+    const run = async (index: number): Promise<void> => {
+      const step = plan[index];
+      if (step === undefined || stopping.signal.aborted) return;
+      finished[index] = await runStepOf(step, index, folder, record.run);
+      for (let next = finished[printed]; next !== undefined; next = finished[printed]) {
+        process.stdout.write(`${next.name}\n  exit ${String(next.exit)} in ${String(next.seconds)}s, log ${next.log}\n`);
+        printed += 1;
+      }
+    };
+    const indexesOf = (job: string): readonly number[] => plan.flatMap((step, index) => (step.job === job ? [index] : []));
+    for (const index of indexesOf(setupJob)) await run(index);
+    const jobs = [...new Set(plan.map(step => step.job))].filter(job => job !== setupJob);
+    await Promise.all(
+      jobs.map(async job => {
+        for (const index of indexesOf(job)) await run(index);
+      }),
+    );
+    const ran = finished.filter(result => result !== undefined);
+    const passed = !stopping.signal.aborted && ran.length === plan.length && ran.every(result => result.exit === 0);
+    const rows = ran.map(result => `${String(result.exit).padEnd(6)}${String(result.seconds).padStart(7)}s  ${result.name}`);
+    const wall = Math.round((performance.now() - started) / 1000);
+    const verdict = stopping.signal.aborted ? 'STOPPED by node tools/ci-local/main.ts --stop' : passed ? 'PASS' : 'FAIL';
+    const summary = `${header}exit  seconds  step\n${rows.join('\n')}\nwall time ${String(wall)}s, with setup first and then each job's steps in order, the jobs at the same time\n${verdict}\n`;
+    writeFileSync(join(folder, 'summary.txt'), summary);
+    process.stdout.write(`\n${summary}`);
+    return stopping.signal.aborted ? 3 : passed ? 0 : 1;
+  } finally {
+    clearInterval(watch);
+    rmSync(stopFile, { force: true });
+    rmSync(recordFile, { force: true });
+  }
 }
 
 const mode = process.argv.slice(2);
-const { steps, problems } = planOf(readFileSync(join(root, workflowFile), 'utf8'));
-if (problems.length > 0) {
-  for (const problem of problems) process.stderr.write(`${problem}\n`);
-  process.exitCode = 1;
-} else if (mode.length === 1 && mode[0] === '--plan') {
-  for (const step of steps) process.stdout.write(`${step.name}\n`);
-} else if (mode.length === 0) {
-  process.exitCode = await runAll(steps);
+const only = mode.length === 1 ? mode[0] : undefined;
+if (only === '--stop') {
+  process.exitCode = await stop();
 } else {
-  process.stderr.write('Run node tools/ci-local/main.ts to run CI, or add --plan to print its steps without running them.\n');
-  process.exitCode = 2;
+  const { steps, problems } = planOf(readFileSync(join(root, workflowFile), 'utf8'));
+  if (problems.length > 0) {
+    for (const problem of problems) process.stderr.write(`${problem}
+`);
+    process.exitCode = 1;
+  } else if (only === '--plan') {
+    for (const step of steps) process.stdout.write(`${step.name}
+`);
+  } else if (mode.length === 0) {
+    process.exitCode = await runAll(steps);
+  } else {
+    process.stderr.write('Run node tools/ci-local/main.ts to run CI, add --plan to print its steps without running them, or run it with --stop to stop the run this worktree recorded.\n');
+    process.exitCode = 2;
+  }
 }
