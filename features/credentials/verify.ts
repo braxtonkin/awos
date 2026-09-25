@@ -4,6 +4,7 @@ import { access, mkdtemp, rm, utimes, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { setTimeout as wait } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { isDeepStrictEqual, parseArgs, promisify } from 'node:util';
 import { sql } from 'kysely';
@@ -11,6 +12,7 @@ import { getContainerRuntimeClient } from 'testcontainers';
 import { z } from 'zod';
 import { connect, type Database } from '../../shared/db/client.ts';
 import { fail, pass, type Check, type Scenario } from '../../tools/verify/check.ts';
+import { engineHandlesSigtermFrom, hangCeilingMs } from '../../tools/verify/engine.ts';
 import { withPostgres, type TestPostgres } from '../../tools/verify/postgres.ts';
 import { provePlants } from './invariants.ts';
 import type { Secret } from './kinds.ts';
@@ -857,13 +859,13 @@ async function dashboardCannotReadSetupLogins(world: SetupWorld): Promise<Outcom
   }
 }
 
-const slowRepeatMs = 1500;
-
-const slowStart = `--import=data:text/javascript,await%20new%20Promise(done%3D%3EsetTimeout(done%2C${String(slowRepeatMs)}))`;
+const startingLate = (ms: number): Readonly<Record<string, string>> => ({
+  NODE_OPTIONS: `--import=data:text/javascript,await%20new%20Promise(done%3D%3EsetTimeout(done%2C${ms.toFixed(0)}))`,
+});
 
 const repeatLimit = `a repeat apply takes at most ${String(setupBudget.repeatToFresh)} times as long as a fresh apply, by the median of ${String(setupBudget.runs)} interleaved runs of each`;
 
-function setupSpeed(postgres: TestPostgres, repeatEnv: Readonly<Record<string, string>> = {}): Promise<Outcome> {
+function setupSpeed(postgres: TestPostgres, repeatEnv: (freshMedianMs: number) => Readonly<Record<string, string>> = () => ({})): Promise<Outcome> {
   return inSetupWorld(postgres, async repeated => {
     const seeded = await repeated.apply(setupFile);
     const fresh: number[] = [];
@@ -873,7 +875,7 @@ function setupSpeed(postgres: TestPostgres, repeatEnv: Readonly<Record<string, s
       const run = await inSetupWorld(postgres, world => world.apply(setupFile));
       if (run.stdout !== firstRun) problems.push(`a fresh apply gave ${describeRun(run)}`);
       fresh.push(run.ms);
-      const again = await repeated.apply(setupFile, { ...repeated.env, ...repeatEnv });
+      const again = await repeated.apply(setupFile, { ...repeated.env, ...repeatEnv(median(fresh)) });
       if (again.stdout !== repeatRun) problems.push(`a repeat apply gave ${describeRun(again)}`);
       repeats.push(again.ms);
     }
@@ -887,11 +889,16 @@ function setupSpeed(postgres: TestPostgres, repeatEnv: Readonly<Record<string, s
 }
 
 async function slowRepeatFails(postgres: TestPostgres): Promise<Outcome> {
-  const planted = await setupSpeed(postgres, { NODE_OPTIONS: slowStart });
+  const delays: number[] = [];
+  const planted = await setupSpeed(postgres, freshMedianMs => {
+    delays.push(freshMedianMs);
+    return startingLate(freshMedianMs);
+  });
   const caught = planted.problems.find(problem => problem.startsWith('the median repeat apply took'));
+  const late = `each repeat apply started late by the median fresh apply so far: ${delays.map(ms => ms.toFixed(0)).join(', ')} ms`;
   return {
-    problems: caught === undefined ? [`the speed check passed a repeat apply slowed by ${String(slowRepeatMs)} ms: ${planted.detail}`] : [],
-    detail: `${caught ?? ''}; ${planted.detail}`,
+    problems: caught === undefined ? [`the speed check passed when ${late}: ${planted.detail}`] : [],
+    detail: `${caught ?? ''}; ${late}; ${planted.detail}`,
   };
 }
 
@@ -908,7 +915,7 @@ const setupChecks: readonly Entry[] = [
   { name: 'two people with one Jira account id are refused by Postgres, and the people section rolls back', run: inSetup(duplicateAccountRollsBack) },
   { name: 'after setup, the dashboard role cannot select a sealed column', run: inSetup(dashboardCannotReadSetupLogins) },
   { name: repeatLimit, run: postgres => setupSpeed(postgres) },
-  { name: `the speed check fails when each repeat apply starts ${String(slowRepeatMs)} ms late`, run: slowRepeatFails },
+  { name: 'the speed check fails when each repeat apply starts late by the median fresh apply so far', run: slowRepeatFails },
 ];
 
 async function settle(name: string, work: () => Promise<Outcome>): Promise<Check> {
@@ -1084,10 +1091,19 @@ async function engineChecksGithub(postgres: TestPostgres): Promise<readonly Chec
         done(code);
       });
     });
-    const deadline = performance.now() + 20_000;
-    while (!said.includes('checks: checked the github credential') && performance.now() < deadline) await new Promise(done => setTimeout(done, 50));
-    child.kill('SIGTERM');
-    const code = await exited;
+    const checked = 'checks: checked the github credential';
+    const deadline = performance.now() + hangCeilingMs;
+    while (!said.includes(checked) && child.exitCode === null && performance.now() < deadline) await wait(50);
+    if (!said.includes(checked) && child.exitCode === null) said += `\nThe verify tool stopped waiting for "${checked}" after ${String(hangCeilingMs / 1000)} s, and the engine still ran.`;
+    child.kill(said.includes(engineHandlesSigtermFrom) ? 'SIGTERM' : 'SIGKILL');
+    const code = await Promise.race([
+      exited,
+      wait(hangCeilingMs).then(() => {
+        child.kill('SIGKILL');
+        said += `\nThe engine did not exit within ${String(hangCeilingMs / 1000)} s of SIGTERM.`;
+        return null;
+      }),
+    ]);
     const leftoverGone = await access(leftover).then(
       () => false,
       () => true,
@@ -1095,7 +1111,7 @@ async function engineChecksGithub(postgres: TestPostgres): Promise<readonly Chec
     await rm(leftover, { recursive: true, force: true });
     const row = await db.selectFrom('credential').select(['state', 'checked_at', 'expires_at']).where('id', '=', stored.credential).executeTakeFirstOrThrow();
     const checks = await db.selectFrom('credential_check').select(['outcome', 'checker']).where('credential_id', '=', stored.credential).execute();
-    const short = spawnSync(process.execPath, [engineMain], { env: { ...env, CREDENTIAL_KEY: randomBytes(31).toString('base64') }, encoding: 'utf8', timeout: 20_000 });
+    const short = spawnSync(process.execPath, [engineMain], { env: { ...env, CREDENTIAL_KEY: randomBytes(31).toString('base64') }, encoding: 'utf8', timeout: hangCeilingMs });
     const expected = new Date(Date.parse(expiryHeader.replace(' UTC', 'Z').replace(' ', 'T'))).toISOString();
     const recorded = { state: row.state, checked: row.checked_at !== null, expiresAt: row.expires_at?.toISOString() ?? null, outcomes: checks.map(check => check.outcome) };
     const ranName = 'the engine process checks a stored GitHub token on its checks loop, records valid with the expiry header, and exits 0 on SIGTERM';
@@ -1105,7 +1121,7 @@ async function engineChecksGithub(postgres: TestPostgres): Promise<readonly Chec
       code === 0 && isDeepStrictEqual(recorded, { state: 'valid', checked: true, expiresAt: expected, outcomes: ['valid'] })
         ? pass(ranName, `${JSON.stringify(recorded)}; checker ${checks[0]?.checker ?? 'none'}`)
         : fail(ranName, `exit ${String(code)}, recorded ${JSON.stringify(recorded)}; the engine said: ${said.trim().replaceAll('\n', ' | ')}`),
-      short.status === 1 && short.stderr.includes('CREDENTIAL_KEY') ? pass(shortName, short.stderr.trim()) : fail(shortName, `exit ${String(short.status)}: ${short.stdout}${short.stderr}`),
+      short.status === 1 && short.stderr.includes('CREDENTIAL_KEY') ? pass(shortName, short.stderr.trim()) : fail(shortName, `exit ${String(short.status)} ${short.error?.message ?? ''}: ${short.stdout}${short.stderr}`),
       leftoverGone && said.includes(`checks: removed ${leftover}`)
         ? pass(leftoverName, lineWith(said, 'checks: removed'))
         : fail(leftoverName, `${leftover} ${leftoverGone ? 'is gone' : 'is still there'}; the engine said: ${said.trim().replaceAll('\n', ' | ')}`),
@@ -1132,17 +1148,17 @@ function engineRefusals(): readonly Check[] {
   const quiet = unrelatedTo(['CREDENTIAL_', 'JOB_', 'ATTEMPT_', 'ENVIRONMENT_', 'CHECK_', 'DATABASE_']);
   const closedUrl = 'postgres://autoworker:not-a-real-password@127.0.0.1:1/autoworker';
   const refused = refusals.map(({ setting, because, env }) => {
-    const run = spawnSync(process.execPath, [engineMain], { env: { ...quiet, DATABASE_URL: closedUrl, ...env }, encoding: 'utf8', timeout: 20_000 });
+    const run = spawnSync(process.execPath, [engineMain], { env: { ...quiet, DATABASE_URL: closedUrl, ...env }, encoding: 'utf8', timeout: hangCeilingMs });
     const name = `the engine refuses to start and names ${setting} when ${because}`;
     const secrets = Object.values(env).filter(value => value.length > 20);
     return run.status === 1 && run.stderr.includes(`at ${setting}`) && !secrets.some(secret => run.stderr.includes(secret))
       ? pass(name, run.stderr.trim().replaceAll('\n', ' '))
-      : fail(name, `exit ${String(run.status)}: ${run.stdout}${run.stderr}`);
+      : fail(name, `exit ${String(run.status)} ${run.error?.message ?? ''}: ${run.stdout}${run.stderr}`);
   });
-  const closed = spawnSync(process.execPath, [engineMain], { env: { ...quiet, DATABASE_URL: closedUrl, DATABASE_CONNECT_TIMEOUT_MS: '3000' }, encoding: 'utf8', timeout: 30_000 });
+  const closed = spawnSync(process.execPath, [engineMain], { env: { ...quiet, DATABASE_URL: closedUrl, DATABASE_CONNECT_TIMEOUT_MS: '3000' }, encoding: 'utf8', timeout: hangCeilingMs });
   const closedName = "with Postgres unreachable, the engine exits 1 with one line naming DATABASE_URL's host and no stack trace or password";
   const readable = closed.status === 1 && closed.stderr.includes('127.0.0.1:1') && closed.stderr.includes('DATABASE_URL') && !/^s+at /m.test(closed.stderr) && !closed.stderr.includes('not-a-real-password');
-  return [...refused, readable ? pass(closedName, closed.stderr.trim()) : fail(closedName, `exit ${String(closed.status)}: ${closed.stdout}${closed.stderr}`)];
+  return [...refused, readable ? pass(closedName, closed.stderr.trim()) : fail(closedName, `exit ${String(closed.status)} ${closed.error?.message ?? ''}: ${closed.stdout}${closed.stderr}`)];
 }
 
 function parseSimulationOptions(args: readonly string[]): SimulationOptions {
