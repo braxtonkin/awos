@@ -71,7 +71,8 @@ export async function issueToken(db: Database, attempt: AttemptId): Promise<stri
     .set({ bridge_token_hash: hashOf(token) })
     .where('id', '=', attempt)
     .where('finished_at', 'is', null)
-    .where('bridge_token_hash', 'is', null)
+    .where('job_created_at', 'is', null)
+    .where('bridge_pid', 'is', null)
     .executeTakeFirst();
   return numUpdatedRows === 1n ? token : undefined;
 }

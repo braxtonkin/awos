@@ -162,9 +162,33 @@ export async function unlaunched(db: Database, workflows: Workflows): Promise<re
     .innerJoin('task', 'task.id', 'attempt.task_id')
     .select('attempt.id')
     .where('attempt.finished_at', 'is', null)
-    .where('attempt.bridge_token_hash', 'is', null)
+    .where('attempt.job_created_at', 'is', null)
+    .where('attempt.bridge_pid', 'is', null)
     .where(eb => eb.or(pairs.map(([workflow, step]) => eb.and([eb('task.workflow', '=', workflow), eb('attempt.step', '=', step)]))))
     .orderBy('attempt.id')
     .execute();
   return rows.map(row => row.id);
+}
+
+export async function jobCreated(db: Database, attempt: string, now: Date): Promise<boolean> {
+  const { numUpdatedRows } = await db
+    .updateTable('attempt')
+    .set({ job_created_at: now })
+    .where('id', '=', attempt)
+    .where('finished_at', 'is', null)
+    .where('job_created_at', 'is', null)
+    .executeTakeFirst();
+  return numUpdatedRows === 1n;
+}
+
+export async function holdingLaunch<T>(db: Database, attempt: string, work: () => Promise<T>): Promise<T | undefined> {
+  return db.connection().execute(async connection => {
+    const { rows } = await sql<{ readonly held: boolean }>`select pg_try_advisory_lock(${attempt}::bigint) as held`.execute(connection);
+    if (rows[0]?.held !== true) return undefined;
+    try {
+      return await work();
+    } finally {
+      await sql`select pg_advisory_unlock(${attempt}::bigint)`.execute(connection);
+    }
+  });
 }

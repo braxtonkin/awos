@@ -38,7 +38,7 @@ export async function continuation(db: Database, task: string): Promise<Continua
     .where('attempt.step', '=', row.step)
     .orderBy('attempt.id', 'desc')
     .execute();
-  const kept = previous.findIndex(attempt => attempt.verdict !== 'lost');
+  const kept = previous.findIndex(attempt => attempt.verdict !== 'lost' && attempt.verdict !== 'not_launched');
   const pushed = (kept < 0 ? previous : previous.slice(0, kept)).find(attempt => attempt.last_pushed !== null);
   if (pushed?.last_pushed != null) return { from: 'lost', commit: pushed.last_pushed };
   const head = await taskBranchHead(db, task);
