@@ -572,6 +572,16 @@ Rejected options:
 - **Drop the NUL character.** It hides that anything was there, and it can join two words.
 - **Store the escaped text `\u0000` as six characters.** A reader can't tell it from an app server that wrote those six characters.
 
+### The seed gives the sandbox the product's package types
+
+Decided 25 Sep 2026. The sandbox repository typechecks in its own CI with the same settings as the product and without `skipLibCheck`. Vitest's declarations name `EventTarget`, `AbortSignal`, and `WebSocket`, which `@types/node` declares, and tinybench's name `DOMHighResTimeStamp`, which no package declares. So the sandbox pins the product's `@types/node` and sets `types: ["node"]` as the root tsconfig does. `sandboxSeed` in `features/e2e/sandbox-seed.ts` copies `shared/types/tinybench.d.ts` into the seed as `types/tinybench.d.ts`, and the sandbox's tsconfig includes `types/`. Both the run branch and the stand-in's local copy come from `sandboxSeed`. The repository holds one copy of the declaration, so the root typecheck, which also covers the sandbox's code, never sees two. A copy of the sandbox with `skipLibCheck` removed failed with 21 errors before this change. `npm run shape` now rejects `skipLibCheck` in any config outside `.claude/`.
+
+Rejected options:
+
+- **Keep `skipLibCheck` on in the sandbox.** It hides every error in every package's declarations, and the Package types path forbids it.
+- **Add the DOM library to the sandbox's `lib`.** It declares every missing name at once, but it types browser globals such as `document` in code that runs on Node, and the sandbox would typecheck under other globals than the root typecheck gives the same files.
+- **Keep a second copy under `features/e2e/sandbox/types/` and exclude it from the root tsconfig.** The repository would hold two copies that can drift, and the root tsconfig would gain an exclusion that only this folder needs.
+
 ## Open
 
 Each open question names the current lean or default. A lean is not a decision.

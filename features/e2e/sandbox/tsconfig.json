@@ -2,6 +2,7 @@
   "compilerOptions": {
     "target": "es2024",
     "lib": ["es2024"],
+    "types": ["node"],
     "module": "nodenext",
     "moduleResolution": "nodenext",
     "strict": true,
@@ -10,8 +11,7 @@
     "erasableSyntaxOnly": true,
     "verbatimModuleSyntax": true,
     "allowImportingTsExtensions": true,
-    "noEmit": true,
-    "skipLibCheck": true
+    "noEmit": true
   },
-  "include": ["src/**/*.ts", "test/**/*.ts"]
+  "include": ["types/**/*.d.ts", "src/**/*.ts", "test/**/*.ts"]
 }

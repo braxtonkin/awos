@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { cp, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
@@ -11,10 +11,10 @@ import { catalog, type Entry } from './catalog.ts';
 import { standInPlan } from './codex-stand-in.ts';
 import { execute, type Exit } from './process.ts';
 import { tokenUsageMethod } from './report.ts';
+import { writeSandbox } from './sandbox-seed.ts';
 import { identity, reproductionScript, solutions, type Solution } from './solutions.ts';
 
 const standIn = fileURLToPath(new URL('codex-stand-in.ts', import.meta.url));
-const sandbox = fileURLToPath(new URL('sandbox/', import.meta.url));
 const prompts = new URL('../code-change/prompts/', import.meta.url);
 const workspace = '/workspace';
 const baseFolder = '/tmp/autoworker-base';
@@ -37,8 +37,6 @@ async function shellOk(command: string, cwd: string): Promise<string> {
   if (exit.code !== 0) throw new Error(`${command} exited ${String(exit.code)}: ${exit.output.slice(-1500)}`);
   return exit.output.trim();
 }
-
-const copySandbox = (to: string): Promise<void> => cp(sandbox, to, { recursive: true, filter: source => !source.includes('node_modules') });
 
 const line = z.looseObject({ method: z.string().optional(), params: z.unknown().optional() });
 
@@ -118,7 +116,7 @@ const ticketOf = (entry: Entry): string => `Ticket SBX-1: ${entry.summary}\n\n${
 async function freshWorkspace(): Promise<string> {
   await rm(workspace, { recursive: true, force: true });
   await rm(baseFolder, { recursive: true, force: true });
-  await copySandbox(workspace);
+  await writeSandbox(workspace);
   await shellOk('git init -q -b main && git config user.name Sandbox && git config user.email sandbox@example.com && git add -A && git commit -q -m "Seed the sandbox"', workspace);
   return shellOk('git rev-parse HEAD', workspace);
 }
@@ -198,8 +196,10 @@ async function solutionChecks(): Promise<readonly Check[]> {
   ];
   const folder = await mkdtemp(join(tmpdir(), 'stand-in-sandbox-'));
   try {
-    await copySandbox(folder);
+    await writeSandbox(folder);
     await shellOk('npm ci --no-audit --no-fund', folder);
+    const typecheck = await shell('npm run typecheck', folder);
+    checks.push(typecheck.code === 0 ? pass("the seeded sandbox passes its own CI's typecheck", 'tsc --noEmit exit 0') : fail("the seeded sandbox passes its own CI's typecheck", typecheck.output.slice(-1500)));
     for (const entry of catalog) {
       const solution = solutions[entry.name];
       if (solution === undefined) continue;
