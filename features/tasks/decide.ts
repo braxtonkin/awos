@@ -178,10 +178,17 @@ function afterGate(task: Held, workflow: Workflow): string {
   return next;
 }
 
+function restarted(workflow: Workflow, task: Task): Next {
+  const kind = workflow.steps.find(candidate => candidate.name === task.step);
+  if (kind === undefined) return kept(task);
+  const [to] = Object.values(kind.failures).flatMap(failure => (failure.kind === 'return' && countOf(task.counts, failure.counter) >= failure.cap ? [failure.to] : []));
+  return to === undefined ? kept(task) : sentBack(workflow, task, kind, to);
+}
+
 export function retried(task: Held, workflow: Workflow): Next {
   if (task.state === 'stopped' && task.waitingOn === 'approval' && task.review !== null) return { ...kept(task), standing: gateWait(task, afterGate(task, workflow), task.review) };
   const reviewCounters = workflow.steps.flatMap(kind => charges(kind, 'review'));
-  return { ...kept(task), counts: Object.fromEntries(Object.entries(task.counts).filter(([counter]) => reviewCounters.includes(counter))), retries: 0, inputWaits: 0 };
+  return { ...restarted(workflow, task), counts: Object.fromEntries(Object.entries(task.counts).filter(([counter]) => reviewCounters.includes(counter))), retries: 0, inputWaits: 0 };
 }
 
 export const stopped = (task: Held): Next => ({ ...kept(task), standing: { state: 'stopped', review: task.state === 'waiting' && task.waitingOn === 'approval' ? task.review : null } });

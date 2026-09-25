@@ -17,7 +17,7 @@ import { logLostApprovals, loseApprovals, watch, type PropertyName, type Violati
 import { coreRunAs } from './run-as.ts';
 import { reaper } from './reaper.ts';
 import { commitOf, jobs, latePush, performNext, replyLines, unparsedReplies, type Jobs, type JobLine, type StepMutantName } from './sim-jobs.ts';
-import { workflowsByName } from './start.ts';
+import { workflowsByName, type Workflows } from './start.ts';
 
 export const profileName = z.enum(['default', 'races', 'hangs', 'verdicts', 'people', 'reviews', 'needs-input', 'mixed', 'behavior', 'environment', 'crashes', 'db-pause', 'two-engines', 'jobs']);
 
@@ -51,7 +51,7 @@ export const mutants: Readonly<Record<MutantName, readonly [PropertyName, ...Pro
   target_fits_kind: ['ActionTargetFitsItsKind'],
 };
 
-export const engineMutantName = z.enum(['no-reaper', 'early-reap', 'no-grace', 'no-fence', 'lapsed-renew']);
+export const engineMutantName = z.enum(['no-reaper', 'early-reap', 'no-grace', 'no-fence', 'lapsed-renew', 'retry-in-place']);
 
 export type EngineMutantName = z.infer<typeof engineMutantName>;
 
@@ -69,7 +69,14 @@ export const stepMutantProfile: ProfileName = 'jobs';
 
 type Renew = typeof renew;
 
-type EngineMutant = { readonly profile: ProfileName; readonly breaks: readonly [PropertyName, ...PropertyName[]]; readonly loop: (loop: Loop) => Loop | undefined; readonly renew?: Renew };
+type EngineMutant = {
+  readonly profile: ProfileName;
+  readonly breaks: readonly [PropertyName, ...PropertyName[]];
+  readonly loop: (loop: Loop) => Loop | undefined;
+  readonly renew?: Renew;
+  readonly acts?: () => Workflows;
+  readonly steps?: number;
+};
 
 export const engineMutants: Readonly<Record<EngineMutantName, EngineMutant>> = {
   'no-reaper': { profile: 'crashes', breaks: ['EveryTaskSettles'], loop: () => undefined },
@@ -77,11 +84,14 @@ export const engineMutants: Readonly<Record<EngineMutantName, EngineMutant>> = {
   'no-grace': { profile: 'db-pause', breaks: ['ReleasedWithinOneInterval'], loop: ({ name, everyMs, pass }) => ({ name, everyMs, pass }) },
   'no-fence': { profile: 'db-pause', breaks: ['ReleasedWithinOneInterval'], loop: loop => ({ ...loop, pass: (db, { now, stop }) => loop.pass(db, { now, late: () => false, stop }) }) },
   'lapsed-renew': { profile: 'crashes', breaks: ['LapsedLeaseNeverRenews'], loop: loop => loop, renew: (db, attempt, now, leaseMs) => renew(db, attempt, new Date(now.getTime() - leaseMs), 2 * leaseMs) },
+  'retry-in-place': { profile: 'behavior', breaks: ['RetryStartsWhereTheFailureRoutes'], loop: loop => loop, acts: () => retryInPlace, steps: 1200 },
 };
 
 const renewFor = (plan: Plan): Renew => (plan.engine === undefined ? renew : (engineMutants[plan.engine].renew ?? renew));
 
-const failedToVerify = 'Verify found the behavior still wrong in 3 rounds. Read its evidence on this page, fix the ticket or the plan, then press Retry to run Verify again.';
+const actsOn = (plan: Plan): Workflows => (plan.engine === undefined ? byName : (engineMutants[plan.engine].acts?.() ?? byName));
+
+const failedToVerify = 'Retry starts again at Implement, because Verify found the behavior still wrong three times. Press Retry with a note that says what to change.';
 
 const environmentDown = "Verify's environment failed 4 times in a row. Check that the repository's Verify environment starts, then press Retry to run Verify again.";
 
@@ -105,62 +115,65 @@ const agentStep = (name: string, reads: readonly string[], canEnd: boolean, need
     done: () => 'pass',
   });
 
-export const workflows: readonly [Workflow, ...Workflow[]] = [
-  {
-    name: 'code-change',
-    steps: [
-      agentStep('specify', [], false, true),
-      agentStep('implement', ['specify'], true, true),
-      step({
-        name: 'verify',
-        reads: ['specify', 'implement'],
-        runBy: 'agent',
-        prompt: 'Simulated verify.',
-        startsEnvironment: true,
-        afterTurn: 'reproduce',
-        needsRepository: true,
-        canEnd: false,
-        owes: [],
-        output: verified,
-        requires: ['text'],
-        failures: {
-          needs_input: { kind: 'ask' },
-          behavior_fail: { kind: 'return', to: 'implement', counter: 'rounds', cap: 3, parks: failedToVerify },
-          environment_fail: { kind: 'rerun', counter: 'reruns', cap: 3, parks: environmentDown },
+const codeChangeCopy = (returnTo: (from: string) => string): Workflow => ({
+  name: 'code-change',
+  steps: [
+    agentStep('specify', [], false, true),
+    agentStep('implement', ['specify'], true, true),
+    step({
+      name: 'verify',
+      reads: ['specify', 'implement'],
+      runBy: 'agent',
+      prompt: 'Simulated verify.',
+      startsEnvironment: true,
+      afterTurn: 'reproduce',
+      needsRepository: true,
+      canEnd: false,
+      owes: [],
+      output: verified,
+      requires: ['text'],
+      failures: {
+        needs_input: { kind: 'ask' },
+        behavior_fail: { kind: 'return', to: returnTo('verify'), counter: 'rounds', cap: 3, parks: failedToVerify },
+        environment_fail: { kind: 'rerun', counter: 'reruns', cap: 3, parks: environmentDown },
+      },
+      blocked: 'environment_fail',
+      done: ({ behavior }) => (behavior === 'fixed' ? 'pass' : behavior === 'still_wrong' ? 'behavior_fail' : 'environment_fail'),
+    }),
+    step({
+      name: 'land',
+      reads: ['implement', 'verify'],
+      runBy: 'engine',
+      needsRepository: true,
+      canEnd: true,
+      owes: [{ kind: 'pr.merge', irreversible: true }],
+      output: reviewSchema,
+      requires: ['text'],
+      failures: {
+        fail: { kind: 'fail' },
+        needs_input: { kind: 'ask' },
+        red_check: { kind: 'return', to: returnTo('land'), counter: 'landRounds', cap: 3, parks: 'Retry starts again at Implement, because checks failed three times. Press Retry with a note that says what to change.' },
+        changes_requested: {
+          kind: 'review',
+          to: 'implement',
+          counter: 'reviews',
+          cap: 1,
+          parks: 'A later review asked for changes. Press Retry to run Land again.',
+          ignored: 'A later review asked for changes, and this routine ignores later reviews. AutoWorker lands once GitHub allows it.',
         },
-        blocked: 'environment_fail',
-        done: ({ behavior }) => (behavior === 'fixed' ? 'pass' : behavior === 'still_wrong' ? 'behavior_fail' : 'environment_fail'),
-      }),
-      step({
-        name: 'land',
-        reads: ['implement', 'verify'],
-        runBy: 'engine',
-        needsRepository: true,
-        canEnd: true,
-        owes: [{ kind: 'pr.merge', irreversible: true }],
-        output: reviewSchema,
-        requires: ['text'],
-        failures: {
-          fail: { kind: 'fail' },
-          needs_input: { kind: 'ask' },
-          red_check: { kind: 'return', to: 'implement', counter: 'landRounds', cap: 3, parks: 'Checks failed in 3 rounds. Press Retry to run Land again.' },
-          changes_requested: {
-            kind: 'review',
-            to: 'implement',
-            counter: 'reviews',
-            cap: 1,
-            parks: 'A later review asked for changes. Press Retry to run Land again.',
-            ignored: 'A later review asked for changes, and this routine ignores later reviews. AutoWorker lands once GitHub allows it.',
-          },
-          review_required: { kind: 'await', waits: 'The pull request needs an approval. AutoWorker goes on once GitHub reports one.' },
-        },
-        blocked: 'fail',
-        done: () => 'pass',
-      }),
-    ],
-  },
-  { name: 'post', steps: [agentStep('post', [], true, false)] },
-];
+        review_required: { kind: 'await', waits: 'The pull request needs an approval. AutoWorker goes on once GitHub reports one.' },
+      },
+      blocked: 'fail',
+      done: () => 'pass',
+    }),
+  ],
+});
+
+const postCopy: Workflow = { name: 'post', steps: [agentStep('post', [], true, false)] };
+
+export const workflows: readonly [Workflow, ...Workflow[]] = [codeChangeCopy(() => 'implement'), postCopy];
+
+const retryInPlace: Workflows = new Map([codeChangeCopy(from => from), postCopy].map(workflow => [workflow.name, workflow]));
 
 export const parks = { rounds: failedToVerify, reruns: environmentDown } as const;
 
@@ -382,7 +395,7 @@ export const profiles: Readonly<Record<ProfileName, Profile>> = {
     effects: everyEffect,
   },
   behavior: {
-    stepsPerTask: 20,
+    stepsPerTask: 60,
     workers: 4,
     nobodyEvery: 0,
     leaseMs: 30_000,
@@ -390,7 +403,7 @@ export const profiles: Readonly<Record<ProfileName, Profile>> = {
     ...oneEngine,
     stepMs: 6_000,
     burst: 5,
-    odds: { claim: 6, renew: 4, finish: 6, ...quietFaults, ...noPeople, approve: 3, ...jobLines },
+    odds: { claim: 6, renew: 4, finish: 6, ...quietFaults, ...noPeople, approve: 3, retry: 1, ...jobLines },
     effects: { pass: 1, fail: 0, ask: 0, return: 0, rerun: 0, review: 0, await: 0 },
   },
   environment: {
@@ -764,7 +777,7 @@ async function personActs(turn: Turn, pool: Pool, action: (task: Offered) => Per
   if (task === undefined || person === undefined) return `no task to ${label}`;
   const chosen = action(task);
   if (chosen === undefined) return `task ${task.id}: nothing to ${label}`;
-  const outcome = await act(db, byName, task.id, { id: randomUUID(), person, at: now }, chosen, noTurnToStop);
+  const outcome = await act(db, actsOn(turn.plan), task.id, { id: randomUUID(), person, at: now }, chosen, noTurnToStop);
   const said = 'refused' in outcome ? `refused ${outcome.refused}` : 'recorded';
   count(world, `${label} ${said}`);
   return `task ${task.id}: ${label} ${said}`;
@@ -1007,7 +1020,7 @@ const rules: Readonly<Record<Move, Rule>> = {
       const old = pick(random, behindANewerReview.length > 0 && random() < 0.8 ? behindANewerReview : olds);
       const person = pick(random, world.people);
       if (old === undefined || person === undefined) return 'no stale review to approve';
-      const outcome = await act(db, byName, old.task_id, { id: randomUUID(), person, at: now }, { kind: 'approve', review: old.id }, noTurnToStop);
+      const outcome = await act(db, actsOn(turn.plan), old.task_id, { id: randomUUID(), person, at: now }, { kind: 'approve', review: old.id }, noTurnToStop);
       const said = 'refused' in outcome ? `refused ${outcome.refused}` : 'recorded';
       count(world, `stale approve ${said}`);
       return `task ${old.task_id}: approve of old attempt ${old.id} ${said}`;
@@ -1136,7 +1149,7 @@ const rules: Readonly<Record<Move, Rule>> = {
       };
       const [finished, acted, ...claims] = await Promise.all([
         settle(finish()),
-        settle(act(db, byName, live.task_id, { id: randomUUID(), person, at: now }, action, noTurnToStop)),
+        settle(act(db, actsOn(turn.plan), live.task_id, { id: randomUUID(), person, at: now }, action, noTurnToStop)),
         settle(claimFor(turn, live.task_id)),
         settle(claimFor(turn, live.task_id)),
       ]);

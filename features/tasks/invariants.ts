@@ -92,6 +92,16 @@ const gatedAt = (step: string) =>
   sql`update task set step = ${sql.lit(step)}, state = 'waiting', waiting_on = 'approval', waiting_reason = 'Approve it.',
       review_attempt = (select max(a.id) from attempt a where a.task_id = 1) where id = 1`;
 
+const waitingAtVerify = (counts: string): readonly Statement[] => [
+  finishedAttempt('specify', 'pass'),
+  finishedAttempt('implement', 'pass'),
+  sql`update task set step = 'verify', approved = '{specify}', counts = ${sql.lit(counts)}, state = 'waiting', waiting_on = 'retry', waiting_reason = 'Planted.' where id = 1`,
+];
+
+const retriedAt = (step: string, id: string) =>
+  sql`with retried as (insert into human_action (id, at, person_id, kind, task_id) values (${sql.lit(id)}, ${t0} + interval '3 seconds', 1, 'retry_task', 1) returning task_id)
+      update task set step = ${sql.lit(step)}, state = 'ready', waiting_on = null, waiting_reason = null, counts = '{}' from retried where task.id = retried.task_id`;
+
 const pushedA = sql.lit('a'.repeat(40));
 
 const pushedB = sql.lit('b'.repeat(40));
@@ -265,10 +275,13 @@ export const properties = {
   StoppedTaskCanResume: {
     moment: 'each-step',
     breaks: sql`select s.id, s.was_step, s.step, s.was_approved, s.approved from diff s
+      join retry_start r on r.id = s.id
+      join facts fr on fr.workflow = s.workflow and fr.step = r.step
       where s.id in (select task_id from acted where kind = 'retry_task') and s.was_state = 'stopped'
         and ((s.state <> 'ready' and not (s.state = 'waiting' and s.waiting_on = 'approval'))
-             or s.step <> s.was_step
-             or s.approved is distinct from s.was_approved
+             or s.step <> r.step
+             or s.approved is distinct from array(select a from unnest(s.was_approved) a join facts f on f.workflow = s.workflow and f.step = a
+                                                  where f.position < fr.position order by 1)
              or not (s.was_outputs <@ s.outputs)
              or exists (select 1 from charges c where c.workflow = s.workflow and c.kind = 'review'
                         and (s.counts ->> c.counter) is distinct from (s.was_counts ->> c.counter)))`,
@@ -532,6 +545,16 @@ export const properties = {
         setup: [personActs('stop_task', '00000000-0000-4000-8000-000000000003')],
         violation: sql`update task set state = 'stopped', stopped_by = '00000000-0000-4000-8000-000000000003' where id = 1`,
       },
+    ],
+  },
+  RetryStartsWhereTheFailureRoutes: {
+    moment: 'each-step',
+    breaks: sql`select s.id, s.was_state, s.was_step, s.step, r.step as start, s.was_counts from diff s
+      join retry_start r on r.id = s.id
+      where s.id in (select task_id from acted where kind = 'retry_task') and s.was_state in ('waiting', 'stopped') and s.step <> r.step`,
+    plants: [
+      { setup: waitingAtVerify('{"rounds": 3}'), violation: retriedAt('verify', '00000000-0000-4000-8000-00000000000f') },
+      { setup: waitingAtVerify('{"reruns": 3}'), violation: retriedAt('implement', '00000000-0000-4000-8000-000000000010') },
     ],
   },
   RetryLeavesNoStageRetries: {
@@ -869,6 +892,11 @@ const helpers = (workflows: readonly Workflow[], everyMs: number) => sql`
            exists (select 1 from attempt a, prior p where a.task_id = r.id and a.id = any(p.live)) as was_live,
            r.runs_as
     from record r join was w on w.id = r.id),
+  retry_start as (
+    select s.id, coalesce((select c.to_step from charges c
+                           where c.workflow = s.workflow and c.step = s.was_step and c.kind = 'return' and coalesce((s.was_counts ->> c.counter)::int, 0) >= c.cap
+                           order by c.counter limit 1), s.was_step) as step
+    from diff s),
   went_missing as (
     select l.task_id, l.gate from lost_approval l
     where not exists (select 1 from prior) or exists (select 1 from prior p where age(l.xmin) < age(p.xid))),

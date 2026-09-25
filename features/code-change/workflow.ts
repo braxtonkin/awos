@@ -64,7 +64,7 @@ export const workflow = {
           to: 'implement',
           counter: 'rounds',
           cap: 3,
-          parks: 'Verify found the behavior still wrong in 3 rounds. Read its evidence on this page, then press Retry with a note that says what to change, and AutoWorker runs Verify again.',
+          parks: 'Retry starts again at Implement, because Verify found the behavior still wrong three times. Read its evidence on this page, then press Retry with a note that says what to change, and Implement gets your note.',
         },
         environment_fail: {
           kind: 'rerun',
@@ -93,7 +93,7 @@ export const workflow = {
           to: 'implement',
           counter: 'landRounds',
           cap: 3,
-          parks: 'Checks on the pull request failed in 3 rounds. Read the failing checks on the pull request, then press Retry to run Land again.',
+          parks: 'Retry starts again at Implement, because checks on the pull request failed three times. Read the failing checks on the pull request, then press Retry with a note that says what to change, and Implement gets your note.',
         },
         changes_requested: {
           kind: 'review',

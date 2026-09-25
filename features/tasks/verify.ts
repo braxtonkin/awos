@@ -202,6 +202,7 @@ const guards = [
   'RefusedLaunchIsNotLost',
   'FailedLaunchRelaunches',
   'RetryWaitsAtGate',
+  'RetryReturnsWhenRoundsRunOut',
 ] as const;
 
 const renewsLapsedLeaseForever: Shape = {
@@ -245,6 +246,7 @@ const properties = {
   StageMovesOneStep: 'PROPERTIES',
   OnlyAPersonStops: 'PROPERTIES',
   RetryLeavesNoStageRetries: 'PROPERTIES',
+  RetryStartsWhereTheFailureRoutes: 'PROPERTIES',
   GatePassesOnlyOnApprove: 'PROPERTIES',
   MergeNeedsEveryGate: 'PROPERTIES',
   ReviewsOnlyGrow: 'PROPERTIES',
@@ -337,6 +339,7 @@ const tasksModel = defineModel({
     breaks('RetryKeepsReviews', "a person's retry forgets the review return", 'ReviewsOnlyGrow'),
     breaks('RetryKeepsApprovals', "a person's retry forgets the task's approvals", 'StoppedTaskCanResume'),
     breaks('RetryWaitsAtGate', 'Retry after a Stop at a gate reruns the gated step', 'GateStopResumesAtGate'),
+    breaks('RetryReturnsWhenRoundsRunOut', 'Retry after the rounds run out reruns the step that failed', 'RetryStartsWhereTheFailureRoutes'),
     unsettled('VerifyPassKeepsLandRounds', 'a Verify pass clears the Land rounds of a task with no gate', loopsFromLandToImplement),
     unsettled('OutsideApprovalsAreFinite', 'outside approvals may never stop', approvesForever),
     breaks('OutsideApprovalNeedsAWait', 'an outside approval resumes a task that is not awaiting one', 'TaskChangesOnlyWithItsAttempt'),
@@ -577,7 +580,7 @@ function outagesLoggedAndResumed(runs: readonly Run[]): Check {
 async function mutantRuns(postgres: TestPostgres, properties: readonly string[], name: string, plan: Plan, options: SimulationOptions): Promise<Check> {
   const runs = await simulate(postgres, [plan], traceWriter(options.trace));
   const first = runs.find(run => run.failure !== undefined);
-  if (first === undefined) return fail(name, `no violation in ${String(runs.length)} seeds of ${String(options.steps)} steps`);
+  if (first === undefined) return fail(name, `no violation in ${String(runs.length)} seeds of ${String(plan.steps)} steps`);
   return first.failure?.broken.some(found => properties.includes(found.property)) === true ? pass(name, violation(first)) : fail(name, `expected ${properties.join(' or ')}, got ${violation(first)}`);
 }
 
@@ -587,8 +590,8 @@ function mutantCheck(postgres: TestPostgres, mutant: MutantName, options: Simula
 }
 
 function engineMutantCheck(postgres: TestPostgres, mutant: EngineMutantName, options: SimulationOptions): Promise<Check> {
-  const { profile, breaks } = engineMutants[mutant];
-  return mutantRuns(postgres, breaks, `${breaks.join(' or ')} fails under the ${mutant} engine in the ${profile} profile`, { profile, seeds: seedsOf(options), steps: options.steps, engine: mutant }, options);
+  const { profile, breaks, steps = options.steps } = engineMutants[mutant];
+  return mutantRuns(postgres, breaks, `${breaks.join(' or ')} fails under the ${mutant} engine in the ${profile} profile`, { profile, seeds: seedsOf(options), steps, engine: mutant }, options);
 }
 
 function stepMutantCheck(postgres: TestPostgres, mutant: StepMutantName, options: SimulationOptions): Promise<Check> {
