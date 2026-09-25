@@ -1,5 +1,5 @@
 import { execFile, spawn, type ChildProcess } from 'node:child_process';
-import { randomBytes, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -143,7 +143,7 @@ async function seed(db: Database): Promise<Seeded> {
   return { person: person.id, routine: routine.id, repository: repository.id };
 }
 
-async function newAttempt(world: World, key: string): Promise<string> {
+async function newAttempt(world: World, key: string, token: string): Promise<string> {
   const now = new Date();
   const task = await world.db
     .insertInto('task')
@@ -152,7 +152,7 @@ async function newAttempt(world: World, key: string): Promise<string> {
     .executeTakeFirstOrThrow();
   const attempt = await world.db
     .insertInto('attempt')
-    .values({ task_id: task.id, routine_id: world.seeded.routine, routine_version: 1, step: 'specify', started_at: now, lease_until: new Date(now.getTime() + 86_400_000), run_as_id: world.seeded.person, epoch: 0 })
+    .values({ task_id: task.id, routine_id: world.seeded.routine, routine_version: 1, step: 'specify', started_at: now, lease_until: new Date(now.getTime() + 86_400_000), run_as_id: world.seeded.person, epoch: 0, bridge_token_hash: createHash('sha256').update(token, 'utf8').digest(), job_created_at: now })
     .returning('id')
     .executeTakeFirstOrThrow();
   return attempt.id;
@@ -179,8 +179,8 @@ type Options = {
 async function start(world: World, options: Options = {}): Promise<Started> {
   const key = options.key ?? `probe-${world.run}-${randomBytes(3).toString('hex')}`;
   const number = options.number ?? 1;
-  const attempt = await newAttempt(world, `${key}#${String(number)}`);
   const token = randomBytes(24).toString('hex');
+  const attempt = await newAttempt(world, `${key}#${String(number)}`, token);
   const input = {
     attempt,
     taskKey: key,
