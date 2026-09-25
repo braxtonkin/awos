@@ -138,6 +138,10 @@ const probes: Readonly<Record<Exclude<Place, 'task'>, (scope: Scope) => Promise<
   },
 };
 
+export async function eventGaps(db: Database, attempt: Omit<Attempt, 'events'>): Promise<readonly Leftover[]> {
+  return eventLeftovers({ ...attempt, events: await eventsOf(db, attempt.id) });
+}
+
 export async function leftovers(sources: CleanSources, ticket: string): Promise<readonly Leftover[]> {
   const task = await taskFor(sources.database, ticket);
   if (task === undefined) return [leftover('task', ticket, 'has no task row')];

@@ -21,6 +21,8 @@ import { startLocalWorld } from './local-world.ts';
 import { worldScenario } from './world-lane.ts';
 import { sandboxWorld, worldNames, type World, type WorldName } from './world.ts';
 import { standInSolutionsScenario } from './stand-in-check.ts';
+import { localEngineScenario } from './local-engine.ts';
+import { localReadScenario } from './local-read.ts';
 
 const defaultRepository = 'braxtonkdev/autoworker-oss';
 const defaultProject = 'SBX';
@@ -295,4 +297,4 @@ const e2ePayload: Scenario = {
   },
 };
 
-export const scenarios: readonly Scenario[] = [e2e, p7Lane, worldScenario, e2eBranch, e2ePayload, ...cleanScenarios, roundTripScenario, launchFaultsScenario, parkedScenario, standInSolutionsScenario];
+export const scenarios: readonly Scenario[] = [e2e, p7Lane, worldScenario, e2eBranch, e2ePayload, ...cleanScenarios, roundTripScenario, launchFaultsScenario, parkedScenario, standInSolutionsScenario, localEngineScenario, localReadScenario];

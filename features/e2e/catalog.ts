@@ -120,3 +120,50 @@ export const catalog: readonly Entry[] = parsePayload('the catalog', Catalog, [
     ].join('\n'),
   },
 ]);
+
+export const scriptNames = ['question', 'stillWrong', 'brokenEnvironment', 'longStream'] as const;
+
+export type ScriptName = (typeof scriptNames)[number];
+
+const Script = z.object({
+  name: z.enum(scriptNames),
+  summary: z.string().min(1),
+  description: z.string().min(1),
+  ticks: z.int().nonnegative(),
+});
+
+export const Scripts = z
+  .array(Script)
+  .refine(entries => scriptNames.every(name => entries.filter(entry => entry.name === name).length === 1), { error: 'each script name appears exactly once' })
+  .refine(entries => new Set(entries.map(entry => entry.summary)).size === entries.length, { error: 'two scripts share a summary' });
+
+export type Script = z.infer<typeof Script>;
+
+export const scripts: readonly Script[] = parsePayload('the scripts', Scripts, [
+  {
+    name: 'question',
+    summary: 'Pick a retry policy for the sandbox client',
+    description: 'The sandbox client gives up after the first failed call. Make it retry, with whichever policy fits the service best.',
+    ticks: 0,
+  },
+  {
+    name: 'stillWrong',
+    summary: 'Round prices to whole cents in the sandbox',
+    description: 'Prices in the sandbox keep fractions of a cent. Round each price to whole cents, half up.',
+    ticks: 0,
+  },
+  {
+    name: 'brokenEnvironment',
+    summary: 'Read the exchange rate from the rates service',
+    description: 'The sandbox hard-codes one exchange rate. Read it from the rates service instead.',
+    ticks: 0,
+  },
+  {
+    name: 'longStream',
+    summary: 'Tidy the sandbox logging',
+    description: 'The sandbox logs the same line twice on start. Log it once.',
+    ticks: 90,
+  },
+]);
+
+export const scriptOf = (text: string): Script | undefined => scripts.find(entry => text.includes(`: ${entry.summary}`));

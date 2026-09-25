@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -8,8 +9,8 @@ import { z } from 'zod';
 import { behaviorOf, outputLimit, reproductionPath, type Behavior, type RanScript, type Reproduction, type Side } from '../../shared/reproduction.ts';
 import { review as reviewSchema } from '../../shared/review.ts';
 import { fail, pass, type Check, type Scenario } from '../../tools/verify/check.ts';
-import { catalog, type Entry } from './catalog.ts';
-import { standInPlan } from './codex-stand-in.ts';
+import { catalog, scripts, type Entry, type Script, type ScriptName } from './catalog.ts';
+import { answeredHeading, scriptFiles, scriptPlan, standInPlan, steerReply, ticking } from './codex-stand-in.ts';
 import { execute, type Exit } from './process.ts';
 import { tokenUsageMethod } from './report.ts';
 import { sandboxCommands, writeSandbox } from './sandbox-seed.ts';
@@ -54,12 +55,15 @@ type Session = {
   readonly ended: boolean;
 };
 
-function session(prompt: string): Promise<Session> {
+type Steer = { readonly id: string; readonly text: string };
+
+function session(prompt: string, steer?: Steer): Promise<Session> {
   return new Promise((resolve, reject) => {
     const began = performance.now();
     const child = spawn(process.execPath, [standIn, 'app-server', '--listen', 'stdio://'], { cwd: workspace, stdio: ['pipe', 'pipe', 'inherit'] });
     const items: Session['items'][number][] = [];
     const usage: number[] = [];
+    let steered = false;
     const finish = (ended: boolean): void => {
       clearTimeout(timer);
       child.kill('SIGTERM');
@@ -74,6 +78,10 @@ function session(prompt: string): Promise<Session> {
       if (!parsed.success) return;
       const done = completedItem.safeParse(parsed.data);
       if (done.success) items.push(done.data.params.item);
+      if (done.success && steer !== undefined && !steered && done.data.params.item.type === 'agentMessage') {
+        steered = true;
+        child.stdin.write(`${JSON.stringify({ id: 4, method: 'turn/steer', params: { threadId: 'stand-in-thread', expectedTurnId: 'stand-in-turn', clientUserMessageId: steer.id, input: [{ type: 'text', text: steer.text, text_elements: [] }] } })}\n`);
+      }
       if (parsed.data.method === tokenUsageMethod) usage.push(usageLine.parse(parsed.data).params.tokenUsage.total.inputTokens);
       if (parsed.data.method === 'turn/completed') finish(true);
     });
@@ -200,6 +208,57 @@ async function drive(entry: Entry, solution: Solution, npmCache: string): Promis
   return checks;
 }
 
+const userItem = z.looseObject({ type: z.literal('userMessage'), clientId: z.string().nullable() });
+
+async function steerChecks(): Promise<readonly Check[]> {
+  await freshWorkspace();
+  const steer = { id: randomUUID(), text: 'Also log the start time once.' };
+  const run = await session(`Ticket stand-in-steer: Keep streaming.\n\n${ticking(4, 300)}`, steer);
+  const echoed = run.items.findIndex(found => userItem.safeParse(found).data?.clientId === steer.id);
+  const answered = run.items.findIndex((found, index) => index > echoed && messageItem.safeParse(found).data?.text === steerReply(steer.text));
+  const name = "a turn/steer yields a userMessage whose clientId is the steer's id, followed by an agent message that answers it";
+  return [
+    ...turnChecks('steer', run),
+    echoed >= 0 && answered > echoed ? pass(name, `userMessage at item ${String(echoed)}, answer at item ${String(answered)}`) : fail(name, `userMessage at ${String(echoed)}, answer at ${String(answered)}: ${JSON.stringify(run.items).slice(0, 600)}`),
+  ];
+}
+
+const scriptTicket = (script: Script): string => `Ticket LOCAL-1: ${script.summary}\n\n${script.description}`;
+
+const scriptNamed = (name: ScriptName): Script => {
+  const found = scripts.find(script => script.name === name);
+  if (found === undefined) throw new Error(`no script is named ${name}`);
+  return found;
+};
+
+async function scriptChecks(npmCache: string): Promise<readonly Check[]> {
+  const question = scriptNamed('question');
+  await freshWorkspace();
+  const asked = await session(await promptFor('specify', scriptTicket(question)));
+  const choices = reviewOf(asked)?.blocks.filter(block => block.kind === 'choice') ?? [];
+  const answered = await session(`${await promptFor('specify', scriptTicket(question))}\n${answeredHeading}\n\n{"kind":"pick","block":1,"option":"backoff"}\n`);
+  const checks: Check[] = [
+    ...turnChecks('question Specify', asked),
+    reviewOf(asked)?.outcome === 'needs_input' && choices.length === 1 && choices.every(block => block.recommended !== null)
+      ? pass('question Specify: needs input with one choice block and a recommended option', JSON.stringify(choices))
+      : fail('question Specify: needs input with one choice block and a recommended option', JSON.stringify(reviewOf(asked) ?? messagesOf(asked).at(-1) ?? null).slice(0, 500)),
+    reviewOf(answered)?.outcome === 'done' && planOf(answered) === scriptPlan(question) ? pass('question Specify with an answer: writes its plan', planOf(answered)) : fail('question Specify with an answer: writes its plan', planOf(answered)),
+  ];
+  for (const name of ['stillWrong', 'brokenEnvironment'] as const) {
+    const script = scriptNamed(name);
+    const base = await freshWorkspace();
+    const implement = await session(await promptFor('implement', `${scriptTicket(script)}\n\nPlan:\n\n${scriptPlan(script)}`));
+    const written = await readFile(join(workspace, scriptFiles[name]), 'utf8').catch(() => '');
+    checks.push(...turnChecks(`${name} Implement`, implement), written === '' ? fail(`${name} Implement: changes ${scriptFiles[name]}`, 'no file') : pass(`${name} Implement: changes ${scriptFiles[name]}`, written.trim()));
+    await commit(`AutoWorker implements ${name}`);
+    await rm(reproductionPath, { force: true });
+    const verify = await session(await promptFor('verify', `${scriptTicket(script)}\n\nPlan:\n\n${scriptPlan(script)}\n\nBase commit: ${base}`));
+    if (name === 'stillWrong') checks.push(...(await verifyChecks(`${name} Verify`, verify, base, npmCache, 'still_wrong')));
+    else checks.push(...turnChecks(`${name} Verify`, verify), reviewOf(verify)?.outcome === 'blocked' ? pass(`${name} Verify: the review is blocked, which Verify judges an environment failure`, reviewOf(verify)?.summary ?? '') : fail(`${name} Verify: the review is blocked, which Verify judges an environment failure`, messagesOf(verify).at(-1) ?? ''));
+  }
+  return checks;
+}
+
 async function roundTripPlan(): Promise<Check> {
   await freshWorkspace();
   const specify = await session(await promptFor('specify', 'Ticket stand-in-a: Change titleCase in src/words.ts so it returns the text with the first letter of each space-separated word in upper case.'));
@@ -251,12 +310,14 @@ async function solutionChecks(): Promise<readonly Check[]> {
 
 export const standInSolutionsScenario: Scenario = {
   name: 'stand-in-solutions',
-  summary: "proves the Codex stand-in's solution for every catalog entry with the sandbox's vitest, then drives the stand-in over stdio through Specify, Implement, and Verify in a sandbox repository at /workspace, and runs Verify's script on fresh base and change checkouts as the Job does",
+  summary: "proves the Codex stand-in's solution for every catalog entry with the sandbox's vitest, then drives the stand-in over stdio through Specify, Implement, and Verify in a sandbox repository at /workspace, runs Verify's script on fresh base and change checkouts as the Job does, checks that a turn/steer comes back as a userMessage with the steer's id and then an answer, and drives the question, still-wrong, and broken-environment scripts",
   run: async () => {
     const checks: Check[] = [...(await solutionChecks())];
     checks.push(await roundTripPlan());
+    checks.push(...(await steerChecks()));
     const npmCache = await mkdtemp(join(tmpdir(), 'stand-in-npm-'));
     try {
+      checks.push(...(await scriptChecks(npmCache)));
       for (const entry of catalog) {
         const solution = solutions[entry.name];
         if (solution !== undefined) checks.push(...(await drive(entry, solution, npmCache)));

@@ -18,6 +18,7 @@ import { catalogProblems, type Audit } from '../../tools/verify/catalog.ts';
 import { checkCatalog } from './catalog.ts';
 import { claim, lostTooOften } from './claim.ts';
 import { coreRunAs } from './run-as.ts';
+import { pastSeedNames, seedPast } from './seed.ts';
 import { provePlants, type PlantProof } from './invariants.ts';
 import { stepMutantName, type StepMutantName } from './sim-jobs.ts';
 import {
@@ -976,6 +977,26 @@ async function reaperPerfChecks(postgres: TestPostgres): Promise<readonly Check[
   ];
 }
 
+const seedOptions = { database: { type: 'string' }, routine: { type: 'string' }, key: { type: 'string' } } as const;
+
+async function seedChecks(args: readonly string[]): Promise<readonly Check[]> {
+  const { values, positionals } = parseArgs({ args: [...args], options: seedOptions, allowPositionals: true, strict: true });
+  const seed = pastSeedNames.find(name => name === positionals[0]);
+  const { database, routine, key } = values;
+  if (seed === undefined || database === undefined || routine === undefined || key === undefined || positionals.length !== 1) {
+    return [fail('tasks-seed named', `name one past seed, ${pastSeedNames.join(' or ')}, then --database <url> --routine <name> --key <task key>`)];
+  }
+  const db = connect(database, 2);
+  try {
+    const planted = await seedPast(db, seed, routine, key, new Date());
+    const name = `${seed} is seeded as ${planted.key}, done`;
+    const detail = `${planted.state} at ${planted.step}, its last attempt finished at ${planted.finishedAt.toISOString()}`;
+    return [planted.state === 'done' ? pass(name, detail) : fail(name, detail)];
+  } finally {
+    await db.destroy();
+  }
+}
+
 function parseSimulationOptions(args: readonly string[]): SimulationOptions {
   const parsed = simulationOptions.safeParse(parseArgs({ args: [...args], options: simulationFlags, strict: true, allowPositionals: false }).values);
   if (!parsed.success) throw new Error(z.prettifyError(parsed.error));
@@ -999,6 +1020,11 @@ export const scenarios: readonly Scenario[] = [
       "starts the engine's entry point against Postgres: it refuses a routine's unknown workflow and a missing DATABASE_URL, idles on an empty database, and on SIGTERM finishes its reaper pass and exits 0",
     run: () =>
       withPostgres(async postgres => [...(await engineStartChecks(postgres)), await loopNamesCheck(postgres), noUrlCheck(), await idleCheck(postgres), ...(await sigtermChecks(postgres)), await restartCheck(postgres)]),
+  },
+  {
+    name: 'tasks-seed',
+    summary: "writes a past state, done or expired, as task --key of the routine --routine in the database at --database, through the tasks feature's claim and advance with an earlier time, and reads it back",
+    run: seedChecks,
   },
   {
     name: 'reaper-perf',

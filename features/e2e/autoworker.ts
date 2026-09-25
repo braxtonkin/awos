@@ -65,7 +65,7 @@ export async function actAs(store: Store, args: readonly string[]): Promise<Ran>
   return childResult(run(process.execPath, [actCommand, ...args], { env: baseEnvironment(store), cwd: repositoryRoot, timeout: 60_000 }));
 }
 
-export type Engine = { readonly said: () => string; readonly stop: () => Promise<void>; readonly kill: () => Promise<void> };
+export type Engine = { readonly said: () => string; readonly exited: Promise<void>; readonly stop: () => Promise<void>; readonly kill: () => Promise<void> };
 
 export function startEngine(store: Store, settings: Readonly<Record<string, string>>, echo: (line: string) => void = () => undefined): Engine {
   let said = '';
@@ -79,6 +79,7 @@ export function startEngine(store: Store, settings: Readonly<Record<string, stri
   const exited = new Promise<void>(resolve => child.once('exit', () => { resolve(); }));
   return {
     said: () => said,
+    exited,
     stop: async () => {
       if (child.exitCode === null && child.signalCode === null) child.kill('SIGTERM');
       await Promise.race([exited, wait(30_000)]);
@@ -219,7 +220,7 @@ export async function standInImage(attemptImage: string): Promise<string> {
   return pushByDigest(tag);
 }
 
-export const driverSettings = (world: EngineWorld, image: string, namespace: string, address: string): Readonly<Record<string, string>> => ({
+export const driverSettings = (worldSettings: Readonly<Record<string, string>>, image: string, namespace: string, address: string): Readonly<Record<string, string>> => ({
   JOB_IMAGE: image,
   JOB_NAMESPACE: namespace,
   JOB_SERVICE_ACCOUNT: e2eServiceAccount,
@@ -228,7 +229,7 @@ export const driverSettings = (world: EngineWorld, image: string, namespace: str
   WORKER_EVERY_MS: '2000',
   SCHEDULER_EVERY_MS: '10000',
   LAND_EVERY_MS: '5000',
-  ...world.settings,
+  ...worldSettings,
 });
 
 type Person = { readonly name: string; readonly email: string; readonly jiraAccountId?: string; readonly logins: object };
@@ -345,7 +346,7 @@ async function driveInNamespace(drive: Drive, core: CoreV1Api, image: string, ad
     if (setup.code !== 0) throw new Error(`setup failed: ${setup.out}`);
     drive.log(setup.out.replaceAll('\n', '; '));
     if (drive.world.trustLogins) await store.db.updateTable('credential').set({ state: 'valid', checked_at: new Date() }).execute();
-    const settings = driverSettings(drive.world, image, drive.namespace, address);
+    const settings = driverSettings(drive.world.settings, image, drive.namespace, address);
     let engine = startEngine(store, settings);
     let printed = '';
     let hit: Implementing | undefined;

@@ -4,7 +4,8 @@ import { dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { setTimeout as wait } from 'node:timers/promises';
 import { z } from 'zod';
-import { catalog, type Entry } from './catalog.ts';
+import type { Review as StepReview } from '../../shared/review.ts';
+import { catalog, scriptOf, type Entry, type Script, type ScriptName } from './catalog.ts';
 import { execute } from './process.ts';
 import { tokenUsageMethod } from './report.ts';
 import { reproductionScript, solutions, type Solution } from './solutions.ts';
@@ -32,12 +33,7 @@ type Message = Readonly<Record<string, unknown>>;
 
 type Behavior = 'fixed' | 'still_wrong' | null;
 
-type Review = {
-  readonly outcome: 'done' | 'blocked';
-  readonly summary: string;
-  readonly blocks: readonly { readonly kind: 'text'; readonly title: null; readonly body: string }[];
-  readonly behavior?: Behavior;
-};
+type Review = StepReview & { readonly behavior?: Behavior };
 
 const send = (message: object): void => {
   process.stdout.write(`${JSON.stringify(message)}\n`);
@@ -67,13 +63,19 @@ const promptOf = (params: Readonly<Record<string, unknown>>): string => {
 
 const review = (summary: string, body: string, outcome: Review['outcome'] = 'done'): Review => ({ outcome, summary, blocks: [{ kind: 'text', title: null, body }] });
 
-const turnState = { interrupted: false, abort: new AbortController(), items: 0 };
+const turnState: { interrupted: boolean; abort: AbortController; items: number; readonly steers: string[] } = { interrupted: false, abort: new AbortController(), items: 0, steers: [] };
 
 const stopped = (): boolean => turnState.interrupted;
 
 const nextId = (kind: string): string => {
   turnState.items += 1;
   return `stand-in-${kind}-${String(turnState.items)}`;
+};
+
+export const steerReply = (text: string): string => `Acting on your message: ${text}`;
+
+const answerSteers = (): void => {
+  for (const text of turnState.steers.splice(0)) item(nextId('reply'), { type: 'agentMessage', text: steerReply(text) });
 };
 
 const quoted = (text: string): string => `'${text.replaceAll("'", "'\\''")}'`;
@@ -130,6 +132,7 @@ async function implement(work: Implementing): Promise<Review | undefined> {
   for (let at = 1; at <= implementPace.progressItems; at += 1) {
     await wait(implementPace.everyMs);
     if (stopped()) return undefined;
+    answerSteers();
     item(nextId('progress'), { type: 'agentMessage', text: `progress ${String(at)} of ${String(implementPace.progressItems)}: ${work.entry.name}` });
     await implementActions.get(at)?.(work);
     if (stopped()) return undefined;
@@ -137,14 +140,78 @@ async function implement(work: Implementing): Promise<Review | undefined> {
   return review(`The stand-in added ${work.entry.name} in ${work.entry.file}.`, `Added \`${work.entry.name}\` in \`${work.entry.file}\`, exported by name, and checked it against the ticket's acceptance criteria.`);
 }
 
-async function verify(work: Implementing, prompt: string): Promise<Review | undefined> {
+async function reproducing(prompt: string, content: string, summary: string, body: string): Promise<Review | undefined> {
   const script = /reproduction script at `([^`]+)`/.exec(prompt)?.[1];
   if (script === undefined) return { ...review('The Verify prompt did not name the script.', 'The stand-in could not read its instructions.', 'blocked'), behavior: null };
-  await write(script, reproductionScript(work.entry, work.solution));
+  await write(script, content);
   const tried = await run(`sh ${script}`);
   if (stopped()) return undefined;
-  return { ...review(`The stand-in wrote a script that checks ${work.entry.name}.`, `The script imports \`${work.entry.name}\` from \`${work.entry.file}\` and checks the ticket's examples. Here it exited ${String(tried.exitCode)}.`), behavior: null };
+  return { ...review(summary, `${body} Here it exited ${String(tried.exitCode)}.`), behavior: null };
 }
+
+const verify = (work: Implementing, prompt: string): Promise<Review | undefined> =>
+  reproducing(
+    prompt,
+    reproductionScript(work.entry, work.solution),
+    `The stand-in wrote a script that checks ${work.entry.name}.`,
+    `The script imports \`${work.entry.name}\` from \`${work.entry.file}\` and checks the ticket's examples.`,
+  );
+
+export const answeredHeading = '## Your last review, and the answers to it';
+
+export const scriptFiles: Readonly<Record<ScriptName, string>> = {
+  question: 'src/retry.ts',
+  stillWrong: 'src/prices.ts',
+  brokenEnvironment: 'src/rates.ts',
+  longStream: 'src/logging.ts',
+};
+
+export const scriptPlan = (script: Script): string => `Stand-in plan for "${script.summary}": change \`${scriptFiles[script.name]}\`, then let Verify judge the change with one reproduction script.`;
+
+type Block = StepReview['blocks'][number];
+
+export const retryQuestion: Block = {
+  kind: 'choice',
+  title: 'Retry policy',
+  question: 'Which retry policy should the sandbox client use?',
+  options: [
+    { id: 'fixed', label: 'Retry 3 times, 1 s apart' },
+    { id: 'backoff', label: 'Back off exponentially, capped at 30 s' },
+  ],
+  recommended: 'backoff',
+};
+
+type ScriptStep = (prompt: string, script: Script) => Promise<Review | undefined>;
+
+const planned: ScriptStep = (_prompt, script) => Promise.resolve(review('The stand-in wrote its plan.', scriptPlan(script)));
+
+const changed: ScriptStep = async (_prompt, script) => {
+  const file = scriptFiles[script.name];
+  await write(join(process.cwd(), file), `export const changedBy = '${script.name} at ${new Date().toISOString()}';\n`);
+  return stopped() ? undefined : review(`The stand-in changed ${file}.`, `Changed \`${file}\` as the plan says.`);
+};
+
+const fileExists: ScriptStep = (prompt, script) =>
+  reproducing(prompt, `test -f ${scriptFiles[script.name]}\n`, `The stand-in wrote a script that checks ${scriptFiles[script.name]}.`, `The script fails while \`${scriptFiles[script.name]}\` is missing.`);
+
+const asked: ScriptStep = (prompt, script) =>
+  prompt.includes(answeredHeading)
+    ? planned(prompt, script)
+    : Promise.resolve({ outcome: 'needs_input', summary: 'The ticket leaves the retry policy open.', blocks: [{ kind: 'text', title: null, body: 'The service documents no retry policy, so the stand-in needs a person to pick one.' }, retryQuestion] });
+
+const stillWrong: ScriptStep = prompt => reproducing(prompt, 'echo "prices still keep fractions of a cent"\nexit 1\n', 'The stand-in wrote a script that checks the rounding.', 'The script fails while any price keeps a fraction of a cent.');
+
+const environmentDown: ScriptStep = () =>
+  Promise.resolve({ ...review('The Verify environment did not start.', 'The rates service the ticket names did not answer, so the stand-in could not run the change.', 'blocked'), behavior: null });
+
+type AgentStep = Exclude<Step, 'other'>;
+
+const scriptSteps: Readonly<Record<ScriptName, Readonly<Record<AgentStep, ScriptStep>>>> = {
+  question: { specify: asked, implement: changed, verify: fileExists },
+  stillWrong: { specify: planned, implement: changed, verify: stillWrong },
+  brokenEnvironment: { specify: planned, implement: changed, verify: environmentDown },
+  longStream: { specify: planned, implement: changed, verify: fileExists },
+};
 
 type Step = 'specify' | 'implement' | 'verify' | 'other';
 
@@ -159,6 +226,8 @@ const unchanged = (step: Step): Review => ({ ...review('The stand-in finished th
 
 async function work(prompt: string): Promise<Review | undefined> {
   const step = stepOf(prompt);
+  const script = scriptOf(prompt);
+  if (script !== undefined && step !== 'other') return scriptSteps[script.name][step](prompt, script);
   const entry = entryIn(prompt);
   if (step === 'specify') return review('The stand-in wrote its plan.', entry === undefined ? standInPlan : catalogPlan(entry));
   if (entry === undefined || (step !== 'implement' && step !== 'verify')) return unchanged(step);
@@ -178,11 +247,13 @@ async function runTurn(params: Readonly<Record<string, unknown>>): Promise<void>
   for (let tick = 1; tick <= ticks; tick += 1) {
     await wait(everyMs);
     if (stopped()) return;
+    answerSteers();
     item(`stand-in-tick-${String(tick)}`, { type: 'agentMessage', text: `tick ${String(tick)}` });
   }
   if (stopped()) return;
   const final = await work(prompt);
   if (final === undefined || stopped()) return;
+  answerSteers();
   item('stand-in-review', { type: 'agentMessage', text: JSON.stringify(final) });
   notify('turn/completed', { threadId: thread, turn: { id: turn, status: 'completed', items: [] } });
 }
@@ -202,9 +273,13 @@ const answer = (message: Message): void => {
       send({ id, result: { turn: { id: turn, status: 'inProgress', items: [] } } });
       void runTurn(params);
       return;
-    case 'turn/steer':
+    case 'turn/steer': {
+      const text = promptOf(params);
       send({ id, result: { turnId: turn } });
+      item(nextId('steer'), { type: 'userMessage', clientId: params['clientUserMessageId'] ?? null, content: [{ type: 'text', text }] });
+      turnState.steers.push(text);
       return;
+    }
     case 'turn/interrupt':
       turnState.interrupted = true;
       turnState.abort.abort();

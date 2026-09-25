@@ -25,6 +25,7 @@ export type LocalWorld = {
   readonly jira: Jira;
   readonly github: GitHub;
   readonly engine: { readonly settings: EngineSettings; readonly secrets: EngineSecrets };
+  readonly gitFolder: string;
   readonly stop: () => Promise<void>;
 };
 
@@ -49,6 +50,7 @@ export async function startLocalWorld(address: string, repository: string): Prom
       settings: { GITHUB_API_URL: github.url, GIT_BASE_URL: git.base, JIRA_SITE: jira.url },
       secrets: { GITHUB_TOKEN: localLogins.githubToken, AUTOWORKER_JIRA_LOGIN: `${localLogins.jiraEmail}:${localLogins.jiraToken}` },
     },
+    gitFolder: git.folder,
     stop: async () => {
       await jira.stop();
       await github.stop();
