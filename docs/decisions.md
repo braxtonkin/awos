@@ -379,7 +379,7 @@ Rejected options:
 
 ### Concurrent protocols are model-checked with TLA+
 
-Decided 23 Sep 2026. Claims and leases, the stage machine with its Verify loop, the outbox, the bridge's event delivery, and the routine schedule each get a TLA+ model, checked with TLC. A model is written before the code it covers, so it checks the design while the design is still cheap to change. It runs in CI whenever the model or that code changes. The repository's verification skill, generated with `/create-verification-skill` once the engine runs, includes the models and the command that checks them. Each night, TLC also checks the task model at 2 tasks and 2 workers at the real caps. On 23 Sep the owner added a second nightly size of 3 tasks and 2 workers, at caps of 2 with 1 person action, for the safety properties only, so that tasks compete for workers.
+Decided 23 Sep 2026. Claims and leases, the stage machine with its Verify loop, the outbox, the bridge's event delivery, and the routine schedule each get a TLA+ model, checked with TLC. A model is written before the code it covers, so it checks the design while the design is still cheap to change. It runs in CI whenever the model or that code changes. The repository's verification skill, generated with `/create-verification-skill` once the engine runs, includes the models and the command that checks them. The nightly workflow, which runs only when started by hand (see [the decision on the nightly workflow](#the-nightly-workflow-runs-only-when-started-by-hand)), also checks the task model at 2 tasks and 2 workers at the real caps. On 23 Sep the owner added a second nightly size of 3 tasks and 2 workers, at caps of 2 with 1 person action, for the safety properties only, so that tasks compete for workers.
 
 Rejected options:
 
@@ -481,6 +481,16 @@ Decided 24 Sep 2026. The dashboard seals new credentials with the same AES-256-G
 Rejected options:
 
 - **Seal with a public key.** Only the engine could open a credential. It changes the Stack line, the sealing code, and key rotation, and it means re-sealing every stored credential.
+
+### The nightly workflow runs only when started by hand
+
+Decided 24 Sep 2026. The `nightly` workflow has no schedule. It runs when someone starts it from the repository's Actions tab, or with `gh workflow run nightly.yml`. What it checks is unchanged: every model at its nightly bounds, and each simulator at its long setting. Start it before merging a batch into `main`, and after changing a model's nightly config.
+
+On 23 and 24 Sep, CI and nightly runs came to $24.53 of Actions time at list price. It was free for this public repository, and no minutes were charged. The Tasks model's nightly config also runs out of Java heap during its liveness check, so a scheduled run would fail every night until that is fixed.
+
+Rejected options:
+
+- **Keep the daily schedule.** Each run holds the models job and every simulator shard for up to 4 hours, and it would fail every night on the Tasks model's heap.
 
 ## Open
 

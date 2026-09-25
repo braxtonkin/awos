@@ -1,8 +1,6 @@
 name: nightly
 
 on:
-  schedule:
-    - cron: '23 8 * * *'
   workflow_dispatch:
 
 permissions:
