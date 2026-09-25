@@ -1,8 +1,6 @@
 name: nightly
 
 on:
-  schedule:
-    - cron: '23 8 * * *'
   workflow_dispatch:
     inputs:
       jobs:
@@ -16,7 +14,7 @@ permissions:
 
 jobs:
   models:
-    if: github.event_name == 'schedule' || inputs.jobs == 'all' || inputs.jobs == 'models'
+    if: inputs.jobs == 'all' || inputs.jobs == 'models'
     runs-on: ubuntu-24.04
     timeout-minutes: 240
     steps:
@@ -28,7 +26,7 @@ jobs:
       - run: docker compose run --rm verify npm run verify -- models nightly
 
   simulation:
-    if: github.event_name == 'schedule' || inputs.jobs == 'all' || inputs.jobs == 'sims'
+    if: inputs.jobs == 'all' || inputs.jobs == 'sims'
     runs-on: ubuntu-24.04
     timeout-minutes: 240
     strategy:

@@ -5,6 +5,7 @@ import type { ClientFor, GithubClient, Pull, Reply } from './client.ts';
 export const githubKinds = [
   actionKinds.prOpenDraft.kind,
   actionKinds.prMarkReady.kind,
+  actionKinds.prEvidence.kind,
   actionKinds.prUpdateBranch.kind,
   actionKinds.prMerge.kind,
   actionKinds.branchAdvance.kind,
@@ -25,7 +26,18 @@ const failed = <R>(what: string, answer: Answer): Outcome<R> => ({ failed: said(
 
 const evidenceHeading = '## Evidence';
 
-export const bodyWithEvidence = (body: string | null, evidence: string): string => `${body ?? ''}${body === null || body === '' ? '' : '\n\n'}${evidenceHeading}\n\n${evidence}`;
+const evidenceMark = `\n${evidenceHeading}\n`;
+
+const split = (body: string | null): { readonly kept: string; readonly evidence: string | null } => {
+  const text = `\n${body ?? ''}`;
+  const at = text.indexOf(evidenceMark);
+  return at < 0 ? { kept: text.trim(), evidence: null } : { kept: text.slice(0, at).trim(), evidence: text.slice(at + evidenceMark.length).trim() };
+};
+
+export const bodyWithEvidence = (body: string | null, evidence: string): string => {
+  const { kept } = split(body);
+  return `${kept === '' ? '' : `${kept}\n\n`}${evidenceHeading}\n\n${evidence}`;
+};
 
 const already = (answer: Answer, words: RegExp): boolean => answer.status === 422 && words.test(answer.message);
 
@@ -53,15 +65,27 @@ async function openDraft(client: GithubClient, owed: Owed<Opened>, { signal }: L
   return { done: { number: pull.number, url: pull.html_url } };
 }
 
-async function markReady(client: GithubClient, owed: Owed<{ readonly repository: string; readonly head: string; readonly evidence: string }>, { signal }: Limits): Promise<Outcome<{ readonly number: number }>> {
-  const { repository, head, evidence } = owed.payload;
+type EvidencePayload = { readonly repository: string; readonly head: string; readonly evidence: string };
+
+async function withEvidence(client: GithubClient, { repository, head, evidence }: EvidencePayload, signal: AbortSignal): Promise<Pull | Outcome<{ readonly number: number }>> {
   const pull = await openPull(client, repository, head, signal);
   if (pull === undefined) return missing(head);
   if ('status' in pull) return failed('the pull request lookup', pull);
-  if (!(pull.body ?? '').includes(evidence)) {
-    const written = await client.setBody(repository, pull.number, bodyWithEvidence(pull.body, evidence), signal);
-    if (!('ok' in written)) return failed('the body update', written);
-  }
+  if (split(pull.body).evidence === evidence.trim()) return pull;
+  const written = await client.setBody(repository, pull.number, bodyWithEvidence(pull.body, evidence), signal);
+  return 'ok' in written ? pull : failed('the body update', written);
+}
+
+const isPull = (value: Pull | Outcome<{ readonly number: number }>): value is Pull => 'node_id' in value;
+
+async function showEvidence(client: GithubClient, owed: Owed<EvidencePayload>, { signal }: Limits): Promise<Outcome<{ readonly number: number }>> {
+  const pull = await withEvidence(client, owed.payload, signal);
+  return isPull(pull) ? { done: { number: pull.number } } : pull;
+}
+
+async function markReady(client: GithubClient, owed: Owed<EvidencePayload>, { signal }: Limits): Promise<Outcome<{ readonly number: number }>> {
+  const pull = await withEvidence(client, owed.payload, signal);
+  if (!isPull(pull)) return pull;
   if (!pull.draft) return { done: { number: pull.number } };
   const ready = await client.markReady(pull.node_id, signal);
   if (!('ok' in ready)) return failed('marking the pull request ready', ready);
@@ -137,6 +161,7 @@ async function remove(client: GithubClient, owed: Owed<{ readonly repository: st
 export const githubPerformers = (connector: Connector): Performers<GithubKind> => ({
   'pr.open-draft': performer(actionKinds.prOpenDraft, { catches: 'duplicates', call: (owed, limits) => withClient(connector, owed, client => openDraft(client, owed, limits)) }),
   'pr.mark-ready': performer(actionKinds.prMarkReady, { catches: 'duplicates', call: (owed, limits) => withClient(connector, owed, client => markReady(client, owed, limits)) }),
+  'pr.evidence': performer(actionKinds.prEvidence, { catches: 'duplicates', call: (owed, limits) => withClient(connector, owed, client => showEvidence(client, owed, limits)) }),
   'pr.update-branch': performer(actionKinds.prUpdateBranch, { catches: 'duplicates', call: (owed, limits) => withClient(connector, owed, client => updateBranch(client, owed, limits)) }),
   'pr.merge': performer(
     actionKinds.prMerge,

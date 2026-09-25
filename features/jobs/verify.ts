@@ -37,7 +37,7 @@ const launchWith = (login: string, guard = 'true'): string =>
     "const image = imageReference.parse('example.com/job@sha256:' + '0'.repeat(64));",
     "const settings = { image, namespace: 'default', serviceAccount: 'autoworker-job', deadlineSeconds: 60 };",
     "const copy = accessOnly('{}');",
-    `export const planted = ${guard} ? manifests({ attempt: '1', taskKey: 'K-1', number: 1, step: 'specify', image, repositoryUrl: 'https://example.com/r.git', startCommit: '', attemptToken: '', engineUrl: '', runAs: { name: 'n', email: 'e@example.com', githubToken: 't', codexLogin: ${login} } }, settings) : copy;`,
+    `export const planted = ${guard} ? manifests({ attempt: '1', taskKey: 'K-1', number: 1, step: 'specify', image, repositoryUrl: 'https://example.com/r.git', startCommit: '', afterTurn: { kind: 'push' }, attemptToken: '', engineUrl: '', runAs: { name: 'n', email: 'e@example.com', githubToken: 't', codexLogin: ${login} } }, settings) : copy;`,
   ].join('\n');
 
 const typePlants = [

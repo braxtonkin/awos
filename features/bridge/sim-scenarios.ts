@@ -6,9 +6,9 @@ import { z } from 'zod';
 import { connect } from '../../shared/db/client.ts';
 import { fail, pass, type Check, type Scenario } from '../../tools/verify/check.ts';
 import { withPostgres, type TestPostgres } from '../../tools/verify/postgres.ts';
-import { issueToken, receive, rules, type BridgeEngine } from './engine.ts';
+import { issueToken, pollCommands, receive, rules, sendCommand, type BridgeEngine } from './engine.ts';
 import { provePlants, world, worldStartsAt } from './invariants.ts';
-import { attemptId, protocolVersion, type Caller, type EventsPost } from './protocol.ts';
+import { attemptId, bridgeRequestIds, protocolVersion, type Caller, type EventsPost } from './protocol.ts';
 import { droppedBy, mutantName, mutants, noMutantYet, simulate, type MutantName, type Plan, type Run } from './simulate.ts';
 
 const flags = { seeds: { type: 'string' }, seed: { type: 'string' }, steps: { type: 'string' }, mutant: { type: 'string' }, trace: { type: 'string' } } as const;
@@ -170,14 +170,53 @@ async function refusalChecks(postgres: TestPostgres): Promise<readonly Check[]> 
   }
 }
 
+const textBlock = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['kind', 'title', 'body'],
+  properties: { kind: { type: 'string', enum: ['text'] }, title: { type: ['string', 'null'] }, body: { type: 'string' } },
+};
+
+const declaredSchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['outcome', 'blocks'],
+  properties: { outcome: { type: 'string', enum: ['done', 'needs_input', 'blocked'] }, blocks: { type: 'array', items: { anyOf: [textBlock] } } },
+};
+
+const deliveredSchema = z.object({ request: z.object({ params: z.object({ outputSchema: z.json() }) }) });
+
+async function schemaOrderCheck(postgres: TestPostgres): Promise<Check> {
+  const scratch = await postgres.scratch();
+  const db = connect(scratch.url, 2);
+  try {
+    for (const statement of world) await statement.execute(db);
+    const attempt = attemptId.parse('1');
+    const token = await issueToken(db, attempt);
+    if (token === undefined) throw new Error('the world attempt took no token');
+    const caller: Caller = { attempt, token, protocol: protocolVersion, pid: 7001, image: 'autoworker-job:current' };
+    const threadStarted = JSON.stringify({ id: bridgeRequestIds.threadStart, result: { thread: { id: 'thread-1' } } });
+    await receive(db, engine, caller, { received: 0, lines: [{ kind: 'app', seq: 1, text: threadStarted }] });
+    await sendCommand(db, attempt, { kind: 'turn.start', prompt: 'Plan the change.', outputSchema: declaredSchema }, new Date(worldStartsAt));
+    const frame = deliveredSchema.safeParse((await pollCommands(db, attempt, 0)).frames[0]);
+    const sent = JSON.stringify(declaredSchema);
+    const delivered = frame.success ? JSON.stringify(frame.data.request.params.outputSchema) : 'no turn/start frame';
+    const name = "a turn's output schema reaches the app server with its keys in the order the step declared them, so every block kind still starts with kind";
+    return delivered === sent ? pass(name, delivered) : fail(name, `sent ${sent}; delivered ${delivered}`);
+  } finally {
+    await db.destroy();
+    await scratch.drop();
+  }
+}
+
 async function simulationChecks(postgres: TestPostgres, options: Options): Promise<readonly Check[]> {
   if (options.mutant === 'all') {
-    const checks: Check[] = [await plantChecks(postgres), await catalogCheck(postgres), ...(await refusalChecks(postgres))];
+    const checks: Check[] = [await plantChecks(postgres), await catalogCheck(postgres), ...(await refusalChecks(postgres)), await schemaOrderCheck(postgres)];
     for (const mutant of mutantName.options) checks.push(await mutantCheck(postgres, mutant, options));
     return checks;
   }
   if (options.mutant !== undefined) return [await mutantCheck(postgres, options.mutant, options)];
-  return [...(await cleanSeeds(postgres, options)), await plantChecks(postgres), ...(await refusalChecks(postgres))];
+  return [...(await cleanSeeds(postgres, options)), await plantChecks(postgres), ...(await refusalChecks(postgres)), await schemaOrderCheck(postgres)];
 }
 
 function parseOptions(args: readonly string[]): Options {

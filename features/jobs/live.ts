@@ -10,11 +10,13 @@ import { ApiException, KubeConfig, RbacAuthorizationV1Api, type V1Job } from '@k
 import { z } from 'zod';
 import { accessOnly, type AccessOnlyLogin } from '../../shared/codex-login.ts';
 import { connect, refusal, type Database } from '../../shared/db/client.ts';
-import { fail, pass, type Check, type Scenario } from '../../tools/verify/check.ts';
+import { checksOf, fail, pass, type Check, type Scenario } from '../../tools/verify/check.ts';
 import { docker } from '../../tools/verify/docker.ts';
 import { kind } from '../../tools/verify/kind.ts';
 import { withPostgres } from '../../tools/verify/postgres.ts';
-import { connectCluster, containerName, imageFor, jobName, jobState, labels, launch, manifests, type Cluster, type JobState } from './launch.ts';
+import { connectCluster, labels, type Cluster } from '../../shared/cluster.ts';
+import type { JobAfterTurn } from '../../shared/workflow.ts';
+import { containerName, imageFor, jobName, jobState, launch, manifests, type JobState } from './launch.ts';
 import { imageReference, type ImageReference, type JobSettings } from './settings.ts';
 import { sweepOnce } from './sweep.ts';
 import { attemptBranch } from './workspace.ts';
@@ -171,6 +173,7 @@ type Options = {
   readonly startCommit?: string;
   readonly script?: string;
   readonly deadlineSeconds?: number;
+  readonly afterTurn?: JobAfterTurn;
 };
 
 async function start(world: World, options: Options = {}): Promise<Started> {
@@ -180,11 +183,12 @@ async function start(world: World, options: Options = {}): Promise<Started> {
   const input = {
     attempt,
     taskKey: key,
-    number,
+    branch: attemptBranch(key, number),
     step: options.step ?? 'specify',
     image: options.image ?? world.image,
     repositoryUrl: options.repositoryUrl ?? thisRepository,
     startCommit: options.startCommit ?? pinnedCommit,
+    afterTurn: options.afterTurn ?? { kind: 'push' as const },
     attemptToken: randomBytes(24).toString('hex'),
     engineUrl: `http://${world.address}:9`,
     runAs: { name: 'Probe Person', email: 'probe@example.com', githubToken: world.githubToken, codexLogin: world.login },
@@ -613,6 +617,129 @@ async function changedDigest(): Promise<readonly Check[]> {
   }
 }
 
+const secretProbe = [
+  'echo "whoami $(id -un)"',
+  'env | grep -Eq "TOKEN|AUTH_JSON|ENGINE_URL" && echo "environment leaked" || echo "environment clean"',
+  'cat /proc/1/environ > /dev/null 2>&1 && echo "pid 1 environ read" || echo "pid 1 environ refused"',
+  'for p in /proc/[0-9]*; do grep -q ATTEMPT_TOKEN "$p/environ" 2> /dev/null && echo "token readable in $p"; done',
+  'ls /var/lib/autoworker > /dev/null 2>&1 && echo "bridge folder listed" || echo "bridge folder refused"',
+  'cat /var/lib/autoworker/attempt.git/config > /dev/null 2>&1 && echo "bridge git read" || echo "bridge git refused"',
+  'cat /home/codex/.codex/auth.json > /dev/null 2>&1 && echo "codex login read" || echo "codex login refused"',
+  'echo "probe done"',
+  'exit 1',
+].join('\n');
+
+const editingScript = [
+  'if [ -f edited.txt ]; then echo "saw an earlier edit"; exit 0; fi',
+  'echo edited > edited.txt',
+  'echo edited > /workspace/edited.txt 2> /dev/null',
+  "echo 'exit 0' > /tmp/autoworker-reproduce.sh 2> /dev/null",
+  'exit 1',
+].join('\n');
+
+const tamperer = ' && (nohup sh -c "while true; do for d in /tmp/autoworker-run.*; do echo edited > \\$d/tree/edited.txt; echo exit 0 > \\$d/reproduce.sh; done; sleep 0.05; done" > /dev/null 2>&1 &)';
+
+const fixingScript = ['test -f setup-ran.txt || { echo "setup did not run"; exit 2; }', 'grep -q new src/value.txt'].join('\n');
+
+const ranRecord = z.object({ exitCode: z.int().nullable(), output: z.string() }).nullable();
+
+const reproduced = z.object({ state: z.literal('ran'), base: z.object({ run: ranRecord }), change: z.object({ run: ranRecord }) });
+
+type Reproduced = z.infer<typeof reproduced>;
+
+const prepareOnly = `node-bridge --input-type=module -e "const w=await import('/app/features/jobs/workspace.ts');await w.prepareWorkspace(w.readJobEnvironment(process.env));console.log('prepared')"`;
+
+const reproduceScript = (script: string, agentLeftovers: string): string =>
+  [
+    prepareOnly,
+    asCodex(`echo ${Buffer.from(script).toString('base64')} | base64 -d > /tmp/autoworker-reproduce.sh${agentLeftovers}`),
+    `node-bridge --input-type=module -e "const r=await import('/app/features/jobs/reproduce.ts');const w=await import('/app/features/jobs/workspace.ts');const env=w.readJobEnvironment(process.env);const got=await r.reproduce(env,{base:env.BASE_COMMIT,change:env.START_COMMIT,setup:env.SETUP_COMMAND});console.log('REPRODUCED '+JSON.stringify(got))"`,
+  ].join(' && ');
+
+const exits = (got: Reproduced | undefined): string => (got === undefined ? 'no reproduction' : `base ${String(got.base.run?.exitCode)}, change ${String(got.change.run?.exitCode)}`);
+
+async function reproduceLane(world: World): Promise<readonly Check[]> {
+  const server = await gitServer(world.address);
+  try {
+    const base = await probeRepository(server, 'reproduce.git', { 'src/value.txt': 'old\n' });
+    const bare = join(server.folder, 'reproduce.git');
+    const work = await mkdtemp(join(tmpdir(), 'jobs-change-'));
+    const change = await sh(
+      [`git clone -q ${bare} ${work}`, `echo new > ${work}/src/value.txt`, `git -C ${work} -c user.name=Probe -c user.email=probe@example.com commit -qam change`, `git -C ${work} push -q origin main`, `git -C ${work} rev-parse HEAD`].join(' && '),
+    );
+    await rm(work, { recursive: true, force: true });
+    const runOne = async (script: string, leftovers = ''): Promise<{ readonly log: string; readonly got: Reproduced | undefined; readonly branch: string }> => {
+      const started = await start(world, {
+        step: 'verify',
+        repositoryUrl: server.url('reproduce.git'),
+        startCommit: change,
+        afterTurn: { kind: 'reproduce', base, setup: 'echo setup > setup-ran.txt' },
+        script: reproduceScript(script, leftovers),
+      });
+      await settled(world, started.attempt);
+      const log = await rawLogOf(world, started.attempt);
+      await finish(world, started.attempt);
+      const line = log.split('\n').find(entry => entry.startsWith('REPRODUCED '));
+      const got = line === undefined ? undefined : reproduced.safeParse(JSON.parse(line.slice('REPRODUCED '.length))).data;
+      return { log, got, branch: started.branch };
+    };
+    const fixing = await runOne(fixingScript);
+    const probe = await runOne(secretProbe);
+    const probeOutput = `${probe.got?.base.run?.output ?? ''}${probe.got?.change.run?.output ?? ''}`;
+    const leaked = [world.githubToken, world.login].filter(secret => probe.log.includes(secret));
+    const refusals = ['whoami reproduce', 'environment clean', 'pid 1 environ refused', 'bridge folder refused', 'bridge git refused', 'codex login refused', 'probe done'];
+    const probeGood = probe.got !== undefined && refusals.every(marker => probeOutput.includes(marker)) && !probeOutput.includes('token readable') && leaked.length === 0;
+    const editing = await runOne(editingScript, tamperer);
+    const pushedBranch = await sh(`git -C ${bare} rev-parse --verify -q refs/heads/${editing.branch} || true`);
+    const fixed = 'the Job runs the setup and the script in fresh checkouts of the base commit and the change, and records a failing base run and a passing change run';
+    const sealed = "a planted script runs as the reproduce user and cannot read the bridge's environment, its git folder, or the Codex login";
+    const edited = "a script that edits its checkout, the agent's workspace, and its own file, beside an agent process that keeps writing into the run folders, fails on both commits and pushes nothing (F2)";
+    return [
+      fixing.got?.base.run?.exitCode === 1 && fixing.got.change.run?.exitCode === 0 ? pass(fixed, exits(fixing.got)) : fail(fixed, `${exits(fixing.got)}: ${redact(fixing.log).slice(-800)}`),
+      probeGood ? pass(sealed, refusals.join(', ')) : fail(sealed, `${leaked.length === 0 ? 'no secret in the log' : `${String(leaked.length)} secrets in the log`}: ${redact(probeOutput).slice(-800)}`),
+      editing.got?.base.run?.exitCode === 1 && editing.got.change.run?.exitCode === 1 && pushedBranch === ''
+        ? pass(edited, exits(editing.got))
+        : fail(edited, `${exits(editing.got)}, branch ${pushedBranch === '' ? 'absent' : pushedBranch}: ${redact(editing.log).slice(-800)}`),
+    ];
+  } finally {
+    await server.stop();
+  }
+}
+
+const unchangedScript = (plant: string): string =>
+  [
+    prepareOnly,
+    `node-bridge --input-type=module -e "const cp=await import('node:child_process');const git=(a,i)=>cp.execFileSync('git',['--git-dir=/var/lib/autoworker/attempt.git','--work-tree=/workspace','-c','user.name=Probe','-c','user.email=probe@example.com',...a],{encoding:'utf8',input:i});${plant}const w=await import('/app/features/jobs/workspace.ts');console.log('PUSHED '+JSON.stringify(await w.pushStep(w.readJobEnvironment(process.env),'step',undefined)))"`,
+  ].join(' && ');
+
+async function noNetChange(world: World): Promise<readonly Check[]> {
+  const server = await gitServer(world.address);
+  try {
+    const head = await probeRepository(server, 'unchanged.git', { 'README.md': 'unchanged probe\n' });
+    const plants = [
+      ['an empty commit', "git(['commit','-q','--allow-empty','-m','empty']);"],
+      [
+        'a change and its revert',
+        "const blob=git(['hash-object','-w','--stdin'],'changed').trim();git(['update-index','--add','--cacheinfo','100644,'+blob+',changed.txt']);git(['commit','-qm','change']);git(['read-tree','HEAD~1']);git(['commit','-qm','revert']);",
+      ],
+    ] as const;
+    const checks: Check[] = [];
+    for (const [what, plant] of plants) {
+      const started = await start(world, { step: 'implement', repositoryUrl: server.url('unchanged.git'), startCommit: head, script: unchangedScript(plant) });
+      const done = await settled(world, started.attempt);
+      const log = await logOf(world, started.attempt);
+      await finish(world, started.attempt);
+      const remote = await sh(`git -C ${join(server.folder, 'unchanged.git')} rev-parse --verify -q refs/heads/${started.branch} || true`);
+      const name = `Implement pushes nothing after ${what}, because the tree matches the start commit's tree (F3)`;
+      const pushedLines = log.split('\n').filter(line => line.startsWith('PUSHED')).join(' ');
+      checks.push(done.state === 'succeeded' && log.includes('PUSHED {"unchanged"') && remote === '' ? pass(name, pushedLines) : fail(name, `${done.state}, branch ${remote === '' ? 'absent' : remote}: ${log.slice(-600)}`));
+    }
+    return checks;
+  } finally {
+    await server.stop();
+  }
+}
+
 const lanes = {
   ready: readyFlow,
   regression,
@@ -626,6 +753,8 @@ const lanes = {
   'bad-image': badImage,
   'repo-image': repoImage,
   perf,
+  reproduce: reproduceLane,
+  'no-net-change': noNetChange,
 } as const satisfies Record<string, (world: World) => Promise<readonly Check[]>>;
 
 type Lane = keyof typeof lanes;
@@ -644,7 +773,7 @@ async function live(args: readonly string[]): Promise<readonly Check[]> {
   if (unknown.length > 0) return [fail('jobs-live runs known lanes', `unknown ${unknown.join(', ')}; name any of ${Object.keys(lanes).join(', ')}, changed-digest, or all`)];
   const githubToken = process.env['GITHUB_TOKEN'];
   if (githubToken === undefined || githubToken === '') return [fail('GITHUB_TOKEN is set', 'run jobs-live in the live service')];
-  const checks: Check[] = [...(await kind.run(['up']))];
+  const checks: Check[] = [...(checksOf(await kind.run(['up'])))];
   if (!checks.every(check => check.passed)) return checks;
   checks.push(pass('registry ready', await ensureRegistry()));
   const built = await buildAttemptImage();

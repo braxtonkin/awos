@@ -8,8 +8,9 @@
     "node": ">=24"
   },
   "scripts": {
-    "check": "npm run shape && npm run sql-comments && npm run migration-versions && npm run model-names && npm run step-names && npm run typecheck && npm run lint -- . && npm run boundaries && npm run db-types",
+    "check": "npm run shape && npm run sql-comments && npm run migration-versions && npm run model-names && npm run step-names && npm run strict-schemas && npm run ci-plan && npm run typecheck && npm run lint -- . && npm run boundaries && npm run db-types",
     "boundaries": "depcruise --config .dependency-cruiser.json --output-type err .",
+    "ci-plan": "node tools/ci-local/main.ts --plan",
     "db-types": "node tools/db-types/main.ts",
     "db:types": "node tools/db-types/main.ts --write",
     "lint": "eslint --config eslint.config.ts --max-warnings 0",
@@ -17,6 +18,7 @@
     "model-names": "node tools/model-names/main.ts",
     "shape": "node tools/shape/main.ts",
     "step-names": "node tools/step-names/main.ts",
+    "strict-schemas": "node tools/strict-schemas/main.ts",
     "sql-comments": "node tools/sql-comments/main.ts",
     "test": "vitest run --dir features",
     "typecheck": "tsc --noEmit",
@@ -27,6 +29,7 @@
     "@testcontainers/postgresql": "12.1.0",
     "@types/node": "24.13.6",
     "@types/ws": "8.18.1",
+    "@typescript-eslint/utils": "8.70.1",
     "dependency-cruiser": "18.4.0",
     "eslint": "10.11.0",
     "jiti": "2.7.0",

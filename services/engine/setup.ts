@@ -24,7 +24,7 @@ async function setup(path: string): Promise<void> {
     const { sealed } = await applyLogins(db, key, file.admin, [...file.people, ...file.teamAccounts]);
     say(`logins ${String(sealed)} sealed`);
     const repositories = await applyRepositories(db, file);
-    say(`repositories ${String(repositories.added)} added`);
+    say(`repositories ${String(repositories.added)} added, ${String(repositories.changed)} changed`);
     const routines = await applyRoutines(db, file);
     say(`routines ${String(routines.added)} added, ${String(routines.changed)} changed`);
   } finally {

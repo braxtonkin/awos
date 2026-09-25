@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { reproduction } from '../../shared/reproduction.ts';
 
 export const protocolVersion = 1;
 
@@ -48,11 +49,13 @@ const appLine = z.object({ kind: z.literal('app'), text: z.string().max(4_000_00
 
 const pushedLine = z.object({ kind: z.literal('pushed'), commit, branch: z.string().min(1).max(255) });
 
+const reproducedLine = z.object({ kind: z.literal('reproduced'), reproduction });
+
 const endLine = z.object({ kind: z.literal('end') });
 
-export type LineBody = z.infer<typeof appLine> | z.infer<typeof pushedLine> | z.infer<typeof endLine>;
+export type LineBody = z.infer<typeof appLine> | z.infer<typeof pushedLine> | z.infer<typeof reproducedLine> | z.infer<typeof endLine>;
 
-export const line = z.discriminatedUnion('kind', [appLine.extend({ seq: number }), pushedLine.extend({ seq: number }), endLine.extend({ seq: number })]);
+export const line = z.discriminatedUnion('kind', [appLine.extend({ seq: number }), pushedLine.extend({ seq: number }), reproducedLine.extend({ seq: number }), endLine.extend({ seq: number })]);
 
 export type Line = z.infer<typeof line>;
 

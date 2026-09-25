@@ -3,19 +3,23 @@ import { availableParallelism } from 'node:os';
 import { setImmediate, setTimeout as wait } from 'node:timers/promises';
 import { sql } from 'kysely';
 import { z } from 'zod';
+import { actionKinds, owe, type Owe } from '../../shared/actions.ts';
+import type { AgentSteps, Verdicted } from '../../shared/agent-step.ts';
 import { connect, refusal, type Database } from '../../shared/db/client.ts';
 import type { TaskState } from '../../shared/db/types.ts';
 import { runLoop, type Clock, type Loop } from '../../shared/loop.ts';
 import { outcomes, review as reviewSchema, type Answer } from '../../shared/review.ts';
 import { step, type Failure as StepFailure, type StepKind, type StepVerdict, type Workflow } from '../../shared/workflow.ts';
 import type { TestPostgres } from '../../tools/verify/postgres.ts';
-import { act, advance, approveFromOutside, note, type PersonAction, type Report } from './advance.ts';
+import { act, advance, noTurnToStop, approveFromOutside, note, type PersonAction, type Report } from './advance.ts';
 import { claim, claimable, renew } from './claim.ts';
-import { watch, type PropertyName, type Violation } from './invariants.ts';
+import { logLostApprovals, loseApprovals, watch, type PropertyName, type Violation } from './invariants.ts';
+import { coreRunAs } from './run-as.ts';
 import { reaper } from './reaper.ts';
+import { commitOf, jobs, latePush, performNext, replyLines, unparsedReplies, type Jobs, type JobLine, type StepMutantName } from './sim-jobs.ts';
 import { workflowsByName } from './start.ts';
 
-export const profileName = z.enum(['default', 'races', 'hangs', 'verdicts', 'people', 'needs-input', 'mixed', 'behavior', 'environment', 'crashes', 'db-pause', 'two-engines']);
+export const profileName = z.enum(['default', 'races', 'hangs', 'verdicts', 'people', 'reviews', 'needs-input', 'mixed', 'behavior', 'environment', 'crashes', 'db-pause', 'two-engines', 'jobs']);
 
 export type ProfileName = z.infer<typeof profileName>;
 
@@ -51,13 +55,25 @@ export const engineMutantName = z.enum(['no-reaper', 'early-reap', 'no-grace', '
 
 export type EngineMutantName = z.infer<typeof engineMutantName>;
 
+type StepMutant = { readonly breaks: readonly [PropertyName, ...PropertyName[]]; readonly drops: readonly string[] };
+
+export const stepMutants: Readonly<Record<StepMutantName, StepMutant>> = {
+  'owe-after-verdict': { breaks: ['VerdictOwesItsActions'], drops: [] },
+  'finish-before-end-line': { breaks: ['FinishWaitsForLastLine'], drops: [] },
+  'late-push-lands': { breaks: ['LostPushChangesNothing'], drops: ['event_needs_live_attempt', 'finished_attempt_is_final'] },
+  'continue-from-task-head': { breaks: ['ContinuationStartsFromLastPush'], drops: [] },
+  'bad-reply-passes': { breaks: ['UnparsedReplyEndsBlocked'], drops: [] },
+};
+
+export const stepMutantProfile: ProfileName = 'jobs';
+
 type EngineMutant = { readonly profile: ProfileName; readonly breaks: readonly [PropertyName, ...PropertyName[]]; readonly loop: (loop: Loop) => Loop | undefined };
 
 export const engineMutants: Readonly<Record<EngineMutantName, EngineMutant>> = {
   'no-reaper': { profile: 'crashes', breaks: ['EveryTaskSettles'], loop: () => undefined },
   'early-reap': { profile: 'crashes', breaks: ['ReleasedOnlyAfterItsLease'], loop: loop => ({ ...loop, pass: (db, pass) => loop.pass(db, { ...pass, now: new Date(pass.now.getTime() + loop.everyMs) }) }) },
   'no-grace': { profile: 'db-pause', breaks: ['ReleasedWithinOneInterval'], loop: ({ name, everyMs, pass }) => ({ name, everyMs, pass }) },
-  'no-fence': { profile: 'db-pause', breaks: ['ReleasedWithinOneInterval'], loop: loop => ({ ...loop, pass: (db, { now }) => loop.pass(db, { now, late: () => false }) }) },
+  'no-fence': { profile: 'db-pause', breaks: ['ReleasedWithinOneInterval'], loop: loop => ({ ...loop, pass: (db, { now, stop }) => loop.pass(db, { now, late: () => false, stop }) }) },
 };
 
 const failedToVerify = 'Verify found the behavior still wrong in 3 rounds. Read its evidence on this page, fix the ticket or the plan, then press Retry to run Verify again.';
@@ -70,7 +86,10 @@ const agentStep = (name: string, reads: readonly string[], canEnd: boolean, need
   step({
     name,
     reads,
+    runBy: 'agent',
     prompt: `Simulated ${name}.`,
+    startsEnvironment: false,
+    afterTurn: 'push',
     needsRepository,
     canEnd,
     owes: [],
@@ -90,7 +109,10 @@ export const workflows: readonly [Workflow, ...Workflow[]] = [
       step({
         name: 'verify',
         reads: ['specify', 'implement'],
+        runBy: 'agent',
         prompt: 'Simulated verify.',
+        startsEnvironment: true,
+        afterTurn: 'reproduce',
         needsRepository: true,
         canEnd: false,
         owes: [],
@@ -107,10 +129,10 @@ export const workflows: readonly [Workflow, ...Workflow[]] = [
       step({
         name: 'land',
         reads: ['implement', 'verify'],
-        prompt: 'Simulated land.',
+        runBy: 'engine',
         needsRepository: true,
         canEnd: true,
-        owes: [{ kind: 'merge', irreversible: true }],
+        owes: [{ kind: 'pr.merge', irreversible: true }],
         output: reviewSchema,
         requires: ['text'],
         failures: {
@@ -137,7 +159,40 @@ export const workflows: readonly [Workflow, ...Workflow[]] = [
 
 export const parks = { rounds: failedToVerify, reruns: environmentDown } as const;
 
+const comment = (key: string, text: string): Owe => owe(actionKinds.ticketComment, { ticket: key, text, linkPullRequest: false });
+
+const deletions = ({ repository, branches }: Verdicted): readonly Owe[] => branches.map(branch => owe(actionKinds.branchDelete, { repository: repository.github, branch }));
+
+function implemented(verdicted: Verdicted): readonly Owe[] {
+  const { ticket, repository, taskBranch, attempt, pullRequestOwed } = verdicted;
+  const head = attempt.lastPushed ?? taskBranch.head;
+  if (head === null) return deletions(verdicted);
+  return [
+    ...(head === taskBranch.head ? [] : [owe(actionKinds.branchAdvance, { repository: repository.github, branch: taskBranch.name, from: taskBranch.head, to: head })]),
+    ...(pullRequestOwed ? [] : [owe(actionKinds.prOpenDraft, { repository: repository.github, head: taskBranch.name, base: repository.branch, title: `${ticket.key}: ${ticket.title}`, body: ticket.title })]),
+    comment(ticket.key, 'The simulated change is on its draft pull request.'),
+    ...deletions(verdicted),
+  ];
+}
+
+const owes = (verdicted: Verdicted): readonly Owe[] => {
+  const { step, verdict, ticket } = verdicted;
+  switch (step) {
+    case 'specify':
+      return verdict === 'pass' ? [comment(ticket.key, 'The simulated plan.'), ...deletions(verdicted)] : [];
+    case 'implement':
+      return verdict === 'pass' ? implemented(verdicted) : [];
+    case 'verify':
+      return verdict === 'pass' ? [comment(ticket.key, 'The simulated evidence.'), ...deletions(verdicted)] : verdict === 'behavior_fail' ? [comment(ticket.key, 'The simulated evidence.')] : [];
+    default:
+      return [];
+  }
+};
+
+const simAgent: AgentSteps = { input: ({ ticket }) => `Ticket ${ticket.key}: ${ticket.title}`, settle: ({ output }) => ({ output, evidence: null, observed: null }), owes };
+
 const byName = workflowsByName(workflows);
+const runsAs = coreRunAs(null);
 
 type Effect = 'pass' | StepFailure['kind'];
 
@@ -168,9 +223,13 @@ const moves = [
   'restart',
   'pause',
   'loseApproval',
+  'push',
+  'latePush',
+  'badReply',
+  'perform',
 ] as const;
 
-const faults: ReadonlySet<Move> = new Set<Move>(['hang', 'wake', 'crash', 'burst', 'late', 'reassign', 'doubleDecision', 'doneWrite', 'bareIntake', 'noteless', 'strayTarget', 'race', 'badName', 'restart', 'pause', 'loseApproval']);
+const faults: ReadonlySet<Move> = new Set<Move>(['hang', 'wake', 'crash', 'burst', 'late', 'reassign', 'doubleDecision', 'doneWrite', 'bareIntake', 'noteless', 'strayTarget', 'race', 'badName', 'restart', 'pause', 'loseApproval', 'latePush', 'badReply']);
 
 const people: ReadonlySet<Move> = new Set<Move>(['stop', 'retry', 'approve', 'sendBack', 'answer', 'stale', 'outside']);
 
@@ -192,7 +251,9 @@ type Profile = {
   readonly effects: Readonly<Record<Effect, number>>;
 };
 
-const quietFaults = { hang: 0, wake: 0, crash: 0, burst: 0, late: 0, reassign: 0, doubleDecision: 0, doneWrite: 0, bareIntake: 0, noteless: 0, strayTarget: 0, race: 0, badName: 0, restart: 0, pause: 0, loseApproval: 0 } as const;
+const quietFaults = { hang: 0, wake: 0, crash: 0, burst: 0, late: 0, reassign: 0, doubleDecision: 0, doneWrite: 0, bareIntake: 0, noteless: 0, strayTarget: 0, race: 0, badName: 0, restart: 0, pause: 0, loseApproval: 0, latePush: 0, badReply: 0 } as const;
+
+const jobLines = { push: 3, perform: 5 } as const;
 
 const noPeople = { stop: 0, retry: 0, approve: 0, sendBack: 0, answer: 0, stale: 0, outside: 0 } as const;
 
@@ -202,7 +263,7 @@ const mostlyPass = { pass: 10, fail: 1, ask: 0.3, return: 0.6, rerun: 0.6, revie
 
 const everyEffect = { pass: 5, fail: 2, ask: 1, return: 2, rerun: 2, review: 1, await: 1 } as const;
 
-const t2Faults = { hang: 1, wake: 1, crash: 1, burst: 1, late: 2, reassign: 1, doubleDecision: 0.2, doneWrite: 0.2, bareIntake: 0.2, noteless: 0.2, strayTarget: 0.3, race: 0.5, badName: 0.2, restart: 0, pause: 0, loseApproval: 0.5 } as const;
+const t2Faults = { hang: 1, wake: 1, crash: 1, burst: 1, late: 2, reassign: 1, doubleDecision: 0.2, doneWrite: 0.2, bareIntake: 0.2, noteless: 0.2, strayTarget: 0.3, race: 0.5, badName: 0.2, restart: 0, pause: 0, loseApproval: 0, latePush: 1, badReply: 0.5 } as const;
 
 const oneEngine = { engines: 1, outage: { realMs: 0, virtualMs: 0 } } as const;
 
@@ -210,7 +271,7 @@ const crashing = { ...quietFaults, hang: 1, wake: 1, crash: 3, late: 1, restart:
 
 const engineProfile = { stepsPerTask: 20, workers: 4, nobodyEvery: 0, leaseMs: 2_000, reapEveryMs: 1_000, stepMs: 400, burst: 5, effects: mostlyPass } as const;
 
-const engineOdds = { claim: 6, renew: 3, finish: 3, ...crashing, ...noPeople, approve: 1, outside: 1 } as const;
+const engineOdds = { claim: 6, renew: 3, finish: 3, ...crashing, ...noPeople, approve: 1, outside: 1, ...jobLines } as const;
 
 const engineProfiles = {
   crashes: { ...engineProfile, ...oneEngine, odds: engineOdds },
@@ -228,7 +289,7 @@ export const profiles: Readonly<Record<ProfileName, Profile>> = {
     ...oneEngine,
     stepMs: 6_000,
     burst: 5,
-    odds: { claim: 6, renew: 6, finish: 4, ...t2Faults, ...somePeople },
+    odds: { claim: 6, renew: 6, finish: 4, ...t2Faults, ...somePeople, ...jobLines },
     effects: mostlyPass,
   },
   races: {
@@ -240,7 +301,7 @@ export const profiles: Readonly<Record<ProfileName, Profile>> = {
     ...oneEngine,
     stepMs: 6_000,
     burst: 20,
-    odds: { claim: 2, renew: 4, finish: 4, ...quietFaults, burst: 4, race: 2, ...noPeople, approve: 1, outside: 1 },
+    odds: { claim: 2, renew: 4, finish: 4, ...quietFaults, burst: 4, race: 2, ...noPeople, approve: 1, outside: 1, ...jobLines },
     effects: mostlyPass,
   },
   hangs: {
@@ -252,7 +313,7 @@ export const profiles: Readonly<Record<ProfileName, Profile>> = {
     ...oneEngine,
     stepMs: 400,
     burst: 5,
-    odds: { claim: 6, renew: 3, finish: 3, ...quietFaults, hang: 3, crash: 1, late: 2, ...noPeople, approve: 1, outside: 1 },
+    odds: { claim: 6, renew: 3, finish: 3, ...quietFaults, hang: 3, crash: 1, late: 2, ...noPeople, approve: 1, outside: 1, ...jobLines },
     effects: mostlyPass,
   },
   verdicts: {
@@ -264,7 +325,7 @@ export const profiles: Readonly<Record<ProfileName, Profile>> = {
     ...oneEngine,
     stepMs: 6_000,
     burst: 5,
-    odds: { claim: 6, renew: 4, finish: 6, ...quietFaults, ...noPeople, approve: 1.5, retry: 0.5, outside: 1, loseApproval: 1 },
+    odds: { claim: 6, renew: 4, finish: 6, ...quietFaults, ...noPeople, approve: 1.5, retry: 0.5, outside: 1, loseApproval: 1, ...jobLines },
     effects: everyEffect,
   },
   people: {
@@ -276,8 +337,20 @@ export const profiles: Readonly<Record<ProfileName, Profile>> = {
     ...oneEngine,
     stepMs: 6_000,
     burst: 5,
-    odds: { claim: 6, renew: 4, finish: 5, ...quietFaults, stop: 1, retry: 2, approve: 3, sendBack: 2, answer: 2, stale: 2, outside: 1, doubleDecision: 0.5 },
+    odds: { claim: 6, renew: 4, finish: 5, ...quietFaults, stop: 1, retry: 2, approve: 3, sendBack: 2, answer: 2, stale: 2, outside: 1, doubleDecision: 0.5, ...jobLines },
     effects: { ...mostlyPass, ask: 2 },
+  },
+  reviews: {
+    stepsPerTask: 15,
+    workers: 4,
+    nobodyEvery: 0,
+    leaseMs: 30_000,
+    reapEveryMs: 15_000,
+    ...oneEngine,
+    stepMs: 6_000,
+    burst: 5,
+    odds: { claim: 6, renew: 4, finish: 6, ...quietFaults, ...noPeople, approve: 3, retry: 0.5, outside: 1, ...jobLines },
+    effects: { pass: 1, fail: 0, ask: 0, return: 0, rerun: 0, review: 1, await: 0 },
   },
   'needs-input': {
     stepsPerTask: 15,
@@ -288,7 +361,7 @@ export const profiles: Readonly<Record<ProfileName, Profile>> = {
     ...oneEngine,
     stepMs: 6_000,
     burst: 5,
-    odds: { claim: 6, renew: 4, finish: 5, ...quietFaults, ...noPeople, approve: 3, answer: 2, sendBack: 0.5, outside: 1 },
+    odds: { claim: 6, renew: 4, finish: 5, ...quietFaults, ...noPeople, approve: 3, answer: 2, sendBack: 0.5, outside: 1, ...jobLines },
     effects: { pass: 4, fail: 0.5, ask: 6, return: 0.3, rerun: 0.3, review: 0.2, await: 0.2 },
   },
   mixed: {
@@ -300,7 +373,7 @@ export const profiles: Readonly<Record<ProfileName, Profile>> = {
     ...oneEngine,
     stepMs: 6_000,
     burst: 5,
-    odds: { claim: 6, renew: 5, finish: 5, ...t2Faults, ...somePeople, approve: 2, sendBack: 1, answer: 1, stale: 1 },
+    odds: { claim: 6, renew: 5, finish: 5, ...t2Faults, ...somePeople, approve: 2, sendBack: 1, answer: 1, stale: 1, ...jobLines },
     effects: everyEffect,
   },
   behavior: {
@@ -312,7 +385,7 @@ export const profiles: Readonly<Record<ProfileName, Profile>> = {
     ...oneEngine,
     stepMs: 6_000,
     burst: 5,
-    odds: { claim: 6, renew: 4, finish: 6, ...quietFaults, ...noPeople, approve: 3 },
+    odds: { claim: 6, renew: 4, finish: 6, ...quietFaults, ...noPeople, approve: 3, ...jobLines },
     effects: { pass: 1, fail: 0, ask: 0, return: 0, rerun: 0, review: 0, await: 0 },
   },
   environment: {
@@ -324,15 +397,29 @@ export const profiles: Readonly<Record<ProfileName, Profile>> = {
     ...oneEngine,
     stepMs: 6_000,
     burst: 5,
-    odds: { claim: 6, renew: 4, finish: 6, ...quietFaults, ...noPeople, approve: 3 },
+    odds: { claim: 6, renew: 4, finish: 6, ...quietFaults, ...noPeople, approve: 3, ...jobLines },
     effects: { pass: 1, fail: 0, ask: 0, return: 0, rerun: 0, review: 0, await: 0 },
   },
   ...engineProfiles,
+  jobs: {
+    stepsPerTask: 15,
+    workers: 4,
+    nobodyEvery: 0,
+    leaseMs: 2_000,
+    reapEveryMs: 1_000,
+    ...oneEngine,
+    stepMs: 400,
+    burst: 5,
+    odds: { claim: 6, renew: 3, finish: 3, ...quietFaults, crash: 2, hang: 0.5, wake: 0.5, late: 0.5, latePush: 2, badReply: 1, ...noPeople, stop: 0.3, retry: 1, approve: 2, outside: 1, push: 5, perform: 5 },
+    effects: mostlyPass,
+  },
 };
 
 const forcedAtChecks: Partial<Readonly<Record<ProfileName, StepVerdict>>> = { behavior: 'behavior_fail', environment: 'environment_fail' };
 
-export const fingerprint = createHash('sha256').update(JSON.stringify({ moves, profiles, assignees, forcedAtChecks, workflows })).digest('hex').slice(0, 16);
+const pushChance: Readonly<Record<string, number>> = { implement: 1 };
+
+export const fingerprint = createHash('sha256').update(JSON.stringify({ moves, profiles, assignees, forcedAtChecks, workflows, pushChance })).digest('hex').slice(0, 16);
 
 export type Plan = {
   readonly profile: ProfileName;
@@ -340,6 +427,7 @@ export type Plan = {
   readonly steps: number;
   readonly mutant?: MutantName;
   readonly engine?: EngineMutantName;
+  readonly step?: StepMutantName;
 };
 
 export type Entry = { readonly step: number; readonly at: number; readonly move: string; readonly detail: string };
@@ -361,9 +449,11 @@ export type Run = {
   readonly hung: number;
   readonly hungNotLost: readonly string[];
   readonly tally: Readonly<Record<string, number>>;
+  readonly fired: Readonly<Record<string, number>>;
   readonly done: number;
   readonly tasks: readonly Settled[];
   readonly releases: readonly Release[];
+  readonly continued: number;
   readonly passMs: readonly number[];
   readonly engineLog: readonly string[];
   readonly trace: readonly Entry[];
@@ -406,10 +496,12 @@ type World = {
   readonly hung: Set<string>;
   readonly bursts: Burst[];
   readonly tally: Map<string, number>;
+  readonly fired: Map<Move, number>;
   readonly people: readonly string[];
   readonly routines: readonly Seeded[];
   clock: number;
   nextKey: number;
+  nextPush: number;
 };
 
 type Seeded = { readonly routine: string; readonly workflow: Workflow; readonly repository: string | null };
@@ -423,6 +515,7 @@ type Turn = {
   readonly random: Random;
   readonly quiet: boolean;
   readonly now: Date;
+  readonly jobs: Jobs;
 };
 
 type Rule = { readonly allowed: (world: World, quiet: boolean) => boolean; readonly perform: (turn: Turn) => Promise<string> | string };
@@ -600,6 +693,16 @@ async function refused(write: () => Promise<unknown>, guard: string): Promise<'a
   }
 }
 
+async function outsideApproves(db: Database, task: string): Promise<'moved' | 'found nothing' | 'refused by review_wait_names_its_review'> {
+  try {
+    return (await approveFromOutside(db, task)) ? 'moved' : 'found nothing';
+  } catch (error) {
+    const found = refusal(error);
+    if (found !== undefined && 'name' in found && found.name === 'review_wait_names_its_review') return 'refused by review_wait_names_its_review';
+    throw error;
+  }
+}
+
 async function attemptInfo(db: Database, attempt: string): Promise<{ readonly workflow: string; readonly step: string } | undefined> {
   return db
     .selectFrom('attempt')
@@ -645,10 +748,46 @@ async function personActs(turn: Turn, pool: 'stoppable' | 'retryable' | 'review'
   if (task === undefined || person === undefined) return `no task to ${label}`;
   const chosen = action(task);
   if (chosen === undefined) return `task ${task.id}: nothing to ${label}`;
-  const outcome = await act(db, byName, task.id, { id: randomUUID(), person, at: now }, chosen);
+  const outcome = await act(db, byName, task.id, { id: randomUUID(), person, at: now }, chosen, noTurnToStop);
   const said = 'refused' in outcome ? `refused ${outcome.refused}` : 'recorded';
   count(world, `${label} ${said}`);
   return `task ${task.id}: ${label} ${said}`;
+}
+
+async function claimFor({ db, profile, now, jobs: job }: Turn, task: string): Promise<Awaited<ReturnType<typeof claim>>> {
+  const runAs = await runsAs(db, task);
+  const start = runAs === null ? null : await job.start(db, task, runAs);
+  return claim(db, task, now, profile.leaseMs, runAs, start);
+}
+
+function replyFor(random: Random, kind: StepKind, verdict: StepVerdict): string {
+  const output = pick(
+    random,
+    simulatedOutputs.filter(candidate => kind.judge(candidate) === verdict),
+  );
+  if (output === undefined) throw new Error(`No simulated reply makes ${kind.name} judge ${verdict}.`);
+  return JSON.stringify(output);
+}
+
+async function liveBranch(db: Database, attempt: string): Promise<{ readonly branch: string | null; readonly step: string } | undefined> {
+  return db.selectFrom('attempt').select(['attempt.branch', 'attempt.step']).where('attempt.id', '=', attempt).where('attempt.finished_at', 'is', null).executeTakeFirst();
+}
+
+function nextCommit(world: World, attempt: string): string {
+  world.nextPush += 1;
+  return commitOf(`attempt ${attempt} push ${String(world.nextPush)}`);
+}
+
+async function lastLines(turn: Turn, attempt: string, reply: string | null): Promise<readonly JobLine[]> {
+  const live = await liveBranch(turn.db, attempt);
+  const branch = live?.branch ?? null;
+  const pushes = branch !== null && turn.random() < (pushChance[live?.step ?? ''] ?? 0.5) ? [{ kind: 'pushed' as const, commit: nextCommit(turn.world, attempt), branch }] : [];
+  return [...replyLines(reply), ...pushes, { kind: 'end' }];
+}
+
+async function verdictOf(db: Database, attempt: string): Promise<string> {
+  const row = await db.selectFrom('attempt').select('attempt.verdict').where('attempt.id', '=', attempt).executeTakeFirst();
+  return row?.verdict ?? 'no verdict';
 }
 
 const aNote = (random: Random): ReturnType<typeof note.parse> => note.parse(random() < 0.5 ? 'Use the smaller plan.' : 'The ticket says to keep the old API.');
@@ -656,11 +795,12 @@ const aNote = (random: Random): ReturnType<typeof note.parse> => note.parse(rand
 const rules: Readonly<Record<Move, Rule>> = {
   claim: {
     allowed: world => idleWorkers(world).length > 0,
-    perform: async ({ db, world, profile, random, quiet, now }) => {
+    perform: async turn => {
+      const { db, world, random, quiet } = turn;
       const worker = pick(random, idleWorkers(world));
       const task = pick(random, quiet ? await claimable(db, byName) : world.tasks);
       if (worker === undefined || task === undefined) return 'nothing to claim';
-      const outcome = await claim(db, task, now, profile.leaseMs);
+      const outcome = await claimFor(turn, task);
       if ('refused' in outcome) {
         const refusedWith = 'parked' in outcome ? `${outcome.refused}, ${outcome.parked ? 'parked' : 'not parked'}` : outcome.refused;
         count(world, `claim refused ${refusedWith}`);
@@ -698,6 +838,12 @@ const rules: Readonly<Record<Move, Rule>> = {
       const kind = workflow?.steps.find(step => step.name === info.step);
       const chosen = kind === undefined ? undefined : verdictFor(turn, kind);
       if (kind === undefined || chosen === undefined) return `attempt ${worker.attempt}: no verdict to give`;
+      if (kind.runBy === 'agent') {
+        const posted = await turn.jobs.post(db, worker.attempt, await lastLines(turn, worker.attempt, replyFor(random, kind, chosen.verdict)), now);
+        const verdict = await verdictOf(db, worker.attempt);
+        count(world, `job end ${chosen.verdict} ${posted}`);
+        return `attempt ${worker.attempt} at ${info.step}: its Job replied for ${chosen.verdict} and posted its end line, which ${posted === 'ended' ? 'found it ended' : `finished it ${verdict}`}`;
+      }
       const report = reportFor(random, kind, chosen.verdict);
       const outcome = await advance(db, byName, worker.attempt, report, now);
       const how = report.observed === null ? 'judged' : 'observed';
@@ -740,11 +886,14 @@ const rules: Readonly<Record<Move, Rule>> = {
   },
   burst: {
     allowed: (_world, quiet) => !quiet,
-    perform: async ({ db, world, profile, random, now }) => {
+    perform: async turn => {
+      const { db, world, profile, random, now } = turn;
       const task = pick(random, await claimable(db, byName));
       if (task === undefined) return 'nothing claimable';
+      const runAs = await runsAs(db, task);
+      const start = runAs === null ? null : await turn.jobs.start(db, task, runAs);
       const started = performance.now();
-      const outcomes = await Promise.all(Array.from({ length: profile.burst }, () => claim(db, task, now, profile.leaseMs)));
+      const outcomes = await Promise.all(Array.from({ length: profile.burst }, () => claim(db, task, now, profile.leaseMs, runAs, start)));
       const won = outcomes.flatMap(outcome => ('attempt' in outcome ? [outcome.attempt] : []));
       world.bursts.push({ winners: won.length, ms: performance.now() - started });
       count(world, 'burst');
@@ -820,20 +969,20 @@ const rules: Readonly<Record<Move, Rule>> = {
     allowed: (_world, quiet) => !quiet,
     perform: async turn => {
       const { db, world, random, now } = turn;
-      const old = pick(
-        random,
-        await db
-          .selectFrom('attempt')
-          .innerJoin('task', 'task.id', 'attempt.task_id')
-          .select(['attempt.id', 'attempt.task_id'])
-          .where('attempt.finished_at', 'is not', null)
-          .where(eb => eb.or([eb('task.review_attempt', 'is', null), eb('task.review_attempt', '<>', eb.ref('attempt.id'))]))
-          .orderBy('attempt.id')
-          .execute(),
-      );
+      const olds = await db
+        .selectFrom('attempt')
+        .innerJoin('task', 'task.id', 'attempt.task_id')
+        .select(['attempt.id', 'attempt.task_id', 'task.waiting_on'])
+        .where('attempt.finished_at', 'is not', null)
+        .where(eb => eb.or([eb('task.review_attempt', 'is', null), eb('task.review_attempt', '<>', eb.ref('attempt.id'))]))
+        .where(eb => eb.not(eb.exists(eb.selectFrom('human_action').select('human_action.id').whereRef('human_action.attempt_id', '=', 'attempt.id'))))
+        .orderBy('attempt.id')
+        .execute();
+      const behindANewerReview = olds.filter(candidate => candidate.waiting_on === 'approval' || candidate.waiting_on === 'answer');
+      const old = pick(random, behindANewerReview.length > 0 && random() < 0.8 ? behindANewerReview : olds);
       const person = pick(random, world.people);
       if (old === undefined || person === undefined) return 'no stale review to approve';
-      const outcome = await act(db, byName, old.task_id, { id: randomUUID(), person, at: now }, { kind: 'approve', review: old.id });
+      const outcome = await act(db, byName, old.task_id, { id: randomUUID(), person, at: now }, { kind: 'approve', review: old.id }, noTurnToStop);
       const said = 'refused' in outcome ? `refused ${outcome.refused}` : 'recorded';
       count(world, `stale approve ${said}`);
       return `task ${old.task_id}: approve of old attempt ${old.id} ${said}`;
@@ -842,11 +991,13 @@ const rules: Readonly<Record<Move, Rule>> = {
   outside: {
     allowed: (_world, quiet) => !quiet,
     perform: async ({ db, world, random }) => {
-      const task = pick(random, await tasksWhere(db, 'outside'));
+      const stray = random() < 0.3;
+      const task = stray ? pick(random, world.tasks) : pick(random, await tasksWhere(db, 'outside'))?.id;
       if (task === undefined) return 'no task awaits an outside approval';
-      const moved = await approveFromOutside(db, task.id);
-      count(world, `outside approval ${moved ? 'moved' : 'found nothing'}`);
-      return `task ${task.id}: outside approval ${moved ? 'moved it' : 'found nothing'}`;
+      const outcome = await outsideApproves(db, task);
+      const aimed = stray ? 'outside approval at any task' : 'outside approval';
+      count(world, `${aimed} ${outcome}`);
+      return `task ${task}: ${aimed} ${outcome}`;
     },
   },
   doubleDecision: {
@@ -925,7 +1076,7 @@ const rules: Readonly<Record<Move, Rule>> = {
   race: {
     allowed: (world, quiet) => !quiet && held(world, ['busy']).length > 0,
     perform: async turn => {
-      const { db, world, profile, random, now } = turn;
+      const { db, world, random, now } = turn;
       const worker = pick(random, held(world, ['busy']));
       const person = pick(random, world.people);
       if (worker === undefined || person === undefined) return 'no busy worker';
@@ -941,7 +1092,14 @@ const rules: Readonly<Record<Move, Rule>> = {
       const chosen = kind === undefined ? undefined : verdictFor(turn, kind);
       if (live === undefined || kind === undefined || chosen === undefined) return `attempt ${worker.attempt}: lost before the race`;
       const action: PersonAction = random() < 0.5 ? { kind: 'stop' } : { kind: 'retry', note: null };
-      const report = reportFor(random, kind, chosen.verdict);
+      const finish = async (): Promise<string> => {
+        if (kind.runBy !== 'agent') {
+          const outcome = await advance(db, byName, worker.attempt, reportFor(random, kind, chosen.verdict), now);
+          return 'finished' in outcome ? `finish found it ${outcome.finished ?? 'unfinished'}` : `finish left it ${outcome.state}`;
+        }
+        const posted = await turn.jobs.post(db, worker.attempt, await lastLines(turn, worker.attempt, replyFor(random, kind, chosen.verdict)), now);
+        return posted === 'ended' ? 'end line found it ended' : `end line ${posted} it`;
+      };
       const settle = async <T,>(work: Promise<T>): Promise<T | { readonly guard: string }> => {
         try {
           return await work;
@@ -952,17 +1110,16 @@ const rules: Readonly<Record<Move, Rule>> = {
         }
       };
       const [finished, acted, ...claims] = await Promise.all([
-        settle(advance(db, byName, worker.attempt, report, now)),
-        settle(act(db, byName, live.task_id, { id: randomUUID(), person, at: now }, action)),
-        settle(claim(db, live.task_id, now, profile.leaseMs)),
-        settle(claim(db, live.task_id, now, profile.leaseMs)),
+        settle(finish()),
+        settle(act(db, byName, live.task_id, { id: randomUUID(), person, at: now }, action, noTurnToStop)),
+        settle(claimFor(turn, live.task_id)),
+        settle(claimFor(turn, live.task_id)),
       ]);
       const won = claims.flatMap(outcome => ('attempt' in outcome ? [outcome.attempt] : []));
       const taker = pick(random, idleWorkers(world));
       const [winner] = won;
       if (taker !== undefined && winner !== undefined && won.length === 1) world.workers[taker] = { state: 'busy', attempt: winner };
-      const finishing =
-        'guard' in finished ? `finish refused by ${finished.guard}` : 'finished' in finished ? `finish found it ${finished.finished ?? 'unfinished'}` : `finish left it ${finished.state}`;
+      const finishing = typeof finished === 'string' ? finished : `finish refused by ${finished.guard}`;
       const acting = 'guard' in acted ? `${action.kind} refused by ${acted.guard}` : 'refused' in acted ? `${action.kind} refused ${acted.refused}` : `${action.kind} recorded`;
       count(world, `race: ${finishing}, ${acting}, ${String(won.length)} claims won`);
       return `task ${live.task_id}: ${finishing}, ${acting}, ${String(won.length)} of 2 claims won`;
@@ -1032,8 +1189,8 @@ const rules: Readonly<Record<Move, Rule>> = {
     allowed: (_world, quiet) => !quiet,
     perform: async ({ db, world, random }) => {
       const task = pick(random, await approvalsToLose(db));
-      if (task === undefined) return 'no ready task at an irreversible step holds an approval that Tasks.tla lets it lose';
-      await db.updateTable('task').set({ approved: [] }).where('id', '=', task).execute();
+      if (task === undefined) return 'no ready task at an irreversible step holds an approval';
+      await loseApprovals(db, task);
       count(world, 'approval lost');
       return `task ${task}: its approvals went missing`;
     },
@@ -1061,26 +1218,79 @@ const rules: Readonly<Record<Move, Rule>> = {
       return `${stray.what} was ${outcome}`;
     },
   },
+  push: {
+    allowed: world => held(world, ['busy']).length > 0,
+    perform: async ({ db, world, random, now, jobs: job }) => {
+      const worker = pick(random, held(world, ['busy']));
+      if (worker === undefined) return 'no busy worker';
+      const live = await liveBranch(db, worker.attempt);
+      const branch = live?.branch ?? null;
+      if (branch === null) return `attempt ${worker.attempt} has ${live === undefined ? 'ended' : 'no branch'}, so its Job pushes nothing`;
+      const commit = nextCommit(world, worker.attempt);
+      const posted = await job.post(db, worker.attempt, [{ kind: 'pushed', commit, branch }], now);
+      count(world, `push ${posted}`);
+      return `attempt ${worker.attempt} pushed ${commit} to ${branch}: ${posted}`;
+    },
+  },
+  latePush: {
+    allowed: (_world, quiet) => !quiet,
+    perform: async ({ db, world, random, now }) => {
+      const ended = pick(
+        random,
+        await db.selectFrom('attempt').select(['attempt.id', 'attempt.branch']).where('attempt.verdict', 'in', ['lost', 'stopped']).where('attempt.branch', 'is not', null).orderBy('attempt.id').execute(),
+      );
+      if (ended?.branch == null) return 'no ended attempt has a branch';
+      const commit = nextCommit(world, ended.id);
+      const outcome = await latePush(db, ended.id, ended.branch, commit, now);
+      count(world, `late push ${outcome}`);
+      return `attempt ${ended.id}, which has ended, got a late push of ${commit}: ${outcome}`;
+    },
+  },
+  badReply: {
+    allowed: (world, quiet) => !quiet && held(world, ['busy']).length > 0,
+    perform: async turn => {
+      const { db, world, random, now } = turn;
+      const worker = pick(random, held(world, ['busy']));
+      if (worker === undefined) return 'no busy worker';
+      const info = await attemptInfo(db, worker.attempt);
+      const kind = info === undefined ? undefined : byName.get(info.workflow)?.steps.find(candidate => candidate.name === info.step);
+      if (kind?.runBy !== 'agent') return `attempt ${worker.attempt} runs no agent now`;
+      world.workers[worker.index] = idle;
+      const reply = pick(random, unparsedReplies) ?? null;
+      const posted = await turn.jobs.post(db, worker.attempt, await lastLines(turn, worker.attempt, reply), now);
+      const verdict = await verdictOf(db, worker.attempt);
+      count(world, `reply that fails the parse ${posted} ${verdict}`);
+      return `attempt ${worker.attempt} at ${kind.name} replied ${JSON.stringify(reply)}, and its end line ${posted === 'ended' ? 'found it ended' : `finished it ${verdict}`}`;
+    },
+  },
+  perform: {
+    allowed: () => true,
+    perform: async ({ db, world, random, now }) => {
+      const owing = pick(
+        random,
+        await db.selectFrom('task').select('task.id').where('task.owed_actions', '>', 0).orderBy('task.id').execute(),
+      );
+      if (owing === undefined) return 'no task owes an action';
+      const kind = await performNext(db, owing.id, now);
+      count(world, `performed ${kind ?? 'nothing'}`);
+      return `task ${owing.id}: performed ${kind ?? 'nothing'}`;
+    },
+  },
 };
 
-function losesApprovalWithinItsModel(workflow: Workflow | undefined, step: string, approved: readonly string[]): boolean {
-  const kind = workflow?.steps.find(candidate => candidate.name === step);
-  if (workflow === undefined || kind?.owes.some(owed => owed.irreversible) !== true) return false;
-  const at = (name: string): number => workflow.steps.findIndex(candidate => candidate.name === name);
-  const targets = Object.values(kind.failures).flatMap(failure => ('to' in failure ? [failure.to] : []));
-  return approved.every(gate => targets.every(target => at(gate) >= at(target)));
-}
+const owesIrreversible = (workflow: string, step: string): boolean =>
+  byName.get(workflow)?.steps.find(kind => kind.name === step)?.owes.some(owed => owed.irreversible) === true;
 
 async function approvalsToLose(db: Database): Promise<readonly string[]> {
   const ready = await db
     .selectFrom('task')
-    .select(['task.id', 'task.workflow', 'task.step', sql<string[]>`task.approved::text[]`.as('approved')])
+    .select(['task.id', 'task.workflow', 'task.step'])
     .where('task.state', '=', 'ready')
     .where(sql<boolean>`cardinality(task.approved) > 0`)
     .where(eb => eb.not(eb.exists(eb.selectFrom('attempt').select('attempt.id').whereRef('attempt.task_id', '=', 'task.id').where('attempt.finished_at', 'is', null))))
     .orderBy('task.id')
     .execute();
-  return ready.filter(task => losesApprovalWithinItsModel(byName.get(task.workflow), task.step, task.approved)).map(task => task.id);
+  return ready.filter(task => owesIrreversible(task.workflow, task.step)).map(task => task.id);
 }
 
 async function noteReleases(db: Database, world: World, from: number): Promise<string> {
@@ -1112,10 +1322,19 @@ async function perform(turn: Turn): Promise<{ readonly move: string; readonly de
     moves.map(candidate => [candidate, quietly(candidate) && rules[candidate].allowed(turn.world, turn.quiet) ? turn.profile.odds[candidate] : 0] as const),
   );
   if (move === undefined) return { move: 'idle', detail: 'no move is allowed' };
-  return { move, detail: await rules[move].perform(turn) };
+  const tallied = (): number => [...turn.world.tally.values()].reduce((sum, times) => sum + times, 0);
+  const before = tallied();
+  const detail = await rules[move].perform(turn);
+  if (tallied() > before) turn.world.fired.set(move, (turn.world.fired.get(move) ?? 0) + 1);
+  return { move, detail };
 }
 
-async function dropGuard(db: Database, name: MutantName): Promise<void> {
+export const laterReviews = (runs: readonly Run[]): number => runs.reduce((sum, run) => sum + (run.tally['finish changes_requested observed waiting'] ?? 0), 0);
+
+export const unfiredFaults =(profile: ProfileName, runs: readonly Run[]): readonly string[] =>
+  [...faults].filter(fault => profiles[profile].odds[fault] > 0 && runs.every(run => (run.fired[fault] ?? 0) === 0));
+
+async function dropGuard(db: Database, name: string): Promise<void> {
   const { rows } = await sql<{ ddl: string }>`
     select format('alter table %s drop constraint %I', conrelid::regclass, conname) as ddl
     from pg_constraint where conname = ${name} and connamespace = 'public'::regnamespace
@@ -1220,10 +1439,12 @@ async function setUp(db: Database, profile: Profile, steps: number, engines: Eng
     hung: new Set(),
     bursts: [],
     tally: new Map(),
+    fired: new Map(),
     people: [ada.id, bo.id],
     routines,
     clock: epoch,
     nextKey: 0,
+    nextPush: 0,
   };
 }
 
@@ -1257,6 +1478,25 @@ const engineLoop = (profile: Profile, mutant: EngineMutantName | undefined): Loo
   return mutant === undefined ? loop : engineMutants[mutant].loop(loop);
 };
 
+async function continuedFromLostPushes(db: Database): Promise<number> {
+  const { continued } = await db
+    .selectFrom('attempt')
+    .select(eb => eb.fn.countAll<string>().as('continued'))
+    .where(eb =>
+      eb.exists(
+        eb
+          .selectFrom('attempt as lost')
+          .select('lost.id')
+          .whereRef('lost.task_id', '=', 'attempt.task_id')
+          .whereRef('lost.id', '<', 'attempt.id')
+          .where('lost.verdict', '=', 'lost')
+          .whereRef('lost.last_pushed', '=', 'attempt.start_commit'),
+      ),
+    )
+    .executeTakeFirstOrThrow();
+  return Number(continued);
+}
+
 async function releases(db: Database): Promise<readonly Release[]> {
   const rows = await db
     .selectFrom('attempt')
@@ -1284,11 +1524,14 @@ async function runSeed(postgres: TestPostgres, plan: Plan, seed: number): Promis
   };
   try {
     if (plan.mutant !== undefined) await dropGuard(db, plan.mutant);
+    for (const name of plan.step === undefined ? [] : stepMutants[plan.step].drops) await dropGuard(db, name);
+    const job = jobs(byName, simAgent, plan.step);
     const world = await setUp(db, profile, plan.steps, engines);
     engines.dbs.forEach((_db, index) => {
       startEngine(engines, index);
     });
     await engines.virtual.idle();
+    await logLostApprovals(db);
     const watched = await watch(db, workflows, profile.reapEveryMs, new Date(epoch));
     const ended = async (steps: number, failure: Failure | undefined): Promise<Run> => ({
       plan,
@@ -1299,9 +1542,11 @@ async function runSeed(postgres: TestPostgres, plan: Plan, seed: number): Promis
       hung: world.hung.size,
       hungNotLost: failure === undefined ? await hungNotLost(db, world.hung) : [],
       tally: Object.fromEntries(world.tally),
+      fired: Object.fromEntries(world.fired),
       done: await tasksIn(db, 'done'),
       tasks: await settledTasks(db),
       releases: await releases(db),
+      continued: await continuedFromLostPushes(db),
       passMs: engines.passMs,
       engineLog: engines.log,
       trace: failure === undefined ? trace.slice(-traceTail) : trace,
@@ -1316,11 +1561,12 @@ async function runSeed(postgres: TestPostgres, plan: Plan, seed: number): Promis
       const due = engines.virtual.nextDue();
       const engineDue = due !== undefined && due <= world.clock;
       if (!engineDue) engines.virtual.advance(world.clock);
-      const turn: Turn = { db, postgres, world, profile, plan, random, quiet, now: new Date(world.clock) };
+      const turn: Turn = { db, postgres, world, profile, plan, random, quiet, now: new Date(world.clock), jobs: job };
+      const said = engines.log.length;
       const made = engineDue ? { move: 'engine', detail: await engineStep(turn) } : await perform(turn);
       const at = engines.virtual.clock.now().getTime();
       trace.push({ step, at: at - epoch, ...made });
-      const broken = await watched.step(new Date(at));
+      const broken = await watched.step(new Date(at), engines.log.slice(said).some(line => line.includes(': gave ')));
       if (broken.length > 0) return await ended(step, { step, move: made.move, broken });
       world.clock = Math.max(world.clock, at) + (engineDue ? 0 : 1 + Math.floor(random() * profile.stepMs));
     }
@@ -1328,7 +1574,7 @@ async function runSeed(postgres: TestPostgres, plan: Plan, seed: number): Promis
     return await ended(step, unsettled.length > 0 ? { step, move: 'the quiet phase ended', broken: unsettled } : undefined);
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
-    const without = plan.mutant ?? plan.engine;
+    const without = plan.mutant ?? plan.engine ?? plan.step;
     const where = `${plan.profile} seed ${String(seed)}${without === undefined ? '' : ` without ${without}`}`;
     throw new Error(`${where} threw after step ${String(trace.at(-1)?.step ?? 0)}: ${reason}`, { cause: error });
   } finally {
@@ -1349,7 +1595,7 @@ export async function probeReaper(postgres: TestPostgres, expiring: number): Pro
   try {
     const world = await setUp(db, profile, expiring * profile.stepsPerTask, engines);
     for (const task of world.tasks.slice(0, expiring)) {
-      const outcome = await claim(db, task, new Date(epoch), profile.leaseMs);
+      const outcome = await claim(db, task, new Date(epoch), profile.leaseMs, await runsAs(db, task), null);
       if ('refused' in outcome) throw new Error(`the probe could not claim task ${task}: ${outcome.refused}`);
     }
     startEngine(engines, 0);

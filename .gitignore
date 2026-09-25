@@ -26,3 +26,6 @@ Thumbs.db
 desktop.ini
 .vscode/
 .idea/
+
+# Local CI results
+/ci-local/

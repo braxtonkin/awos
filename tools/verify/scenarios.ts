@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
 import { accounts } from './accounts.ts';
-import { fail, pass, type Check, type Scenario } from './check.ts';
+import { fail, pass, type Line, type Scenario } from './check.ts';
 import { doctor } from './doctor.ts';
 import { guardrails } from './guardrails.ts';
 import { kind } from './kind.ts';
@@ -52,7 +52,7 @@ async function featureScenarios(root: string): Promise<readonly Scenario[]> {
   return found;
 }
 
-export async function runScenario(scenario: Scenario, args: readonly string[]): Promise<readonly Check[]> {
+export async function runScenario(scenario: Scenario, args: readonly string[]): Promise<readonly Line[]> {
   try {
     const checks = await scenario.run(args);
     return checks.length === 0 ? [fail(`${scenario.name} produces at least one check`, 'it produced none')] : checks;
@@ -63,8 +63,8 @@ export async function runScenario(scenario: Scenario, args: readonly string[]): 
 
 type Run = { readonly scenario: Scenario; readonly args: readonly string[]; readonly label: string };
 
-async function runEach(runs: readonly Run[]): Promise<readonly Check[]> {
-  const checks: Check[] = [];
+async function runEach(runs: readonly Run[]): Promise<readonly Line[]> {
+  const checks: Line[] = [];
   for (const { scenario, args, label } of runs) {
     for (const check of await runScenario(scenario, args)) checks.push({ ...check, name: `${label}: ${check.name}` });
   }

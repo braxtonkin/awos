@@ -2,8 +2,12 @@ import { once } from 'node:events';
 import { createServer } from 'node:http';
 import { hostname } from 'node:os';
 import { z } from 'zod';
-import { bridgeListener, noStepRunner, rules } from '../../features/bridge/engine.ts';
-import { checkLoop } from '../../features/credentials/check-loop.ts';
+import { agentSteps } from '../../features/code-change/stage-output.ts';
+import { workflow as codeChange } from '../../features/code-change/workflow.ts';
+import { bridgeListener, rules } from '../../features/bridge/engine.ts';
+import { checkLeaseMarginMs, checkLoop, type CheckLoopSettings } from '../../features/credentials/check-loop.ts';
+import { landLoops } from '../../features/code-change/land-loop.ts';
+import { coreReview } from '../../features/code-change/land.ts';
 import { checksFor } from '../../features/credentials/checks.ts';
 import { githubApi } from '../../features/credentials/github-check.ts';
 import { openJiraLogin } from '../../features/credentials/jira-login.ts';
@@ -12,24 +16,30 @@ import { open, writeBack } from '../../features/credentials/store.ts';
 import { providerProblems, reconcile } from '../../features/environments/lifecycle.ts';
 import { providersByName } from '../../features/environments/provider.ts';
 import { clientsFrom, type OpenToken } from '../../features/github/client.ts';
+import { mergeStateReader } from '../../features/github/merge-state.ts';
 import { githubPerformers, outboxOwedAt } from '../../features/github/performers.ts';
 import type { JiraAccess } from '../../features/jira/client.ts';
 import { jiraPerformers } from '../../features/jira/performers.ts';
-import { jiraSearch } from '../../features/jira/source.ts';
-import { connectCluster } from '../../features/jobs/launch.ts';
+import { currentAssignee, jiraSearch, ticketDescription } from '../../features/jira/source.ts';
 import { jobSettings } from '../../features/jobs/settings.ts';
 import { sweep } from '../../features/jobs/sweep.ts';
+import { enqueue } from '../../features/outbox/enqueue.ts';
 import { outboxLoops, registryOf } from '../../features/outbox/perform.ts';
 import { scheduleSource } from '../../features/routines/schedule-source.ts';
 import { postgresNow, scheduler } from '../../features/routines/scheduler.ts';
 import { sourcesByKind } from '../../features/routines/source.ts';
+import { advance, approveFromOutside, handOff } from '../../features/tasks/advance.ts';
+import { claim, renew } from '../../features/tasks/claim.ts';
 import { reaper } from '../../features/tasks/reaper.ts';
+import { coreRunAs, type RunAsRule } from '../../features/tasks/run-as.ts';
+import { finishStep, type StepRunner } from '../../features/tasks/step-runner.ts';
 import { startProblems } from '../../features/tasks/start.ts';
-import type { OwedKinds, Performers } from '../../shared/actions.ts';
+import type { Performers } from '../../shared/actions.ts';
+import { connectCluster } from '../../shared/cluster.ts';
 import { connect, type Database } from '../../shared/db/client.ts';
 import { realClock, runLoop, type Loop } from '../../shared/loop.ts';
-import type { Workflow } from '../../shared/workflow.ts';
-import { workflows } from './workflows.ts';
+import { attempts } from './attempts.ts';
+import { workflows, type ActionKind } from './workflows.ts';
 
 const milliseconds = z.coerce.number().int().positive();
 
@@ -53,18 +63,62 @@ const settings = z.object({
   OUTBOX_MAX_TRIES: z.coerce.number().int().positive().default(3),
   ENVIRONMENTS_EVERY_MS: milliseconds.default(30_000),
   ENVIRONMENT_START_DEADLINE_MS: milliseconds.default(600_000),
+  LAND_EVERY_MS: milliseconds.default(10_000),
+  LAND_READ_TIMEOUT_MS: milliseconds.default(20_000),
   ...jobSettings,
+  JOB_ENGINE_URL: z.url({ protocol: /^https?$/ }).optional(),
+  GIT_BASE_URL: z.url({ protocol: /^(https|git)$/ }).default('https://github.com/'),
+  WORKER_EVERY_MS: milliseconds.default(5_000),
+  ATTEMPT_START_LEASE_MS: milliseconds.default(300_000),
   BRIDGE_PORT: z.coerce.number().int().min(0).max(65_535).default(4520),
   BRIDGE_POLL_MS: milliseconds.default(250),
   BRIDGE_KEEPALIVE_MS: milliseconds.default(5_000),
   BRIDGE_BODY_LIMIT_BYTES: z.coerce.number().int().positive().default(64 * 1024 * 1024),
+}).refine(given => given.CHECK_LEASE_MS > given.CHECK_TIMEOUT_MS + checkLeaseMarginMs, {
+  path: ['CHECK_LEASE_MS'],
+  message: `must be more than CHECK_TIMEOUT_MS plus ${String(checkLeaseMarginMs)} ms, so a check that runs until its timeout still holds its lease when it finishes`,
 });
 
 type Settings = z.infer<typeof settings>;
 
 const providers = providersByName([]);
 
-type ActionKind = OwedKinds<Workflow>;
+
+const runner: StepRunner = { workflows, agents: new Map([[codeChange.name, agentSteps]]), enqueue };
+
+const checkSettings = (given: Settings, key: SealingKey): CheckLoopSettings => ({
+  everyMs: given.CHECKS_EVERY_MS,
+  leaseMs: given.CHECK_LEASE_MS,
+  key,
+  checks: checksFor({
+    codex: { timeoutMs: given.CHECK_TIMEOUT_MS },
+    github: { baseUrl: given.GITHUB_API_URL, timeoutMs: given.CHECK_TIMEOUT_MS },
+    jira: { site: given.JIRA_SITE, timeoutMs: given.CHECK_TIMEOUT_MS },
+  }),
+  checker: `engine ${hostname()} ${String(process.pid)}`,
+  now: () => new Date(),
+  writeBack,
+});
+
+const workerLoops = (db: Database, given: Settings, key: SealingKey | undefined, runAs: RunAsRule, describeTicket: (ticket: string, actsAs: string) => Promise<string | null>): readonly Loop[] =>
+  key === undefined || given.JOB_IMAGE === undefined || given.JOB_ENGINE_URL === undefined
+    ? []
+    : [
+        attempts({
+          everyMs: given.WORKER_EVERY_MS,
+          startLeaseMs: given.ATTEMPT_START_LEASE_MS,
+          runner,
+          runAs,
+          db,
+          checks: checkSettings(given, key),
+          jobs: { image: given.JOB_IMAGE, namespace: given.JOB_NAMESPACE, serviceAccount: given.JOB_SERVICE_ACCOUNT, deadlineSeconds: given.JOB_DEADLINE_SECONDS },
+          engineUrl: given.JOB_ENGINE_URL,
+          gitBaseUrl: given.GIT_BASE_URL,
+          providers,
+          startDeadlineMs: given.ENVIRONMENT_START_DEADLINE_MS,
+          describeTicket,
+        }),
+      ];
 
 const githubToken =
   (db: Database, key: SealingKey | undefined): OpenToken =>
@@ -77,34 +131,31 @@ const githubToken =
 const loopsFor = (given: Settings, key: SealingKey | undefined, db: Database): readonly Loop[] => {
   const jira: JiraAccess = { site: given.JIRA_SITE, timeoutMs: given.JIRA_TIMEOUT_MS, logins: person => openJiraLogin(db, key, person) };
   const sources = sourcesByKind([scheduleSource, jiraSearch(jira)]);
+  const clientFor = clientsFrom(githubToken(db, key), given.GITHUB_API_URL);
   const performers = {
     ...jiraPerformers(jira, db),
-    ...githubPerformers({ clientFor: clientsFrom(githubToken(db, key), given.GITHUB_API_URL), owedAt: outboxOwedAt(db) }),
+    ...githubPerformers({ clientFor, owedAt: outboxOwedAt(db) }),
   } satisfies Performers<ActionKind>;
   const actions = registryOf(performers);
+  const runAs = coreRunAs(given.JIRA_SITE === undefined ? null : currentAssignee(jira));
   return [
     reaper({ everyMs: given.REAPER_EVERY_MS, leaseMs: given.LEASE_MS }),
     scheduler({ everyMs: given.SCHEDULER_EVERY_MS, leaseMs: given.ROUTINE_LEASE_MS, sources, workflows, now: postgresNow }),
     reconcile({ providers, everyMs: given.ENVIRONMENTS_EVERY_MS, startDeadlineMs: given.ENVIRONMENT_START_DEADLINE_MS }),
+    ...landLoops({
+      everyMs: given.LAND_EVERY_MS,
+      leaseMs: given.LEASE_MS,
+      read: mergeStateReader(db, clientFor),
+      readTimeoutMs: given.LAND_READ_TIMEOUT_MS,
+      review: coreReview,
+      enqueue,
+      clock: realClock,
+      tasks: { claim: async (landDb, task, now, leaseMs) => claim(landDb, task, now, leaseMs, await runAs(landDb, task), null), renew, handOff, approveFromOutside, finish: (writer, attempt, report, now, then) => advance(writer, workflows, attempt, report, now, then) },
+    }),
     ...(given.JOB_IMAGE === undefined ? [] : [sweep({ everyMs: given.SWEEP_EVERY_MS, cluster: connectCluster(given.JOB_NAMESPACE) })]),
     ...outboxLoops({ everyMs: given.OUTBOX_EVERY_MS, leaseMs: given.OUTBOX_LEASE_MS, marginMs: given.OUTBOX_MARGIN_MS, maxTries: given.OUTBOX_MAX_TRIES, clock: realClock, registry: actions }),
-    ...(key === undefined
-      ? []
-      : [
-          checkLoop({
-            everyMs: given.CHECKS_EVERY_MS,
-            leaseMs: given.CHECK_LEASE_MS,
-            key,
-            checks: checksFor({
-              codex: { timeoutMs: given.CHECK_TIMEOUT_MS },
-              github: { baseUrl: given.GITHUB_API_URL, timeoutMs: given.CHECK_TIMEOUT_MS },
-              jira: { site: given.JIRA_SITE, timeoutMs: given.CHECK_TIMEOUT_MS },
-            }),
-            checker: `engine ${hostname()} ${String(process.pid)}`,
-            now: () => new Date(),
-            writeBack,
-          }),
-        ]),
+    ...(key === undefined ? [] : [checkLoop(checkSettings(given, key))]),
+    ...workerLoops(db, given, key, runAs, given.JIRA_SITE === undefined ? () => Promise.resolve(null) : ticketDescription(jira)),
   ];
 };
 
@@ -136,7 +187,7 @@ async function run(given: Settings, key: SealingKey | undefined): Promise<void> 
     const bridge = createServer(
       bridgeListener(
         db,
-        { leaseMs: given.LEASE_MS, finish: noStepRunner, now: () => new Date(), rules },
+        { leaseMs: given.LEASE_MS, finish: (tx, attempt, now) => finishStep(runner, tx, attempt, now), now: () => new Date(), rules },
         { pollMs: given.BRIDGE_POLL_MS, keepAliveMs: given.BRIDGE_KEEPALIVE_MS, bodyLimitBytes: given.BRIDGE_BODY_LIMIT_BYTES, stop: stop.signal },
       ),
     );
@@ -151,6 +202,7 @@ async function run(given: Settings, key: SealingKey | undefined): Promise<void> 
     const loops = loopsFor(given, key, db);
     if (key === undefined) say('The engine has no CREDENTIAL_KEY, so it opens and checks no credentials.');
     if (given.JOB_IMAGE === undefined) say('The engine has no JOB_IMAGE, so it launches no Jobs and sweeps none.');
+    else if (given.JOB_ENGINE_URL === undefined) say('The engine has no JOB_ENGINE_URL, so its Jobs could not reach the bridge, and it launches none.');
     say(`The engine runs the workflows ${[...workflows.keys()].join(', ')}, the Verify providers ${[...providers.keys()].join(', ')}, and the loops ${loops.map(loop => `${loop.name} every ${String(loop.everyMs)} ms`).join(', ')}.`);
     await Promise.all(loops.map(loop => runLoop(loop, db, realClock, stop.signal, say)));
     bridge.closeAllConnections();

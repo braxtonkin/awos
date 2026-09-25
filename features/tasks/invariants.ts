@@ -1,11 +1,10 @@
-import { expressionBuilder, sql, type RawBuilder } from 'kysely';
+import { sql, type RawBuilder } from 'kysely';
 import { z } from 'zod';
 import { connect, type Database } from '../../shared/db/client.ts';
-import type { DB } from '../../shared/db/types.ts';
 import type { Workflow } from '../../shared/workflow.ts';
 import type { TestPostgres } from '../../tools/verify/postgres.ts';
 import { caps } from './claim.ts';
-import { nobodyToRunAs, runAs } from './run-as.ts';
+import { nobodyToRunAs } from './run-as.ts';
 
 type Moment = 'each-step' | 'after-quiet-phase';
 
@@ -65,6 +64,21 @@ const atLand: readonly Statement[] = [
   sql`update task set step = 'land', approved = '{specify}' where id = 1`,
 ];
 
+const lostApprovalLog = sql`create table lost_approval (task_id bigint not null references task, gate text not null)`;
+
+const approvalsGoMissing = (task: string) => sql`with lost as (update task set approved = '{}' where id = ${task} and approved <> '{}' returning id, old.approved)
+  insert into lost_approval (task_id, gate) select id, unnest(approved)::text from lost`;
+
+export async function logLostApprovals(db: Database): Promise<void> {
+  await lostApprovalLog.execute(db);
+}
+
+export async function loseApprovals(db: Database, task: string): Promise<void> {
+  await approvalsGoMissing(task).execute(db);
+}
+
+const lostAtLand: readonly Statement[] = [...atLand, approvalsGoMissing('1')];
+
 const liveAttemptAtLand = sql`insert into attempt (task_id, routine_id, routine_version, step, epoch, run_as_id, started_at, lease_until)
   values (1, 1, 1, 'land', 0, 1, ${t0} + interval '11 seconds', ${t0} + interval '41 seconds')`;
 
@@ -78,6 +92,28 @@ const gatedAt = (step: string) =>
   sql`update task set step = ${sql.lit(step)}, state = 'waiting', waiting_on = 'approval', waiting_reason = 'Approve it.',
       review_attempt = (select max(a.id) from attempt a where a.task_id = 1) where id = 1`;
 
+const pushedA = sql.lit('a'.repeat(40));
+
+const pushedB = sql.lit('b'.repeat(40));
+
+const branchOf = (n: number) => sql.lit(`autoworker/PLANT-1-attempt-${String(n)}`);
+
+const branchedAttempt = (n: number, ended: 'lost' | 'pass' | null, pushed: Statement | null, start: Statement = pushedA) => sql`insert into attempt
+  (task_id, routine_id, routine_version, step, epoch, run_as_id, started_at, lease_until, branch, start_commit, last_pushed, finished_at, verdict, output)
+  values (1, 1, 1, 'specify', 0, 1, ${t0} + interval '1 second', ${t0} + interval '31 seconds', ${branchOf(n)}, ${start}, ${pushed ?? sql`null`},
+          ${ended === null ? sql`null` : sql`${t0} + interval '10 seconds'`}, ${ended === null ? sql`null` : sql.lit(ended)},
+          ${ended === 'pass' ? plantedReview : sql`null`})`;
+
+const plantedEvent = (seq: number, kind: 'app' | 'pushed' | 'end', method: string | null, body: string) =>
+  sql`insert into attempt_event (attempt_id, seq, kind, method, item_id, fragment, body, stored_at)
+      values (1, ${sql.lit(seq)}, ${sql.lit(kind)}, ${method === null ? sql`null` : sql.lit(method)}, null, false, ${sql.lit(body)}::jsonb, ${t0} + interval '5 seconds')`;
+
+const plantedOutboxRow = (kind: string, payload: string) =>
+  sql`insert into outbox (task_id, position, kind, payload, acts_as, idempotency_key, owed_at)
+      values (1, 1, ${sql.lit(kind)}, ${sql.lit(payload)}::jsonb, 1, 'plantedplantedplantedplanted', ${t0} + interval '20 seconds')`;
+
+const finishLiveAttempt = sql`update attempt set finished_at = ${t0} + interval '12 seconds', verdict = 'pass', output = ${plantedReview} where finished_at is null`;
+
 const record = sql`s.step, s.state, s.waiting_on, s.retries, s.lost, s.input_waits, s.counts, s.approved, s.outputs`;
 
 const wasRecord = sql`s.was_step, s.was_state, s.was_waiting_on, s.was_retries, s.was_lost, s.was_input_waits, s.was_counts, s.was_approved, s.was_outputs`;
@@ -90,10 +126,12 @@ export const properties = {
     breaks: sql`select t.id, t.step, t.retries, t.lost, t.input_waits, t.counts from task t
       where least(t.retries, t.lost, t.input_waits) < 0
         or exists (select 1 from jsonb_each(t.counts) c where jsonb_typeof(c.value) <> 'number' or (c.value)::int < 0)
-        or not exists (select 1 from facts f where f.workflow = t.workflow and f.step = t.step)`,
+        or not exists (select 1 from facts f where f.workflow = t.workflow and f.step = t.step)
+        or exists (select 1 from unnest(t.approved) a where not exists (select 1 from facts f where f.workflow = t.workflow and f.step = a::text and not f.is_last))`,
     plants: [
       { setup: [], violation: sql`update task set lost = -1 where id = 1` },
       { setup: [], violation: sql`update task set counts = '{"rounds": -1}' where id = 1` },
+      { setup: [], violation: sql`update task set approved = '{land}' where id = 1` },
     ],
   },
   OneLiveAttempt: {
@@ -215,25 +253,21 @@ export const properties = {
   },
   ApprovalsMatchGatesPassed: {
     moment: 'each-step',
-    breaks: sql`select t.id, t.approved, v.gates
-      from task t
-      join versions v on v.id = t.id
-      join facts fh on fh.workflow = t.workflow and fh.step = t.step
-      cross join lateral (
-        select array(select a::text from unnest(t.approved) a order by 1) as approved,
-               array(select g from unnest(v.gates) g join facts f on f.workflow = t.workflow and f.step = g where f.position < fh.position order by g) as passed
-      ) held
-      where case when fh.irreversible then not (held.approved <@ held.passed) else held.approved is distinct from held.passed end`,
+    breaks: sql`select g.id, g.approved, g.passed, g.missing from gated g
+      where g.approved is distinct from array(select p from unnest(g.passed) p where p <> all(g.missing) order by 1)`,
     plants: [
       { setup: [], violation: sql`update task set approved = '{specify}' where id = 1` },
       { setup: atLand, violation: sql`update task set approved = '{implement,specify}' where id = 1` },
+      { setup: atLand, violation: sql`update task set approved = '{}' where id = 1` },
+      { setup: lostAtLand, violation: sql`update task set step = 'implement', approved = '{specify}' where id = 1` },
     ],
   },
   StoppedTaskCanResume: {
     moment: 'each-step',
     breaks: sql`select s.id, s.was_step, s.step, s.was_approved, s.approved from diff s
-      where s.id in (select task_id from acted) and s.was_state = 'stopped' and s.state = 'ready'
-        and (s.step <> s.was_step
+      where s.id in (select task_id from acted where kind = 'retry_task') and s.was_state = 'stopped'
+        and (s.state <> 'ready'
+             or s.step <> s.was_step
              or s.approved is distinct from s.was_approved
              or not (s.was_outputs <@ s.outputs)
              or exists (select 1 from charges c where c.workflow = s.workflow and c.kind = 'review'
@@ -249,6 +283,14 @@ export const properties = {
         violation: sql`with retried as (insert into human_action (id, at, person_id, kind, task_id)
                          values ('00000000-0000-4000-8000-000000000007', ${t0} + interval '3 seconds', 1, 'retry_task', 1) returning task_id)
                        update task set state = 'ready', stopped_by = null, approved = '{}' from retried where task.id = retried.task_id`,
+      },
+      {
+        setup: [
+          personActs('stop_task', '00000000-0000-4000-8000-000000000006'),
+          sql`update task set state = 'stopped', stopped_by = '00000000-0000-4000-8000-000000000006' where id = 1`,
+        ],
+        violation: sql`insert into human_action (id, at, person_id, kind, task_id)
+                       values ('00000000-0000-4000-8000-000000000007', ${t0} + interval '3 seconds', 1, 'retry_task', 1)`,
       },
     ],
   },
@@ -347,6 +389,7 @@ export const properties = {
                  and (s.step, s.retries, s.lost, s.input_waits, s.counts, s.approved, s.outputs)
                      = (s.was_step, s.was_retries, s.was_lost, s.was_input_waits, s.was_counts, s.was_approved, s.was_outputs))
         and not (exists (select 1 from facts f where f.workflow = s.workflow and f.step = s.was_step and f.irreversible) and s.approved = '{}'
+                 and s.id in (select task_id from went_missing)
                  and (s.step, s.state, s.waiting_on, s.retries, s.lost, s.input_waits, s.counts, s.outputs)
                      is not distinct from (s.was_step, s.was_state, s.was_waiting_on, s.was_retries, s.was_lost, s.was_input_waits, s.was_counts, s.was_outputs))`,
     plants: [
@@ -374,6 +417,7 @@ export const properties = {
         violation: sql`update task set approved = '{}' where id = 1`,
       },
       { setup: atLand, violation: sql`update task set approved = '{}', retries = 1 where id = 1` },
+      { setup: atLand, violation: sql`update task set approved = '{}' where id = 1` },
     ],
   },
   AttemptEndsOnlyWithItsTask: {
@@ -387,12 +431,16 @@ export const properties = {
     breaks: sql`select s.id, c.counter, s.step, s.state from diff s
       join charges c on c.workflow = s.workflow and c.kind = 'return'
       where coalesce((s.counts ->> c.counter)::int, 0) > coalesce((s.was_counts ->> c.counter)::int, 0)
-        and not (s.step = c.to_step or s.state = 'waiting')`,
+        and not (s.step = c.to_step or (s.state = 'waiting' and s.waiting_on = 'retry'))`,
     plants: [
       { setup: [], violation: sql`update task set counts = '{"rounds": 1}' where id = 1` },
       {
         setup: [finishedAttempt('specify', 'pass'), finishedAttempt('implement', 'pass'), finishedAttempt('verify', 'pass'), sql`update task set step = 'land', approved = '{specify}' where id = 1`],
         violation: sql`update task set counts = '{"landRounds": 1}' where id = 1`,
+      },
+      {
+        setup: atLand,
+        violation: sql`update task set counts = '{"landRounds": 1}', state = 'waiting', waiting_on = 'outside_approval', waiting_reason = 'Planted.' where id = 1`,
       },
     ],
   },
@@ -513,6 +561,13 @@ export const properties = {
       where a.id = any(p.live) and a.verdict = 'lost' and a.lease_until >= checked_at`,
     plants: [{ setup: [liveAttempt], violation: sql`update attempt set finished_at = ${t0} + interval '20 seconds', verdict = 'lost' where id = 1`, checkedAtSeconds: 20 }],
   },
+  LapsedLeaseNeverRenews: {
+    moment: 'each-step',
+    breaks: sql`select a.id as attempt, a.task_id, l.lease_until as lapsed_at, a.lease_until, checked_at as renewed_by
+      from attempt a join held_leases l on l.id = a.id
+      where not graced and a.finished_at is null and l.lease_until < checked_at and a.lease_until > l.lease_until`,
+    plants: [{ setup: [liveAttempt], violation: sql`update attempt set lease_until = ${t0} + interval '90 seconds' where id = 1` }],
+  },
   ReviewsOnlyGrow: {
     moment: 'each-step',
     breaks: sql`select s.id, c.counter, s.was_counts ->> c.counter as was, s.counts ->> c.counter as count
@@ -549,6 +604,134 @@ export const properties = {
       },
     ],
   },
+  LostPushChangesNothing: {
+    moment: 'each-step',
+    breaks: sql`select a.id as attempt, 'its last push changed after it ended' as what, a.last_pushed as commit
+      from attempt a, prior p
+      where p.pushed ? a.id::text and a.last_pushed is distinct from (p.pushed ->> a.id::text)
+      union all
+      select e.attempt_id, 'a push was stored after it ended', e.body ->> 'commit'
+      from attempt_event e, prior p
+      where e.kind = 'pushed' and age(e.xmin) < age(p.xid) and e.attempt_id <= coalesce(p.max_attempt, 0) and e.attempt_id <> all(p.live)
+      union all
+      select null::bigint, 'the task branch advances to a commit that no passed attempt of the task pushed', o.payload ->> 'to'
+      from outbox o
+      where o.kind = 'branch.advance'
+        and not exists (select 1 from attempt a where a.task_id = o.task_id and a.verdict = 'pass' and a.last_pushed = o.payload ->> 'to')`,
+    plants: [
+      { setup: [sql`drop trigger finished_attempt_is_final on attempt`, branchedAttempt(1, 'lost', pushedA)], violation: sql`update attempt set last_pushed = ${pushedB} where id = 1` },
+      {
+        setup: [sql`drop trigger event_needs_live_attempt on attempt_event`, branchedAttempt(1, 'lost', pushedA)],
+        violation: plantedEvent(1, 'pushed', null, `{"commit": "${'b'.repeat(40)}", "branch": "autoworker/PLANT-1-attempt-1"}`),
+      },
+      {
+        setup: [branchedAttempt(1, 'pass', pushedA)],
+        violation: plantedOutboxRow('branch.advance', `{"repository": "example/sandbox", "branch": "autoworker/PLANT-1", "from": null, "to": "${'b'.repeat(40)}"}`),
+      },
+    ],
+  },
+  ContinuationStartsFromLastPush: {
+    moment: 'each-step',
+    breaks: sql`select a.id as attempt, a.task_id, a.start_commit, lost.id as lost_attempt, lost.last_pushed as lost_push, task_head.head as task_head
+      from prior p
+      join attempt a on a.id > coalesce(p.max_attempt, 0)
+      join task t on t.id = a.task_id
+      join repository r on r.id = t.repository_id
+      left join lateral (
+        select b.id, b.last_pushed from attempt b
+        where b.task_id = a.task_id and b.step = a.step and b.id < a.id and b.verdict = 'lost' and b.last_pushed is not null
+          and not exists (select 1 from attempt c where c.task_id = a.task_id and c.step = a.step and c.id > b.id and c.id < a.id and c.verdict is distinct from 'lost')
+        order by b.id desc limit 1
+      ) lost on true
+      left join lateral (
+        select o.payload ->> 'to' as head from outbox o where o.task_id = a.task_id and o.kind = 'branch.advance' and o.state = 'done' order by o.position desc limit 1
+      ) task_head on true
+      where a.branch is not null
+        and a.start_commit is distinct from coalesce(lost.last_pushed, task_head.head, left(encode(sha256(convert_to(r.github || '@' || r.branch, 'UTF8')), 'hex'), 40))`,
+    plants: [
+      { setup: [branchedAttempt(1, 'lost', pushedA)], violation: branchedAttempt(2, null, null, pushedB) },
+      { setup: [branchedAttempt(1, 'lost', pushedA), branchedAttempt(2, 'lost', null, pushedA)], violation: branchedAttempt(3, null, null, pushedB) },
+      { setup: [], violation: branchedAttempt(1, null, null, pushedB) },
+    ],
+  },
+  VerdictOwesItsActions: {
+    moment: 'each-step',
+    breaks: sql`select owed.attempt, owed.kind, owed.owed, owed.found from (
+        select j.id as attempt, k.kind, k.owed,
+               (select count(*) from fresh o where o.xid = j.xid and o.task_id = j.task_id and o.kind = k.kind)::int as found
+        from judged j
+        left join lateral (
+          select o.payload ->> 'to' as head from outbox o where o.task_id = j.task_id and o.kind = 'branch.advance' and o.state = 'done' order by o.position desc limit 1
+        ) task_head on true
+        cross join lateral (select j.branch is not null as owes, coalesce(j.last_pushed, task_head.head) as head, j.step = 'implement' and j.verdict = 'pass' as implemented) c
+        cross join lateral (values
+          ('ticket.comment', case when not c.owes then 0
+                                  when j.verdict = 'pass' and j.step in ('specify', 'verify') then 1
+                                  when c.implemented and c.head is not null then 1
+                                  when j.verdict = 'behavior_fail' and j.step = 'verify' then 1
+                                  else 0 end),
+          ('branch.advance', case when c.owes and c.implemented and c.head is not null and c.head is distinct from task_head.head then 1 else 0 end),
+          ('pr.open-draft', case when c.owes and c.implemented and c.head is not null
+                                  and not exists (select 1 from outbox o where o.task_id = j.task_id and o.kind = 'pr.open-draft' and o.state in ('owed', 'done')
+                                                  and not exists (select 1 from fresh f where f.id = o.id)) then 1 else 0 end),
+          ('branch.delete', case when c.owes and j.verdict = 'pass'
+                                 then (select count(*) from attempt b where b.task_id = j.task_id and b.step = j.step and b.branch is not null
+                                       and (b.last_pushed is not null or b.verdict in ('lost', 'stopped')))::int
+                                 else 0 end)
+        ) k(kind, owed)
+      ) owed
+      where owed.owed <> owed.found
+      union all
+      select null::bigint, o.kind, 0, 1 from fresh o where not exists (select 1 from judged j where j.xid = o.xid and j.task_id = o.task_id)
+      union all
+      select j.id, 'branch.advance to ' || coalesce(o.payload ->> 'to', 'nothing'), 0, 0
+      from judged j join fresh o on o.xid = j.xid and o.task_id = j.task_id and o.kind = 'branch.advance'
+      where o.payload ->> 'to' is distinct from j.last_pushed`,
+    plants: [
+      { setup: [branchedAttempt(1, null, null)], violation: finishLiveAttempt },
+      { setup: [], violation: plantedOutboxRow('ticket.comment', '{"ticket": "PLANT-1", "text": "Planted.", "linkPullRequest": false}') },
+    ],
+  },
+  FinishWaitsForLastLine: {
+    moment: 'each-step',
+    breaks: sql`select j.id as attempt, last_line.seq as end_seq
+      from judged j
+      left join lateral (
+        select e.seq, e.xmin as xid from attempt_event e where e.attempt_id = j.id and e.kind = 'end' order by e.seq desc limit 1
+      ) last_line on true
+      where last_line.seq is null
+         or not (last_line.xid = j.xid)
+         or exists (select 1 from attempt_event later where later.attempt_id = j.id and later.seq > last_line.seq)`,
+    plants: [
+      { setup: [branchedAttempt(1, null, null)], violation: finishLiveAttempt },
+      { setup: [branchedAttempt(1, null, null), plantedEvent(1, 'end', null, '{}')], violation: finishLiveAttempt },
+    ],
+  },
+  UnparsedReplyEndsBlocked: {
+    moment: 'each-step',
+    breaks: sql`select j.id as attempt, j.step, j.verdict, j.blocked, reply.text as reply
+      from judged j
+      left join lateral (
+        select e.body -> 'params' -> 'item' ->> 'text' as text from attempt_event e
+        where e.attempt_id = j.id and e.kind = 'app' and e.method = 'item/completed' and e.body -> 'params' -> 'item' ->> 'type' = 'agentMessage'
+        order by e.seq desc limit 1
+      ) reply on true
+      cross join lateral (select case when pg_input_is_valid(reply.text, 'jsonb') then reply.text::jsonb end as parsed) p
+      where j.verdict::text <> j.blocked
+        and (p.parsed is null
+             or case when jsonb_typeof(p.parsed) = 'object'
+                     then not (p.parsed ?& array['outcome', 'summary', 'blocks'])
+                          or coalesce(p.parsed ->> 'outcome', '') not in ('done', 'needs_input', 'blocked')
+                          or exists (select 1 from jsonb_object_keys(p.parsed) k where k not in ('outcome', 'summary', 'blocks', 'behavior'))
+                     else true end)`,
+    plants: [
+      {
+        setup: [branchedAttempt(1, null, null), plantedEvent(1, 'app', 'item/completed', '{"method": "item/completed", "params": {"turnId": "t", "item": {"id": "r", "type": "agentMessage", "text": "Not a review."}}}')],
+        violation: finishLiveAttempt,
+      },
+      { setup: [branchedAttempt(1, null, null)], violation: finishLiveAttempt },
+    ],
+  },
   EveryTaskSettles: {
     moment: 'after-quiet-phase',
     breaks: sql`select id, step, state from task where state = 'ready'`,
@@ -567,7 +750,7 @@ export type Violation = { readonly property: PropertyName; readonly row: unknown
 
 export type Watch = {
   readonly atStart: readonly Violation[];
-  readonly step: (checkedAt: Date) => Promise<readonly Violation[]>;
+  readonly step: (checkedAt: Date, graced: boolean) => Promise<readonly Violation[]>;
   readonly settled: () => Promise<readonly Violation[]>;
 };
 
@@ -594,7 +777,7 @@ function workflowFacts(workflows: readonly Workflow[]): Statement {
   const steps = workflows.flatMap(workflow =>
     workflow.steps.map(
       (kind, index) =>
-        sql`(${sql.lit(workflow.name)}, ${sql.lit(kind.name)}, ${sql.lit(index + 1)}, ${sql.lit(index === workflow.steps.length - 1)}, ${sql.lit(kind.owes.some(owed => owed.irreversible))}, ${sql.lit(kind.needsRepository)})`,
+        sql`(${sql.lit(workflow.name)}, ${sql.lit(kind.name)}, ${sql.lit(index + 1)}, ${sql.lit(index === workflow.steps.length - 1)}, ${sql.lit(kind.owes.some(owed => owed.irreversible))}, ${sql.lit(kind.needsRepository)}, ${sql.lit(kind.runBy)}, ${sql.lit(kind.blocked)})`,
     ),
   );
   const charges = workflows.flatMap(workflow =>
@@ -608,7 +791,7 @@ function workflowFacts(workflows: readonly Workflow[]): Statement {
   );
   const chargeRows = charges.length === 0 ? sql`select null::text, null::text, null::text, null::text, null::int, null::text where false` : sql`values ${sql.join(charges)}`;
   return sql`
-    facts (workflow, step, position, is_last, irreversible, needs_repository) as (values ${sql.join(steps)}),
+    facts (workflow, step, position, is_last, irreversible, needs_repository, run_by, blocked) as (values ${sql.join(steps)}),
     charges (workflow, step, kind, counter, cap, to_step) as (${chargeRows}),`;
 }
 
@@ -617,7 +800,8 @@ const helpers = (workflows: readonly Workflow[], everyMs: number) => sql`
   engine (every_ms) as (values (${sql.lit(everyMs)}::int)),
   prior as (
     select (before->>'xid')::xid as xid, (before->>'maxAttempt')::bigint as max_attempt,
-           array(select jsonb_array_elements_text(before->'live')::bigint) as live
+           array(select jsonb_array_elements_text(before->'live')::bigint) as live,
+           (before->>'maxOutbox')::bigint as max_outbox, coalesce(before->'pushed', '{}') as pushed
     where before is not null),
   versions as (
     select t.id, v.gates::text[] as gates, coalesce(v.last_step::text, (select f.step from facts f where f.workflow = t.workflow and f.is_last)) as end_step
@@ -628,7 +812,7 @@ const helpers = (workflows: readonly Workflow[], everyMs: number) => sql`
            array(select distinct a.step::text from attempt a where a.task_id = task.id and a.verdict = 'pass' order by 1) as outputs,
            latest.id as latest, latest.verdict as latest_verdict,
            task.waiting_reason,
-           ${runAs(expressionBuilder<DB, 'task'>())} as runs_as
+           coalesce((select r.run_as_id from routine r where r.id = task.routine_id), (select p.id from person p where p.jira_account_id = task.assignee_account_id)) as runs_as
     from task
     left join lateral (
       select a.id, a.verdict from attempt a where a.task_id = task.id and a.finished_at is not null order by a.id desc limit 1
@@ -639,6 +823,14 @@ const helpers = (workflows: readonly Workflow[], everyMs: number) => sql`
            approved text[], outputs text[], latest bigint, latest_verdict verdict)),
   written as (select a.* from attempt a, prior p where age(a.xmin) < age(p.xid)),
   ended as (select a.task_id, a.id, a.verdict from attempt a, prior p where a.finished_at is not null and a.id = any(p.live)),
+  judged as (
+    select a.id, a.task_id, a.step, a.verdict, a.branch, a.last_pushed, a.xmin as xid, f.blocked
+    from ended e
+    join attempt a on a.id = e.id
+    join task t on t.id = a.task_id
+    join facts f on f.workflow = t.workflow and f.step = a.step
+    where f.run_by = 'agent' and a.verdict not in ('lost', 'stopped')),
+  fresh as (select o.id, o.task_id, o.kind, o.payload, o.xmin as xid from outbox o, prior p where o.id > coalesce(p.max_outbox, 0)),
   acted as (select h.id, h.task_id, h.kind, h.attempt_id, h.detail from human_action h, prior p where h.task_id is not null and age(h.xmin) < age(p.xid)),
   targeted as (select h.id, h.kind, h.routine_id, h.task_id, h.repository_id, h.connector from human_action h, prior p where age(h.xmin) < age(p.xid)),
   diff as (
@@ -648,10 +840,28 @@ const helpers = (workflows: readonly Workflow[], everyMs: number) => sql`
            w.latest as was_latest, w.latest_verdict as was_latest_verdict, r.waiting_reason,
            exists (select 1 from attempt a, prior p where a.task_id = r.id and a.id = any(p.live)) as was_live,
            r.runs_as
-    from record r join was w on w.id = r.id)`;
+    from record r join was w on w.id = r.id),
+  went_missing as (
+    select l.task_id, l.gate from lost_approval l
+    where not exists (select 1 from prior) or exists (select 1 from prior p where age(l.xmin) < age(p.xid))),
+  held_leases as (select * from jsonb_to_recordset(coalesce(before->'leases', '[]')) as l(id bigint, lease_until timestamptz)),
+  carried as (select * from jsonb_to_recordset(coalesce(before->'missing', '[]')) as c(id bigint, missing text[])),
+  gated as (
+    select t.id, held.approved, held.passed,
+           array(select p from unnest(held.passed) p
+                 where p = any(coalesce(c.missing, '{}')) or exists (select 1 from went_missing m where m.task_id = t.id and m.gate = p)
+                 order by 1) as missing
+    from task t
+    join versions v on v.id = t.id
+    join facts fh on fh.workflow = t.workflow and fh.step = t.step
+    left join carried c on c.id = t.id
+    cross join lateral (
+      select array(select a::text from unnest(t.approved) a order by 1) as approved,
+             array(select g from unnest(v.gates) g join facts f on f.workflow = t.workflow and f.step = g where f.position < fh.position order by g) as passed
+    ) held)`;
 
 const install = (workflows: readonly Workflow[], everyMs: number) => sql`
-  create function check_step(before jsonb, checked_at timestamptz) returns jsonb language plpgsql as $check$
+  create function check_step(before jsonb, checked_at timestamptz, graced boolean) returns jsonb language plpgsql as $check$
   declare
     own constant xid := pg_current_xact_id()::xid;
     deadline constant timestamptz := clock_timestamp() + interval '1 second';
@@ -672,10 +882,14 @@ const install = (workflows: readonly Workflow[], everyMs: number) => sql`
         'state', jsonb_build_object(
           'xid', own::text,
           'maxAttempt', (select max(id) from attempt),
+          'maxOutbox', (select max(id) from outbox),
+          'pushed', coalesce((select jsonb_object_agg(id::text, last_pushed) from attempt where finished_at is not null), '{}'::jsonb),
           'live', coalesce((select jsonb_agg(id) from attempt where finished_at is null), '[]'::jsonb),
           'tasks', coalesce((select jsonb_agg(jsonb_build_object('id', id, 'step', step, 'state', state, 'waiting_on', waiting_on,
             'retries', retries, 'lost', lost, 'input_waits', input_waits, 'counts', counts, 'approved', approved, 'outputs', outputs,
-            'latest', latest, 'latest_verdict', latest_verdict)) from record), '[]'::jsonb))));
+            'latest', latest, 'latest_verdict', latest_verdict)) from record), '[]'::jsonb),
+          'leases', coalesce((select jsonb_agg(jsonb_build_object('id', id, 'lease_until', lease_until)) from attempt where finished_at is null), '[]'::jsonb),
+          'missing', coalesce((select jsonb_agg(jsonb_build_object('id', id, 'missing', missing)) from gated), '[]'::jsonb))));
   end
   $check$`;
 
@@ -692,13 +906,13 @@ export async function watch(db: Database, workflows: readonly Workflow[], everyM
   }
   await db.executeQuery(compiled);
   let before: z.infer<typeof answer>['state'] = null;
-  const step = async (checkedAt: Date): Promise<readonly Violation[]> => {
-    const { rows } = await sql<{ result: unknown }>`select check_step(${before === null ? null : JSON.stringify(before)}::jsonb, ${checkedAt}::timestamptz) as result`.execute(db);
+  const step = async (checkedAt: Date, graced: boolean): Promise<readonly Violation[]> => {
+    const { rows } = await sql<{ result: unknown }>`select check_step(${before === null ? null : JSON.stringify(before)}::jsonb, ${checkedAt}::timestamptz, ${graced}::boolean) as result`.execute(db);
     const checked = answer.parse(rows[0]?.result);
     before = checked.state;
     return checked.violations;
   };
-  const atStart = await step(startedAt);
+  const atStart = await step(startedAt, false);
   return {
     atStart,
     step,
@@ -709,7 +923,7 @@ export async function watch(db: Database, workflows: readonly Workflow[], everyM
 const namesOf = (found: readonly Violation[]): readonly PropertyName[] => [...new Set(found.map(violation => violation.property))];
 
 const checksAt: Readonly<Record<Moment, (watched: Watch, checkedAt: Date) => Promise<readonly Violation[]>>> = {
-  'each-step': (watched, checkedAt) => watched.step(checkedAt),
+  'each-step': (watched, checkedAt) => watched.step(checkedAt, false),
   'after-quiet-phase': watched => watched.settled(),
 };
 
@@ -717,7 +931,7 @@ async function provePlant(postgres: TestPostgres, workflows: readonly Workflow[]
   const scratch = await postgres.scratch();
   const db = connect(scratch.url, 1);
   try {
-    for (const statement of [...world, ...plant.setup]) await statement.execute(db);
+    for (const statement of [lostApprovalLog, ...world, ...plant.setup]) await statement.execute(db);
     const checkedAt = new Date(plantedAt + (plant.checkedAtSeconds ?? plantCheckedAtSeconds) * 1000);
     const watched = await watch(db, workflows, plantedEveryMs, checkedAt);
     const atStart = await checksAt[moment](watched, checkedAt);

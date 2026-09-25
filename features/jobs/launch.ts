@@ -1,15 +1,9 @@
-import { ApiException, BatchV1Api, CoreV1Api, KubeConfig, type V1Job, type V1Pod, type V1Secret } from '@kubernetes/client-node';
+import { ApiException, type V1Job, type V1Pod, type V1Secret } from '@kubernetes/client-node';
+import { labels, type Cluster } from '../../shared/cluster.ts';
 import type { AccessOnlyLogin } from '../../shared/codex-login.ts';
+import type { JobAfterTurn } from '../../shared/workflow.ts';
 import type { ImageReference, JobSettings } from './settings.ts';
-import { attemptBranch, type SecretKey } from './workspace.ts';
-
-export type Cluster = { readonly batch: BatchV1Api; readonly core: CoreV1Api; readonly namespace: string };
-
-export function connectCluster(namespace: string): Cluster {
-  const config = new KubeConfig();
-  config.loadFromDefault();
-  return { batch: config.makeApiClient(BatchV1Api), core: config.makeApiClient(CoreV1Api), namespace };
-}
+import type { AfterTurnKeys, SecretKeys } from './workspace.ts';
 
 export type RunAs = {
   readonly name: string;
@@ -21,19 +15,18 @@ export type RunAs = {
 export type LaunchInput = {
   readonly attempt: string;
   readonly taskKey: string;
-  readonly number: number;
+  readonly branch: string;
   readonly step: string;
   readonly image: ImageReference;
   readonly repositoryUrl: string;
   readonly startCommit: string;
+  readonly afterTurn: JobAfterTurn;
   readonly attemptToken: string;
   readonly engineUrl: string;
   readonly runAs: RunAs;
 };
 
 export type Manifests = { readonly secret: V1Secret; readonly job: V1Job };
-
-export const labels = { attempt: 'autoworker.dev/attempt', task: 'autoworker.dev/task', step: 'autoworker.dev/step' } as const;
 
 export const containerName = 'attempt';
 
@@ -47,6 +40,9 @@ const labelValue = (text: string): string =>
 
 export const imageFor = (settings: JobSettings, repositoryImage: ImageReference | null): ImageReference => repositoryImage ?? settings.image;
 
+const afterTurnKeys = (plan: JobAfterTurn): AfterTurnKeys =>
+  plan.kind === 'push' ? { AFTER_TURN: 'push' } : { AFTER_TURN: 'reproduce', BASE_COMMIT: plan.base, SETUP_COMMAND: plan.setup ?? '' };
+
 export function manifests(input: LaunchInput, settings: JobSettings): Manifests {
   const name = jobName(input.attempt);
   const metadata = {
@@ -55,17 +51,18 @@ export function manifests(input: LaunchInput, settings: JobSettings): Manifests 
     labels: { [labels.attempt]: input.attempt, [labels.task]: labelValue(input.taskKey), [labels.step]: labelValue(input.step) },
     annotations: { 'autoworker.dev/task-key': input.taskKey },
   };
-  const keys: Record<SecretKey, string> = {
+  const keys: SecretKeys = {
     ATTEMPT_ID: input.attempt,
     ATTEMPT_TOKEN: input.attemptToken,
     ENGINE_URL: input.engineUrl,
     REPO_URL: input.repositoryUrl,
     START_COMMIT: input.startCommit,
-    ATTEMPT_BRANCH: attemptBranch(input.taskKey, input.number),
+    ATTEMPT_BRANCH: input.branch,
     GITHUB_TOKEN: input.runAs.githubToken,
     CODEX_AUTH_JSON: input.runAs.codexLogin,
     GIT_AUTHOR_NAME: input.runAs.name,
     GIT_AUTHOR_EMAIL: input.runAs.email,
+    ...afterTurnKeys(input.afterTurn),
   };
   return {
     secret: { apiVersion: 'v1', kind: 'Secret', metadata, type: 'Opaque', stringData: keys },
@@ -91,6 +88,7 @@ export function manifests(input: LaunchInput, settings: JobSettings): Manifests 
                 image: input.image,
                 imagePullPolicy: 'IfNotPresent',
                 envFrom: [{ secretRef: { name } }],
+                env: [{ name: 'ATTEMPT_IMAGE', value: input.image }],
                 securityContext: { capabilities: { drop: ['ALL'], add: ['SETUID', 'SETGID', 'KILL'] }, seccompProfile: { type: 'RuntimeDefault' } },
               },
             ],

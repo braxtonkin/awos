@@ -16,18 +16,24 @@ import { defineModel, type Shape } from '../../tools/verify/models.ts';
 import { lastRealState, type TlcRun, type TraceState } from '../../tools/verify/tlc.ts';
 import { checkCatalog, type Catalog } from './catalog.ts';
 import { claim, lostTooOften } from './claim.ts';
+import { coreRunAs } from './run-as.ts';
 import { provePlants, type PlantProof } from './invariants.ts';
+import { stepMutantName, type StepMutantName } from './sim-jobs.ts';
 import {
   badEnd,
   engineMutantName,
   engineMutants,
+  laterReviews,
   mutantName,
   parks,
   probeReaper,
   profileName,
   profiles,
   simulate,
+  stepMutantProfile,
+  stepMutants,
   mutants as storeMutants,
+  unfiredFaults,
   workflows,
   type EngineMutantName,
   type MutantName,
@@ -187,7 +193,14 @@ const guards = [
   'LaterReviewParks',
   'OutsideApprovalNeedsAWait',
   'RetryKeepsApprovals',
+  'LostApprovalStaysLost',
+  'LapsedLeaseCannotRenew',
 ] as const;
+
+const renewsLapsedLeaseForever: Shape = {
+  label: 'by a worker whose lease lapses and renews forever',
+  holds: run => run.loopActions.includes('Hang') && run.loopActions.includes('Wake') && !run.loopActions.includes('Reap'),
+};
 
 const properties = {
   OneLiveAttempt: 'INVARIANTS',
@@ -220,6 +233,7 @@ const properties = {
   ReviewsOnlyGrow: 'PROPERTIES',
   LaterReviewWaitsForAPerson: 'PROPERTIES',
   EndStagePassIsDone: 'PROPERTIES',
+  LapsedLeaseNeverRenews: 'PROPERTIES',
   EveryTaskSettles: 'PROPERTIES',
 } as const;
 
@@ -227,7 +241,7 @@ type Guard = (typeof guards)[number];
 
 type Property = keyof typeof properties;
 
-type Setting = 'MaxHumanActions' | 'IgnoreLaterReviews' | 'ReadyBeforeGreen';
+type Setting = 'MaxHumanActions' | 'IgnoreLaterReviews' | 'ReadyBeforeGreen' | 'GateSteps';
 
 type Extra = { readonly shape?: Shape; readonly overrides?: Readonly<Partial<Record<Setting, string>>> };
 
@@ -253,7 +267,7 @@ const tasksModel = defineModel({
   guards,
   properties,
   liveness: ['EveryTaskSettles'],
-  settings: ['IgnoreLaterReviews', 'ReadyBeforeGreen'],
+  settings: ['IgnoreLaterReviews', 'ReadyBeforeGreen', 'GateSteps'],
   mutants: [
     breaks('ClaimIsExclusive', 'a second worker can insert an attempt', 'OneLiveAttempt', { shape: twoWorkersClaimOneTask }),
     breaks('ClaimNeedsReadyTask', 'a worker can claim a task that is not ready', 'LiveAttemptMeansReady'),
@@ -283,15 +297,20 @@ const tasksModel = defineModel({
     breaks('PassResetsStageRetries', 'a pass keeps the stage retries', 'PassLeavesNoStageRetries'),
     breaks('RetryResetsStageRetries', "a person's retry keeps the stage retries", 'RetryLeavesNoStageRetries'),
     unsettled('ReaperIsFair', 'the reaper has no fairness', hungWorkerHoldsItsTask),
+    breaks('LapsedLeaseCannotRenew', 'a worker renews a lease that has lapsed', 'LapsedLeaseNeverRenews'),
+    unsettled('LapsedLeaseCannotRenew', 'a worker renews a lease that has lapsed', renewsLapsedLeaseForever),
     breaks('EndStageIsFinal', "passing a routine's end stage does not end the task", 'StopsAtItsEndStage'),
     breaks('GateBlocksUntilApproved', 'a gated stage passes straight to the next stage', 'GatePassesOnlyOnApprove'),
     breaks('ReturnClearsApprovals', 'a return to Implement keeps the approval of a gate it must pass again', 'GatePassesOnlyOnApprove'),
     breaks('ReturnClearsApprovals', 'a return to Implement keeps the approval of a gate it must pass again', 'ApprovalsMatchGatesPassed'),
+    breaks('LostApprovalStaysLost', 'a return to Implement restores the approval of an earlier gate that went missing at Land', 'ApprovalsMatchGatesPassed'),
     breaks('MergeChecksGates', "Land merges a task that a fault left without a gate's approval", 'MergeNeedsEveryGate'),
     breaks('MergeWaitsForMergeable', 'Land merges past a red check on a pull request that left draft before its checks were green', 'MergeNeedsEveryGate', {
       overrides: { IgnoreLaterReviews: '{}' },
     }),
-    breaks('MergeWaitsForMergeable', 'Land merges past a later review that its routine ignores', 'MergeNeedsEveryGate', { overrides: { ReadyBeforeGreen: '{}' } }),
+    breaks('MergeWaitsForMergeable', 'Land merges past a later review that its routine ignores', 'MergeNeedsEveryGate', {
+      overrides: { ReadyBeforeGreen: '{}', GateSteps: '{"specify"}' },
+    }),
     breaks('ReviewReturnIsCapped', 'every review that asks for changes returns the task to Implement', 'ReviewReturnsCapped'),
     breaks('RetryResumesStopped', 'Retry cannot resume a stopped task', 'StoppedTaskCanResume'),
     breaks('RetryKeepsReviews', "a person's retry forgets the review return", 'ReviewsOnlyGrow'),
@@ -320,7 +339,7 @@ const simulationOptions = z.object({
   from: z.coerce.number().int().nonnegative().default(1),
   seed: z.coerce.number().int().nonnegative().optional(),
   steps: z.coerce.number().int().positive().default(300),
-  mutant: z.union([mutantName, engineMutantName, z.literal('all')]).optional(),
+  mutant: z.union([mutantName, engineMutantName, stepMutantName, z.literal('all')]).optional(),
   trace: z.string().optional(),
 });
 
@@ -331,7 +350,7 @@ const seedsOf = (options: SimulationOptions): readonly number[] =>
 
 const median = (values: readonly number[]): number => [...values].sort((a, b) => a - b)[Math.floor(values.length / 2)] ?? 0;
 
-const withoutGuard = (plan: Plan): MutantName | EngineMutantName | undefined => plan.mutant ?? plan.engine;
+const withoutGuard = (plan: Plan): MutantName | EngineMutantName | StepMutantName | undefined => plan.mutant ?? plan.engine ?? plan.step;
 
 const replay = (run: Run): string => {
   const mutant = withoutGuard(run.plan);
@@ -403,14 +422,29 @@ async function profileChecks(postgres: TestPostgres, profile: ProfileName, optio
   return [
     first === undefined ? pass(name, detail) : fail(name, violation(first)),
     everySeedFinishesATask(profile, runs),
+    everyWeightedFaultFired(profile, runs),
     badVersionsPark(profile, runs),
     ...(profile === 'races' ? [everyBurstHasOneWinner(runs)] : []),
     ...(profile === 'hangs' ? [everyHungAttemptLost(runs)] : []),
+    ...(profile === 'reviews' ? [laterReviewsReached(runs)] : []),
     ...(engineProfiles.has(profile) ? [releasesWithinOneInterval(profile, runs), everyReleaseLoggedOnce(profile, runs)] : []),
     ...(profile === 'db-pause' ? [outagesLoggedAndResumed(runs)] : []),
+    ...(profile === 'jobs' ? [jobFaultsReached(runs)] : []),
     ...(profile === 'behavior' ? [checksParkAtTheirCap(runs, parks.rounds, 'every task that reached Verify waits after 3 rounds with the instruction for that wait, unless its attempts were lost first')] : []),
     ...(profile === 'environment' ? [checksParkAtTheirCap(runs, parks.reruns, 'every task that reached Verify parked at the rerun cap, unless its attempts were lost first, and no round was charged')] : []),
   ];
+}
+
+function laterReviewsReached(runs: readonly Run[]): Check {
+  const name = 'reviews: a review past the cap asked for changes at Land, so LaterReviewWaitsForAPerson had a case to check';
+  const reached = laterReviews(runs);
+  return reached > 0 ? pass(name, `${String(reached)} later reviews across ${String(runs.length)} seeds`) : fail(name, `none across ${String(runs.length)} seeds`);
+}
+
+function everyWeightedFaultFired(profile: ProfileName, runs: readonly Run[]): Check {
+  const name = `${profile}: every fault the profile weights above 0 fired at least once`;
+  const unfired = unfiredFaults(profile, runs);
+  return unfired.length === 0 ? pass(name, `across ${String(runs.length)} seeds`) : fail(name, `never fired: ${unfired.join(', ')}`);
 }
 
 function badVersionsPark(profile: ProfileName, runs: readonly Run[]): Check {
@@ -478,6 +512,19 @@ function everyReleaseLoggedOnce(profile: ProfileName, runs: readonly Run[]): Che
     : fail(name, problems.length === 0 ? 'no released line' : problems.slice(0, 5).join('; '));
 }
 
+function jobFaultsReached(runs: readonly Run[]): Check {
+  const name = 'jobs: attempts continued from a lost push, late pushes reached the store and were refused, and replies that fail the parse ended their attempts';
+  const tallied = (prefix: string): number => runs.reduce((sum, run) => sum + Object.entries(run.tally).reduce((within, [outcome, times]) => within + (outcome.startsWith(prefix) ? times : 0), 0), 0);
+  const reached = {
+    continued: runs.reduce((sum, run) => sum + run.continued, 0),
+    refused: tallied('late push refused'),
+    applied: tallied('late push applied'),
+    unparsed: tallied('reply that fails the parse finished'),
+  };
+  const detail = `${String(reached.continued)} attempts started from a lost attempt's push, ${String(reached.refused)} late pushes refused and ${String(reached.applied)} applied, ${String(reached.unparsed)} replies that fail the parse ended their attempts`;
+  return reached.continued > 0 && reached.refused > 0 && reached.applied === 0 && reached.unparsed > 0 ? pass(name, detail) : fail(name, detail);
+}
+
 function outagesLoggedAndResumed(runs: readonly Run[]): Check {
   const name = 'db-pause: each pause was logged as a failed pass, the engine resumed with fresh leases and kept running, and it released the backlog afterward';
   const paused = runs.filter(run => (run.tally['postgres paused'] ?? 0) > 0);
@@ -515,6 +562,11 @@ function engineMutantCheck(postgres: TestPostgres, mutant: EngineMutantName, opt
   return mutantRuns(postgres, breaks, `${breaks.join(' or ')} fails under the ${mutant} engine in the ${profile} profile`, { profile, seeds: seedsOf(options), steps: options.steps, engine: mutant }, options);
 }
 
+function stepMutantCheck(postgres: TestPostgres, mutant: StepMutantName, options: SimulationOptions): Promise<Check> {
+  const { breaks } = stepMutants[mutant];
+  return mutantRuns(postgres, breaks, `${breaks.join(' or ')} fails under the ${mutant} step mutant in the ${stepMutantProfile} profile`, { profile: stepMutantProfile, seeds: seedsOf(options), steps: options.steps, step: mutant }, options);
+}
+
 function catalogCheck(catalog: Catalog): Check {
   const name = 'every named constraint, index, and trigger has a mutant or a reason in noMutantYet';
   const problems = [
@@ -550,9 +602,13 @@ async function simulationChecks(postgres: TestPostgres, options: SimulationOptio
     checks.push(simulatorShapeCheck(), catalogCheck(await checkCatalog(postgres)), plantsCheck(await provePlants(postgres, workflows)));
     for (const mutant of mutantName.options) checks.push(await mutantCheck(postgres, mutant, options));
     for (const mutant of engineMutantName.options) checks.push(await engineMutantCheck(postgres, mutant, options));
+    for (const mutant of stepMutantName.options) checks.push(await stepMutantCheck(postgres, mutant, options));
   } else if (options.mutant !== undefined) {
     const store = mutantName.safeParse(options.mutant);
-    checks.push(store.success ? await mutantCheck(postgres, store.data, options) : await engineMutantCheck(postgres, engineMutantName.parse(options.mutant), options));
+    const step = stepMutantName.safeParse(options.mutant);
+    if (store.success) checks.push(await mutantCheck(postgres, store.data, options));
+    else if (step.success) checks.push(await stepMutantCheck(postgres, step.data, options));
+    else checks.push(await engineMutantCheck(postgres, engineMutantName.parse(options.mutant), options));
   } else {
     for (const profile of options.profile === 'all' ? profileName.options : [options.profile]) checks.push(...(await profileChecks(postgres, profile, options)));
   }
@@ -787,7 +843,7 @@ async function sigtermChecks(postgres: TestPostgres): Promise<readonly Check[]> 
     const claimedAt = new Date();
     const attempts: string[] = [];
     for (const [index, task] of tasks.entries()) {
-      const claimed = await claim(db, task.id, claimedAt, index < 8 ? 1_000 : 3_600_000);
+      const claimed = await claim(db, task.id, claimedAt, index < 8 ? 1_000 : 3_600_000, await coreRunAs(null)(db, task.id), null);
       if (!('attempt' in claimed)) throw new Error(`the lane could not claim task ${task.id}: ${claimed.refused}`);
       attempts.push(claimed.attempt);
     }

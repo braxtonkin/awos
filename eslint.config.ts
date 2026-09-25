@@ -2,12 +2,19 @@ import js from '@eslint/js';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { defineConfig } from 'eslint/config';
-import tseslint from 'typescript-eslint';
+import tseslint, { type CompatiblePlugin } from 'typescript-eslint';
+import { noBrandAssertions } from './tools/eslint/no-brand-assertions.ts';
 import { noComments } from './tools/eslint/no-comments.ts';
 
 if (existsSync(join(import.meta.dirname, 'eslint-suppressions.json'))) {
   throw new Error('eslint-suppressions.json silences lint errors, which AGENTS.md rule B2 forbids. Delete it and fix the errors, or change the rule in its own PR.');
 }
+
+const rules = { 'no-comments': noComments, 'no-brand-assertions': noBrandAssertions };
+
+const plugin = { meta: { name: 'autoworker' }, rules };
+
+const autoworker: CompatiblePlugin = plugin;
 
 const importSource = ':matches(ImportDeclaration, ExportAllDeclaration, ExportNamedDeclaration, ImportExpression)';
 const importByJsName = 'Import the .ts file by its .ts name. Node runs .ts files directly and cannot find a .js name that only tsc resolves.';
@@ -17,7 +24,7 @@ export default defineConfig(
   {
     files: ['**/*.{ts,tsx,mts,cts,js,jsx,mjs,cjs}'],
     extends: [js.configs.recommended, tseslint.configs.strictTypeChecked],
-    plugins: { autoworker: { rules: { 'no-comments': noComments } } },
+    plugins: { autoworker },
     languageOptions: {
       parserOptions: {
         project: './tsconfig.json',
@@ -37,6 +44,7 @@ export default defineConfig(
         { selector: `${importSource}[source.value=/\\.claude/]`, message: 'Product code never imports from .claude/, which holds agent tooling that lint does not check.' },
       ],
       'autoworker/no-comments': 'error',
+      'autoworker/no-brand-assertions': 'error',
     },
   },
 );

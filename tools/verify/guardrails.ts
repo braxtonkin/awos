@@ -1,15 +1,18 @@
 import { spawnSync } from 'node:child_process';
-import { cp, lstat, mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
+import { cp, lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { fail, pass, type Check, type Scenario } from './check.ts';
 
-type Tool = 'tsc' | 'node' | 'eslint' | 'depcruise' | 'check' | 'shape' | 'sql-comments' | 'model-names' | 'step-names' | 'db-types' | 'models' | 'migration-versions';
+type Tool = 'tsc' | 'node' | 'eslint' | 'depcruise' | 'check' | 'shape' | 'sql-comments' | 'model-names' | 'step-names' | 'strict-schemas' | 'ci-plan' | 'db-types' | 'models' | 'migration-versions';
+
+type Edit = { readonly from: string; readonly to: string };
 
 type Plant =
-  | { readonly file: string; readonly source: string; readonly linkTo?: never }
-  | { readonly file: string; readonly linkTo: string; readonly source?: never };
+  | { readonly file: string; readonly source: string; readonly linkTo?: never; readonly edit?: never }
+  | { readonly file: string; readonly linkTo: string; readonly source?: never; readonly edit?: never }
+  | { readonly file: string; readonly edit: Edit; readonly source?: never; readonly linkTo?: never };
 
 type Violation = Plant & {
   readonly name: string;
@@ -22,6 +25,7 @@ type Violation = Plant & {
 type Allowance = Plant & {
   readonly name: string;
   readonly tool: Tool;
+  readonly shows?: string;
   readonly companions?: readonly Plant[];
   readonly env?: Readonly<Record<string, string>>;
 };
@@ -90,9 +94,56 @@ const staleTypes = `${generatedTypes} differs from a fresh generation`;
 
 const codeChange = 'code-change';
 
-const plantedStep = "name: 'planted', reads: [], prompt: 'Planted.', needsRepository: true, canEnd: true, owes: [], output: review, requires: ['text'], failures: { fail: { kind: 'fail' } }";
+const optionalVerifyField: Edit = {
+  from: "behavior: z.enum(['fixed', 'still_wrong']).nullable() })",
+  to: "behavior: z.enum(['fixed', 'still_wrong']).nullable(), extra: z.string().optional() })",
+};
+
+const optionalExtra = `${codeChange} verify $.properties.extra is not in required`;
+
+const textBlockStartsWithBody: Edit = {
+  from: "z.strictObject({ kind: z.enum(['text']), title: z.string().nullable(), body: z.string() })",
+  to: "z.strictObject({ body: z.string(), kind: z.enum(['text']), title: z.string().nullable() })",
+};
+
+const bodyFirst = `${codeChange} specify $.properties.blocks.items.anyOf[0] starts with body`;
+
+const plantedStep = "name: 'planted', reads: [], runBy: 'agent', prompt: 'Planted.', startsEnvironment: false, afterTurn: 'push', needsRepository: true, canEnd: true, owes: [], output: review, requires: ['text'], failures: { fail: { kind: 'fail' } }";
+
+const noBrandAssertions = 'autoworker/no-brand-assertions';
+
+const ciWorkflow = '.github/workflows/ci.yml';
+
+const afterDoctor = (added: string): Edit => ({
+  from: '      - run: docker compose run --rm verify npm run verify -- doctor\n',
+  to: `      - run: docker compose run --rm verify npm run verify -- doctor\n${added}`,
+});
+
+const setupNode = 'actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020';
+
+const setupNodeStep = afterDoctor(`      - uses: ${setupNode}\n`);
+
+const unknownStep = `${ciWorkflow} job check step 7 uses ${setupNode}, which ci-local cannot run`;
+
+const accessOnlyLoginFrom = "import { accessOnly, type AccessOnlyLogin } from '../../shared/codex-login.ts';\n\nconst launch = (login: AccessOnlyLogin): string => login;\n";
+
+const plantedCheck = "import type { Checks } from './checks.ts';\nimport type { Check } from './kinds.ts';\n\nconst check: Check = { rotates: () => false, run: () => Promise.reject(new Error('planted')) };\n";
 
 const violations: readonly Violation[] = [
+  {
+    name: 'tsc rejects a review step that owes an approval',
+    file: 'features/planted/approves.ts',
+    source: "import { z } from 'zod';\nimport type { ActionSpec } from '../../shared/actions.ts';\nimport { reviewOwes, type ReviewStep } from '../code-change/land.ts';\n\nconst approve: ActionSpec<'pr.approve', { readonly repository: string }, { readonly review: string }> = { kind: 'pr.approve', payload: z.object({ repository: z.string() }), result: z.object({ review: z.string() }) };\n\nexport const approving: ReviewStep = pull => ({ actions: [reviewOwes(approve, { repository: pull.repository })], note: 'The planted step approved.' });\n",
+    tool: 'tsc',
+    expect: ['TS2345'],
+  },
+  {
+    name: 'tsc rejects a review step that owes an action it did not build with reviewOwes',
+    file: 'features/planted/owes.ts',
+    source: "import { z } from 'zod';\nimport { owe, type ActionSpec } from '../../shared/actions.ts';\nimport type { ReviewStep } from '../code-change/land.ts';\n\nconst approve: ActionSpec<'pr.approve', { readonly repository: string }, { readonly review: string }> = { kind: 'pr.approve', payload: z.object({ repository: z.string() }), result: z.object({ review: z.string() }) };\n\nexport const approving: ReviewStep = pull => ({ actions: [owe(approve, { repository: pull.repository })], note: 'The planted step approved.' });\n",
+    tool: 'tsc',
+    expect: ['TS2322'],
+  },
   {
     name: 'tsc rejects a GitHub performer map without pr.merge',
     file: 'features/github/planted.ts',
@@ -412,6 +463,14 @@ const violations: readonly Violation[] = [
       { file: 'shared/helper.ts', source: "import { pool } from './db/pool.ts';\nexport const helper = pool;\n" },
       { file: 'shared/db/pool.ts', source: 'export const pool = 1;\n' },
     ],
+  },
+  {
+    name: "dependency-cruiser rejects a database driver in the bridge's Job side, which the Job entry point imports",
+    file: 'features/bridge/job.ts',
+    edit: { from: "import { spawn } from 'node:child_process';\n", to: "import { spawn } from 'node:child_process';\nimport 'pg';\n" },
+    tool: 'depcruise',
+    expect: ['job-has-no-database'],
+    rejects: 'services/job/main.ts',
   },
   {
     name: 'dependency-cruiser rejects a Kubernetes client in a Job',
@@ -958,6 +1017,28 @@ const violations: readonly Violation[] = [
     expect: [`names the step of ${codeChange} "land"`],
   },
   {
+    name: "strict-schemas rejects an optional field in an agent step's output",
+    file: `features/${codeChange}/workflow.ts`,
+    edit: optionalVerifyField,
+    tool: 'strict-schemas',
+    expect: [optionalExtra],
+  },
+  {
+    name: 'strict-schemas rejects a block kind whose first field is not kind',
+    file: 'shared/review.ts',
+    edit: textBlockStartsWithBody,
+    tool: 'strict-schemas',
+    expect: [bodyFirst],
+  },
+  {
+    name: 'npm run check runs the strict-schemas check',
+    file: `features/${codeChange}/workflow.ts`,
+    edit: optionalVerifyField,
+    tool: 'check',
+    expect: [optionalExtra],
+    rejects: optionalExtra,
+  },
+  {
     name: 'db-types rejects the committed types when a planted migration adds a table',
     file: plantedMigration,
     source: tableMigration,
@@ -987,6 +1068,20 @@ const violations: readonly Violation[] = [
     expect: ['TS2322', 'TS2741'],
   },
   {
+    name: 'tsc rejects a Checks record that has no check for a connector kind',
+    file: 'features/credentials/planted-checks.ts',
+    source: `${plantedCheck}\nexport const planted: Checks = { codex: check, github: check };\n`,
+    tool: 'tsc',
+    expect: ['TS2741'],
+  },
+  {
+    name: 'tsc rejects a raw login where AccessOnlyLogin is required',
+    file: 'features/credentials/planted-job.ts',
+    source: `${accessOnlyLoginFrom}\nexport const planted = launch('{"tokens": {"refresh_token": "rt"}}');\nexport const made = accessOnly;\n`,
+    tool: 'tsc',
+    expect: ['TS2345'],
+  },
+  {
     name: 'tsc rejects owing an action on the database outside a transaction, so the owed row commits with the state that owes it',
     file: 'features/planted/owe-outside.ts',
     source: `${owing}export const oweOutside = (enqueue: Enqueue, db: Database): Promise<readonly string[]> => enqueue(db, owed, []);\n`,
@@ -1006,6 +1101,34 @@ const violations: readonly Violation[] = [
     source: livenessModel('INVARIANTS'),
     tool: 'tsc',
     expect: ['TS2322'],
+  },
+  {
+    name: 'eslint rejects a type assertion that makes an AccessOnlyLogin',
+    file: 'features/credentials/planted-assertion.ts',
+    source: "import type { AccessOnlyLogin } from '../../shared/codex-login.ts';\n\nexport const login = '{}' as AccessOnlyLogin;\n",
+    tool: 'eslint',
+    expect: [noBrandAssertions],
+  },
+  {
+    name: 'eslint rejects a double assertion through unknown that makes a SealingKey',
+    file: 'features/credentials/planted-key-assertion.ts',
+    source: "import type { SealingKey } from './seal.ts';\n\nexport const key = {} as unknown as SealingKey;\n",
+    tool: 'eslint',
+    expect: [noBrandAssertions],
+  },
+  {
+    name: 'eslint rejects an angle-bracket assertion to a brand keyed by a symbol the file declares',
+    file: 'features/planted/marked.ts',
+    source: "const mark = Symbol('mark');\n\ntype Marked = string & { readonly [mark]: true };\n\nexport const marked = <Marked>'text';\n",
+    tool: 'eslint',
+    expect: [noBrandAssertions],
+  },
+  {
+    name: 'eslint rejects a type predicate that narrows a string to a zod brand',
+    file: 'features/planted/predicate.ts',
+    source: "import { z } from 'zod';\n\nconst name = z.string().brand<'Name'>();\n\ntype Name = z.infer<typeof name>;\n\nexport const isName = (text: string): text is Name => text !== '';\nexport const parsed = name.parse('ada');\n",
+    tool: 'eslint',
+    expect: [noBrandAssertions],
   },
   {
     name: 'tsc rejects a step kind built without step(), so every verdict comes from the declared output',
@@ -1028,6 +1151,48 @@ const violations: readonly Violation[] = [
     tool: 'tsc',
     expect: ['TS2322'],
   },
+  {
+    name: 'ci-plan rejects a uses: step other than actions/checkout, and names it',
+    file: ciWorkflow,
+    edit: setupNodeStep,
+    tool: 'ci-plan',
+    expect: [unknownStep],
+  },
+  {
+    name: 'ci-plan rejects a run: step outside the verify container',
+    file: ciWorkflow,
+    edit: afterDoctor('      - run: npm test\n'),
+    tool: 'ci-plan',
+    expect: [`${ciWorkflow} job check step 7 runs "npm test", which ci-local cannot run`],
+  },
+  {
+    name: 'ci-plan rejects a verify step that needs a shell',
+    file: ciWorkflow,
+    edit: afterDoctor('      - run: docker compose run --rm verify npm test && echo done\n'),
+    tool: 'ci-plan',
+    expect: [`${ciWorkflow} job check step 7 runs "docker compose run --rm verify npm test && echo done", which ci-local cannot run`],
+  },
+  {
+    name: 'ci-plan rejects a block scalar',
+    file: ciWorkflow,
+    edit: afterDoctor('      - run: |\n          npm test\n'),
+    tool: 'ci-plan',
+    expect: ['which starts with |, and the ci-local reader does not read that form'],
+  },
+  {
+    name: 'ci-plan rejects a job key it does not run, such as env',
+    file: ciWorkflow,
+    edit: { from: '  models:\n    runs-on: ubuntu-24.04\n', to: '  models:\n    env:\n      PLANTED: one\n    runs-on: ubuntu-24.04\n' },
+    tool: 'ci-plan',
+    expect: [`${ciWorkflow} jobs.models: Unrecognized key: "env"`],
+  },
+  {
+    name: 'npm run check runs the local CI plan',
+    file: ciWorkflow,
+    edit: setupNodeStep,
+    tool: 'check',
+    expect: [unknownStep],
+  },
 ];
 
 const plantedModel: Violation = {
@@ -1048,6 +1213,40 @@ const plantedLiveness: Violation = {
 };
 
 const allowances: readonly Allowance[] = [
+  {
+    name: 'ci-plan runs a new run: step in the verify container with no code change',
+    file: ciWorkflow,
+    edit: {
+      from: '      - run: docker compose run --rm verify npm run verify -- jira\n',
+      to: '      - run: docker compose run --rm verify npm run verify -- jira\n      - run: docker compose run --rm verify npm run verify -- planted --seeds 3\n',
+    },
+    tool: 'ci-plan',
+    shows: 'simulation: docker compose run --rm -T verify npm run verify -- planted --seeds 3\n',
+  },
+  {
+    name: 'tsc accepts a review step that owes a review request',
+    file: 'features/planted/requests.ts',
+    source: "import { z } from 'zod';\nimport type { ActionSpec } from '../../shared/actions.ts';\nimport { reviewOwes, type ReviewStep } from '../code-change/land.ts';\n\nconst request: ActionSpec<'pr.request-review', { readonly repository: string }, { readonly requested: boolean }> = { kind: 'pr.request-review', payload: z.object({ repository: z.string() }), result: z.object({ requested: z.boolean() }) };\n\nexport const requesting: ReviewStep = pull => ({ actions: [reviewOwes(request, { repository: pull.repository })], note: 'The planted step asked for a review.' });\n",
+    tool: 'tsc',
+  },
+  {
+    name: 'eslint accepts as const, and an assertion that widens a branded value to its base type',
+    file: 'features/planted/assertions.ts',
+    source: "import { z } from 'zod';\n\nconst name = z.string().brand<'Name'>();\n\nexport const names = ['ada'] as const;\nexport const plain = name.parse('ada') as string;\n",
+    tool: 'eslint',
+  },
+  {
+    name: 'tsc accepts a Checks record that has a check for every connector kind',
+    file: 'features/credentials/planted-checks.ts',
+    source: `${plantedCheck}\nexport const planted: Checks = { codex: check, github: check, jira: check };\n`,
+    tool: 'tsc',
+  },
+  {
+    name: 'tsc accepts a login that accessOnly made where AccessOnlyLogin is required',
+    file: 'features/credentials/planted-job.ts',
+    source: `${accessOnlyLoginFrom}\nconst copy = accessOnly('{}');\nexport const planted = 'login' in copy ? launch(copy.login) : copy.reason;\n`,
+    tool: 'tsc',
+  },
   {
     name: 'tsc accepts owing an action in the transaction inTransaction opened',
     file: 'features/planted/owe-inside.ts',
@@ -1268,6 +1467,14 @@ const tools: Record<
     command: () => ['npm', 'run', '--silent', 'step-names'],
     caught: startsALine,
   },
+  'strict-schemas': {
+    command: () => ['npm', 'run', '--silent', 'strict-schemas'],
+    caught: startsALine,
+  },
+  'ci-plan': {
+    command: () => ['npm', 'run', '--silent', 'ci-plan'],
+    caught: (outcome, _file, code) => outcome.output.includes(code),
+  },
   'db-types': {
     command: () => ['npm', 'run', '--silent', 'db-types'],
     caught: startsALine,
@@ -1292,23 +1499,30 @@ function run(tool: Tool, copy: string, file: string, env: Readonly<Record<string
 }
 
 async function withPlanted(copy: string, plants: readonly Plant[], judge: () => Check): Promise<Check> {
-  const created: string[] = [];
+  const undo: (() => Promise<void>)[] = [];
   for (const plant of plants) {
     const path = join(copy, plant.file);
+    if (plant.edit !== undefined) {
+      const original = await readFile(path, 'utf8');
+      if (original.split(plant.edit.from).length !== 2) throw new Error(`${plant.file} must hold "${plant.edit.from}" exactly once for the case to edit it. Update the case to match the file.`);
+      await writeFile(path, original.replace(plant.edit.from, plant.edit.to));
+      undo.push(() => writeFile(path, original));
+      continue;
+    }
     const occupied = await lstat(path).then(
       () => true,
       () => false,
     );
     if (occupied) throw new Error(`${plant.file} already exists in the repository, and planting there would delete it. Plant the case at a path the repository does not use.`);
     const firstNewFolder = await mkdir(dirname(path), { recursive: true });
-    created.push(firstNewFolder ?? path);
+    undo.push(() => rm(firstNewFolder ?? path, { recursive: true, force: true }));
     if (plant.linkTo === undefined) await writeFile(path, plant.source);
     else await symlink(plant.linkTo, path);
   }
   try {
     return judge();
   } finally {
-    for (const path of created.toReversed()) await rm(path, { recursive: true, force: true });
+    for (const restore of undo.toReversed()) await restore();
   }
 }
 
@@ -1324,7 +1538,8 @@ const reject = (copy: string, violation: Violation): Promise<Check> =>
 const accept = (copy: string, allowance: Allowance): Promise<Check> =>
   withPlanted(copy, [allowance, ...(allowance.companions ?? [])], () => {
     const outcome = run(allowance.tool, copy, allowance.file, allowance.env);
-    return outcome.status === 0 ? pass(allowance.name, 'accepted') : fail(allowance.name, (tools[allowance.tool].summary ?? firstLines)(outcome));
+    if (outcome.status !== 0) return fail(allowance.name, (tools[allowance.tool].summary ?? firstLines)(outcome));
+    return allowance.shows === undefined || outcome.output.includes(allowance.shows) ? pass(allowance.name, 'accepted') : fail(allowance.name, `accepted without printing "${allowance.shows}"`);
   });
 
 async function withCopy(work: (copy: string) => Promise<readonly Check[]>, leftOut: readonly string[] = []): Promise<readonly Check[]> {
@@ -1343,7 +1558,7 @@ export const guardrails: Scenario = {
   summary: 'plants each violation a check must reject and each line it must accept, and proves both',
   run: async () => [
     ...(await withCopy(async copy => {
-      const checks: Check[] = (['tsc', 'eslint', 'depcruise', 'shape', 'sql-comments', 'migration-versions', 'model-names', 'step-names', 'db-types'] as const).map(tool => {
+      const checks: Check[] = (['tsc', 'eslint', 'depcruise', 'shape', 'sql-comments', 'migration-versions', 'model-names', 'step-names', 'strict-schemas', 'ci-plan', 'db-types'] as const).map(tool => {
         const clean = run(tool, copy, '.');
         const name = `the unplanted copy passes ${tool}`;
         const problem = clean.status === 0 ? tools[tool].unclean?.(clean) : (tools[tool].summary ?? firstLines)(clean);

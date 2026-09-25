@@ -1,4 +1,4 @@
-import type { z } from 'zod';
+import { z } from 'zod';
 import type { Verdict } from './db/types.ts';
 import type { BlockKind, Review } from './review.ts';
 
@@ -6,7 +6,7 @@ type Capital = 'A' | 'B' | 'C' | 'D' | 'E' | 'F' | 'G' | 'H' | 'I' | 'J' | 'K' |
 
 export type Instruction = `${Capital}${string}.`;
 
-export type StepVerdict = Exclude<Verdict, 'lost' | 'stopped'>;
+export type StepVerdict = Exclude<Verdict, 'lost' | 'stopped' | 'handed_off'>;
 
 type FailureVerdict = Exclude<StepVerdict, 'pass'>;
 
@@ -25,7 +25,7 @@ export type Failure = Route | { readonly kind: 'ask' };
 
 type Failures = { readonly needs_input?: { readonly kind: 'ask' } } & { readonly [verdict in Unasked]?: Route };
 
-type OwedAction = { readonly kind: string; readonly irreversible: boolean };
+type OwedAction<K extends string> = { readonly kind: K; readonly irreversible: boolean };
 
 const judged = Symbol('judged');
 
@@ -33,13 +33,18 @@ const builtBySteps = new WeakSet<object>();
 
 type Judge = ((output: unknown) => StepVerdict) & { readonly [judged]: true };
 
-export type StepKind = {
+export type AfterTurn = 'push' | 'reproduce';
+
+export type JobAfterTurn = { readonly kind: 'push' } | { readonly kind: 'reproduce'; readonly base: string; readonly setup: string | null };
+
+export type RunBy = { readonly runBy: 'agent'; readonly prompt: string; readonly startsEnvironment: boolean; readonly afterTurn: AfterTurn } | { readonly runBy: 'engine' };
+
+type Common<K extends string> = {
   readonly name: string;
   readonly reads: readonly string[];
-  readonly prompt: string;
   readonly needsRepository: boolean;
   readonly canEnd: boolean;
-  readonly owes: readonly OwedAction[];
+  readonly owes: readonly OwedAction<K>[];
   readonly output: z.ZodType<Review>;
   readonly requires: readonly BlockKind[];
   readonly failures: Failures;
@@ -47,14 +52,20 @@ export type StepKind = {
   readonly judge: Judge;
 };
 
-type Declared<O extends Review, F extends Failures> = Omit<StepKind, 'output' | 'failures' | 'blocked' | 'judge'> & {
+export type StepKind<K extends string = string> = Common<K> & RunBy;
+
+export type AgentStepKind<K extends string = string> = StepKind<K> & { readonly runBy: 'agent' };
+
+export const runByAgent = (kind: StepKind): kind is AgentStepKind => kind.runBy === 'agent';
+
+type Declared<O extends Review, F extends Failures, K extends string> = Omit<Common<K>, 'output' | 'failures' | 'blocked' | 'judge'> & RunBy & {
   readonly output: z.ZodType<O>;
   readonly failures: F;
   readonly blocked: keyof F & Unasked;
   readonly done: (output: O) => 'pass' | (keyof F & Unasked);
 };
 
-export function step<O extends Review, F extends Failures>({ done, ...declared }: Declared<O, F>): StepKind {
+export function step<O extends Review, F extends Failures, K extends string = never>({ done, ...declared }: Declared<O, F, K>): StepKind<K> {
   const judge = (raw: unknown): StepVerdict => {
     const parsed = declared.output.safeParse(raw);
     if (!parsed.success) return declared.blocked;
@@ -63,14 +74,17 @@ export function step<O extends Review, F extends Failures>({ done, ...declared }
     if (outcome !== 'done' || !declared.requires.every(kind => blocks.some(block => block.kind === kind))) return declared.blocked;
     return done(parsed.data);
   };
-  const kind: StepKind = { ...declared, judge: Object.assign(judge, { [judged]: true as const }) };
+  const kind: StepKind<K> = { ...declared, judge: Object.assign(judge, { [judged]: true as const }) };
   builtBySteps.add(kind);
   return kind;
 }
 
 export const builtByStep = (kind: StepKind): boolean => builtBySteps.has(kind);
 
-export type Workflow = { readonly name: string; readonly steps: readonly [StepKind, ...StepKind[]] };
+export const outputSchema = (kind: StepKind): Readonly<Record<string, unknown>> =>
+  Object.fromEntries(Object.entries(z.toJSONSchema(kind.output, { target: 'draft-7', io: 'output' })).filter(([key]) => key !== '$schema'));
+
+export type Workflow<K extends string = string> = { readonly name: string; readonly steps: readonly [StepKind<K>, ...StepKind<K>[]] };
 
 export type Shape = {
   readonly steps: readonly string[];

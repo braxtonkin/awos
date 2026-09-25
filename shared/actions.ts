@@ -6,7 +6,7 @@ import type { Transacting } from './transaction.ts';
 const repository = z.string().regex(/^[\w.-]+\/[\w.-]+$/);
 const branch = z.string().min(1).max(255);
 const commit = z.string().regex(/^[0-9a-f]{40}$/);
-const ticket = z.string().regex(/^[A-Z][A-Z0-9_]*-\d+$/);
+export const ticket = z.string().regex(/^[A-Z][A-Z0-9_]*-\d+$/);
 
 export const marker = z.string().regex(/^[A-Za-z0-9_-]{22,}$/).brand<'Marker'>();
 
@@ -31,15 +31,16 @@ export const actionKinds = {
     z.object({ number: z.int().positive(), url: z.url() }),
   ),
   prMarkReady: spec('pr.mark-ready', z.object({ repository, head: branch, evidence: z.string().min(1) }), z.object({ number: z.int().positive() })),
+  prEvidence: spec('pr.evidence', z.object({ repository, head: branch, evidence: z.string().min(1) }), z.object({ number: z.int().positive() })),
   prUpdateBranch: spec('pr.update-branch', z.object({ repository, head: branch, commit }), z.object({ head: commit })),
   prMerge: spec('pr.merge', z.object({ repository, head: branch, commit }), mergeResult),
   branchAdvance: spec('branch.advance', z.object({ repository, branch, from: commit.nullable(), to: commit }), z.object({ head: commit })),
   branchDelete: spec('branch.delete', z.object({ repository, branch }), z.object({ deleted: z.boolean() })),
 } as const;
 
-export type Owe = { readonly kind: string; readonly payload: unknown };
+export type Owe<K extends string = string> = { readonly kind: K; readonly payload: unknown };
 
-export const owe = <K extends string, P, R>(kind: ActionSpec<K, P, R>, payload: P): Owe => ({ kind: kind.kind, payload: kind.payload.parse(payload) });
+export const owe = <K extends string, P, R>(kind: ActionSpec<K, P, R>, payload: P): Owe<K> => ({ kind: kind.kind, payload: kind.payload.parse(payload) });
 
 export type Owing = { readonly task: string; readonly actsAs: string; readonly now: Date };
 

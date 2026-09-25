@@ -30,6 +30,7 @@ const CheckRun = z.object({
 
 export const githubPayloads = {
   ref: z.object({ ref: z.string(), object: z.object({ sha: z.string().min(1) }) }),
+  refs: z.array(z.object({ ref: z.string(), object: z.object({ sha: z.string().min(1) }) })),
   sha: z.object({ sha: z.string().min(1) }),
   status: z.object({ state: z.string(), context: z.string() }),
   pull: Pull,
@@ -47,6 +48,7 @@ export type SeedFile = { readonly path: string; readonly content: string };
 export type GitHub = {
   readonly repository: string;
   readonly branchHead: (branch: string) => Promise<string | undefined>;
+  readonly branchesStartingWith: (prefix: string) => Promise<readonly string[]>;
   readonly seedBranch: (branch: string, files: readonly SeedFile[], message: string) => Promise<string>;
   readonly pulls: (base: string) => Promise<readonly Pull[]>;
   readonly pull: (number: number) => Promise<Pull>;
@@ -70,13 +72,38 @@ const needs = (answer: Response): string => {
 
 const refPath = (branch: string): string => branch.split('/').map(encodeURIComponent).join('/');
 
+export type GitHubSettings = {
+  readonly apiUrl: string;
+  readonly token: string;
+  readonly repository: string;
+  readonly webUrl: string;
+  readonly cloneUrl: string;
+  readonly pushEnvironment: Readonly<Record<string, string>>;
+};
+
 export function githubFromEnvironment(env: NodeJS.ProcessEnv, repository: string): GitHub {
   const keys = GitHubKeys.safeParse(env);
   if (!keys.success) throw new Error('GITHUB_TOKEN is not usable');
   const token = keys.data.GITHUB_TOKEN;
+  return githubAt({
+    apiUrl: api,
+    token,
+    repository,
+    webUrl: `https://github.com/${repository}`,
+    cloneUrl: `https://github.com/${repository}.git`,
+    pushEnvironment: {
+      GIT_CONFIG_COUNT: '1',
+      GIT_CONFIG_KEY_0: 'http.https://github.com/.extraheader',
+      GIT_CONFIG_VALUE_0: `AUTHORIZATION: basic ${Buffer.from(`x-access-token:${token}`).toString('base64')}`,
+    },
+  });
+}
+
+export function githubAt(settings: GitHubSettings): GitHub {
+  const { apiUrl, token, repository } = settings;
 
   const send = async (method: Method, path: string, body?: unknown): Promise<Response> =>
-    fetch(`${api}${path}`, {
+    fetch(`${apiUrl}${path}`, {
       method,
       headers: {
         authorization: `Bearer ${token}`,
@@ -106,6 +133,8 @@ export function githubFromEnvironment(env: NodeJS.ProcessEnv, repository: string
       if (!answer.ok) throw new Error(`GitHub GET ref answered ${String(answer.status)}`);
       return parsePayload('GitHub GET ref', githubPayloads.ref, await answer.json()).object.sha;
     },
+    branchesStartingWith: async prefix =>
+      (await call('GET', `${repo}/git/matching-refs/heads/${refPath(prefix)}`, githubPayloads.refs)).map(found => found.ref.slice('refs/heads/'.length)),
     seedBranch: async (branch, files, message) => {
       const tree = await call('POST', `${repo}/git/trees`, githubPayloads.sha, {
         tree: files.map(file => ({ path: file.path, mode: '100644', type: 'blob', content: file.content })),
@@ -140,12 +169,8 @@ export function githubFromEnvironment(env: NodeJS.ProcessEnv, repository: string
       const answer = await send('DELETE', `${repo}/git/refs/heads/${refPath(branch)}`);
       if (!answer.ok && answer.status !== 422) throw new Error(`GitHub DELETE ref answered ${String(answer.status)}`);
     },
-    commitLink: sha => `https://github.com/${repository}/commit/${sha}`,
-    cloneUrl: `https://github.com/${repository}.git`,
-    pushEnvironment: {
-      GIT_CONFIG_COUNT: '1',
-      GIT_CONFIG_KEY_0: 'http.https://github.com/.extraheader',
-      GIT_CONFIG_VALUE_0: `AUTHORIZATION: basic ${Buffer.from(`x-access-token:${token}`).toString('base64')}`,
-    },
+    commitLink: sha => `${settings.webUrl}/commit/${sha}`,
+    cloneUrl: settings.cloneUrl,
+    pushEnvironment: settings.pushEnvironment,
   };
 }
