@@ -6,6 +6,8 @@ import type { Transacting } from './transaction.ts';
 const repository = z.string().regex(/^[\w.-]+\/[\w.-]+$/);
 const branch = z.string().min(1).max(255);
 const commit = z.string().regex(/^[0-9a-f]{40}$/);
+const pullRequest = { repository, number: z.int().positive() };
+
 export const ticket = z.string().regex(/^[A-Z][A-Z0-9_]*-\d+$/, { error: 'must be a ticket key such as ABC-12' });
 
 export const marker = z.string().regex(/^[A-Za-z0-9_-]{22,}$/).brand<'Marker'>();
@@ -30,10 +32,10 @@ export const actionKinds = {
     z.object({ repository, head: branch, base: branch, title: z.string().min(1), body: z.string() }),
     z.object({ number: z.int().positive(), url: z.url() }),
   ),
-  prMarkReady: spec('pr.mark-ready', z.object({ repository, head: branch, evidence: z.string().min(1) }), z.object({ number: z.int().positive() })),
-  prEvidence: spec('pr.evidence', z.object({ repository, head: branch, evidence: z.string().min(1) }), z.object({ number: z.int().positive() })),
-  prUpdateBranch: spec('pr.update-branch', z.object({ repository, head: branch, commit }), z.object({ head: commit })),
-  prMerge: spec('pr.merge', z.object({ repository, number: z.int().positive(), commit }), mergeResult),
+  prMarkReady: spec('pr.mark-ready', z.object({ ...pullRequest, evidence: z.string().min(1) }), z.object({ number: z.int().positive() })),
+  prEvidence: spec('pr.evidence', z.object({ ...pullRequest, evidence: z.string().min(1) }), z.object({ number: z.int().positive() })),
+  prUpdateBranch: spec('pr.update-branch', z.object({ ...pullRequest, commit }), z.object({ head: commit })),
+  prMerge: spec('pr.merge', z.object({ ...pullRequest, commit }), mergeResult),
   branchAdvance: spec('branch.advance', z.object({ repository, branch, from: commit.nullable(), to: commit }), z.object({ head: commit })),
   branchDelete: spec('branch.delete', z.object({ repository, branch }), z.object({ deleted: z.boolean() })),
 } as const;

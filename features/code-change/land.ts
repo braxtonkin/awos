@@ -219,14 +219,14 @@ export type Land = { readonly store: LandStore; readonly read: ReadMergeState; r
 const nothingFollows: Follow = { whenDone: [], whenAwaiting: null };
 
 function owedFor(action: Owing, task: AtLand, reading: Reading): Owe {
-  const { repository, branch } = task.pull;
+  const pull = { repository: task.pull.repository, number: reading.number };
   switch (action) {
     case 'mark-ready':
-      return owe(actionKinds.prMarkReady, { repository, head: branch, evidence: task.record.evidence });
+      return owe(actionKinds.prMarkReady, { ...pull, evidence: task.record.evidence });
     case 'update-branch':
-      return owe(actionKinds.prUpdateBranch, { repository, head: branch, commit: reading.state.head });
+      return owe(actionKinds.prUpdateBranch, { ...pull, commit: reading.state.head });
     case 'merge':
-      return owe(actionKinds.prMerge, { repository, number: reading.number, commit: reading.state.head });
+      return owe(actionKinds.prMerge, { ...pull, commit: reading.state.head });
   }
 }
 

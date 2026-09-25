@@ -58,7 +58,15 @@ async function openPull(client: GithubClient, repository: string, head: string, 
   return 'ok' in found ? found.ok.toSorted((one, other) => other.number - one.number)[0] : found;
 }
 
-const missing = (head: string): Outcome<never> => ({ failed: `No open pull request has the head branch ${head}.` });
+type Numbered = { readonly repository: string; readonly number: number };
+
+async function openNumbered(client: GithubClient, { repository, number }: Numbered, signal: AbortSignal): Promise<Pull | Outcome<never>> {
+  const found = await client.pull(repository, number, signal);
+  if (!('ok' in found)) return found.status === 404 ? { refused: { reason: `Pull request ${String(number)} of ${repository} does not exist.`, head: null } } : failed('the pull request read', found);
+  return found.ok.state === 'open' ? found.ok : { refused: { reason: `Pull request ${String(number)} of ${repository} is closed.`, head: null } };
+}
+
+const isPull = <R>(value: Pull | Outcome<R>): value is Pull => 'node_id' in value;
 
 type Opened = { readonly repository: string; readonly head: string; readonly base: string; readonly title: string; readonly body: string };
 
@@ -72,18 +80,14 @@ async function openDraft(client: GithubClient, owed: Owed<Opened>, { signal }: L
   return { done: { number: pull.number, url: pull.html_url } };
 }
 
-type EvidencePayload = { readonly repository: string; readonly head: string; readonly evidence: string };
+type EvidencePayload = Numbered & { readonly evidence: string };
 
-async function withEvidence(client: GithubClient, { repository, head, evidence }: EvidencePayload, signal: AbortSignal): Promise<Pull | Outcome<{ readonly number: number }>> {
-  const pull = await openPull(client, repository, head, signal);
-  if (pull === undefined) return missing(head);
-  if ('status' in pull) return failed('the pull request lookup', pull);
-  if (split(pull.body).evidence === evidence.trim()) return pull;
-  const written = await client.setBody(repository, pull.number, bodyWithEvidence(pull.body, evidence), signal);
+async function withEvidence(client: GithubClient, payload: EvidencePayload, signal: AbortSignal): Promise<Pull | Outcome<never>> {
+  const pull = await openNumbered(client, payload, signal);
+  if (!isPull(pull) || split(pull.body).evidence === payload.evidence.trim()) return pull;
+  const written = await client.setBody(payload.repository, pull.number, bodyWithEvidence(pull.body, payload.evidence), signal);
   return 'ok' in written ? pull : failed('the body update', written);
 }
-
-const isPull = (value: Pull | Outcome<{ readonly number: number }>): value is Pull => 'node_id' in value;
 
 async function showEvidence(client: GithubClient, owed: Owed<EvidencePayload>, { signal }: Limits): Promise<Outcome<{ readonly number: number }>> {
   const pull = await withEvidence(client, owed.payload, signal);
@@ -99,17 +103,16 @@ async function markReady(client: GithubClient, owed: Owed<EvidencePayload>, { si
   return ready.ok.draft ? { failed: `Pull request ${String(pull.number)} is still a draft after GitHub accepted the ready call.` } : { done: { number: pull.number } };
 }
 
-async function updateBranch(client: GithubClient, owed: Owed<{ readonly repository: string; readonly head: string; readonly commit: string }>, { signal }: Limits): Promise<Outcome<{ readonly head: string }>> {
-  const { repository, head, commit } = owed.payload;
-  const pull = await openPull(client, repository, head, signal);
-  if (pull === undefined) return missing(head);
-  if ('status' in pull) return failed('the pull request lookup', pull);
+async function updateBranch(client: GithubClient, owed: Owed<Numbered & { readonly commit: string }>, { signal }: Limits): Promise<Outcome<{ readonly head: string }>> {
+  const { repository, commit } = owed.payload;
+  const pull = await openNumbered(client, owed.payload, signal);
+  if (!isPull(pull)) return pull;
   if (pull.head.sha !== commit) {
     const parents = await client.parentsOf(repository, pull.head.sha, signal);
     if (!('ok' in parents)) return failed('the head commit lookup', parents);
     return parents.ok.length === 2 && parents.ok[0] === commit
       ? { done: { head: pull.head.sha } }
-      : { refused: { reason: `The head of ${head} is ${pull.head.sha}, not ${commit}.`, head: commit } };
+      : { refused: { reason: `The head of pull request ${String(pull.number)} is ${pull.head.sha}, not ${commit}.`, head: commit } };
   }
   const updated = await client.updateBranch(repository, pull.number, commit, signal);
   if ('ok' in updated || already(updated, /no new commits/i)) return { done: { head: commit } };
@@ -126,7 +129,7 @@ const weighedBefore = (facts: PullFacts, owedAt: Date): PullFacts => ({ ...facts
 
 type Merging = { readonly client: GithubClient; readonly mergeRowOf: MergeRowOf; readonly guards: MergeGuards };
 
-async function merge({ client, mergeRowOf, guards }: Merging, owed: Owed<{ readonly repository: string; readonly number: number; readonly commit: string }>, { signal }: Limits): Promise<MergeOutcome> {
+async function merge({ client, mergeRowOf, guards }: Merging, owed: Owed<Numbered & { readonly commit: string }>, { signal }: Limits): Promise<MergeOutcome> {
   const { repository, number, commit } = owed.payload;
   const row = await mergeRowOf(owed.row);
   if (row === undefined) return { failed: `Outbox row ${owed.row} does not exist.` };

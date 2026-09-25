@@ -164,12 +164,12 @@ const comment = (key: string, text: string): Owe => owe(actionKinds.ticketCommen
 const deletions = ({ repository, branches }: Verdicted): readonly Owe[] => branches.map(branch => owe(actionKinds.branchDelete, { repository: repository.github, branch }));
 
 function implemented(verdicted: Verdicted): readonly Owe[] {
-  const { ticket, repository, taskBranch, attempt, pullRequestOwed } = verdicted;
+  const { ticket, repository, taskBranch, attempt, pullRequest } = verdicted;
   const head = attempt.lastPushed ?? taskBranch.head;
   if (head === null) return deletions(verdicted);
   return [
     ...(head === taskBranch.head ? [] : [owe(actionKinds.branchAdvance, { repository: repository.github, branch: taskBranch.name, from: taskBranch.head, to: head })]),
-    ...(pullRequestOwed ? [] : [owe(actionKinds.prOpenDraft, { repository: repository.github, head: taskBranch.name, base: repository.branch, title: `${ticket.key}: ${ticket.title}`, body: ticket.title })]),
+    ...(pullRequest.kind !== 'none' ? [] : [owe(actionKinds.prOpenDraft, { repository: repository.github, head: taskBranch.name, base: repository.branch, title: `${ticket.key}: ${ticket.title}`, body: ticket.title })]),
     comment(ticket.key, 'The simulated change is on its draft pull request.'),
     ...deletions(verdicted),
   ];

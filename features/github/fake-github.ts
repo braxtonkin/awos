@@ -38,6 +38,8 @@ export type Merged = { readonly number: number; readonly head: string; readonly 
 
 export type Enqueued = { readonly number: number; readonly head: string; readonly lastEjection: string | null };
 
+export type Written = { readonly number: number; readonly what: string };
+
 export type World = {
   time: number;
   serial: number;
@@ -50,6 +52,7 @@ export type World = {
   readonly merges: Merged[];
   readonly enqueues: Enqueued[];
   calls: number;
+  readonly written: Written[];
 };
 
 export const at = (time: number): string => new Date(Date.UTC(2026, 0, 1) + time * 1000).toISOString().replace('.000Z', 'Z');
@@ -70,6 +73,7 @@ export function newWorld(settings: Settings): World {
     merges: [],
     enqueues: [],
     calls: 0,
+    written: [],
   };
 }
 
@@ -259,6 +263,7 @@ function graphql(world: World, body: unknown): Answer {
   const byNumber = world.pulls.find(pull => pull.number === given.number);
   if (parsed.query.includes('markPullRequestReadyForReview')) {
     if (byId === undefined) return graphqlError('Could not resolve to a PullRequest.');
+    world.written.push({ number: byId.number, what: 'mark ready' });
     byId.draft = false;
     return ok({ data: { markPullRequestReadyForReview: { pullRequest: { isDraft: false } } } });
   }
@@ -345,6 +350,8 @@ function rest(world: World, method: string, path: string, query: URLSearchParams
     const pull = world.pulls.find(entry => entry.number === Number.parseInt(pullRoute[1] ?? '', 10));
     if (pull === undefined) return refuse(404, 'Not Found');
     const head = headOf(world, pull);
+    if (method === 'GET' && pullRoute[2] === undefined) return ok(restPull(world, pull));
+    if (method !== 'GET') world.written.push({ number: pull.number, what: `${method} ${pullRoute[2] ?? 'body'}` });
     if (method === 'PATCH' && pullRoute[2] === undefined) {
       pull.body = String(body['body']);
       return ok(restPull(world, pull));

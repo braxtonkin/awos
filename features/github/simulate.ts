@@ -195,10 +195,10 @@ function decide(sim: Sim, task: Task, number: number, head: string, value: Merge
       task.step = task.rounds > landRounds ? 'waiting' : 'implement';
       return;
     case 'green-draft':
-      oweRow(sim, task, 'pr.mark-ready', { repository, head: task.branch, evidence: `Evidence for ${head}.` });
+      oweRow(sim, task, 'pr.mark-ready', { repository, number, head: task.branch, evidence: `Evidence for ${head}.` });
       return;
     case 'behind':
-      oweRow(sim, task, 'pr.update-branch', updated);
+      oweRow(sim, task, 'pr.update-branch', { ...updated, number });
       return;
     case 'ready':
       sim.judged.add(head);
@@ -238,12 +238,15 @@ async function perform(sim: Sim): Promise<readonly Observation[]> {
   if (row === undefined) return [];
   const owed: Owed<unknown> = { row: row.id, task: row.task.key, kind: row.kind, payload: row.payload, marker: marker.parse(`simulated-marker-${row.id.padStart(8, '0')}`), actsAs: '1' };
   sim.fault.lost = false;
+  const writes = sim.world.written.length;
   const outcome = await sim.performers[row.kind].call(owed, limits());
   const faulted = sim.fault.lost;
-  if ('failed' in outcome) return [{ kind: 'performed', action: row.kind, outcome: 'failed', faulted, detail: outcome.failed }];
+  const intended = numberIn.safeParse(row.payload);
+  const wrote: readonly Observation[] = intended.success ? sim.world.written.slice(writes).map(write => ({ kind: 'wrote', action: row.kind, intended: intended.data.number, number: write.number, what: write.what })) : [];
+  if ('failed' in outcome) return [...wrote, { kind: 'performed', action: row.kind, outcome: 'failed', faulted, detail: outcome.failed }];
   row.settled = true;
   if (mergeRefused(row, outcome)) failAttempt(row.task);
-  const observations: Observation[] = [{ kind: 'performed', action: row.kind, outcome: 'done' in outcome ? 'done' : 'refused', faulted, detail: JSON.stringify(outcome) }];
+  const observations: Observation[] = [...wrote, { kind: 'performed', action: row.kind, outcome: 'done' in outcome ? 'done' : 'refused', faulted, detail: JSON.stringify(outcome) }];
   const opened = 'done' in outcome && row.kind === 'pr.open-draft' ? numberIn.safeParse(outcome.done) : undefined;
   if (opened?.success === true) {
     row.task.opened.push(opened.data.number);
@@ -258,7 +261,9 @@ function implement(sim: Sim): void {
   const task = active(sim);
   if (task?.step !== 'implement') return;
   const from = sim.world.branches.get(task.branch) ?? '';
-  oweRow(sim, task, 'branch.advance', { repository, branch: task.branch, from, to: commitOn(sim.world, [from]) });
+  const to = commitOn(sim.world, [from]);
+  oweRow(sim, task, 'branch.advance', { repository, branch: task.branch, from, to });
+  if (task.pull !== null) oweRow(sim, task, 'pr.evidence', { repository, number: task.pull, head: task.branch, evidence: `Evidence for ${to}.` });
   task.step = 'land';
 }
 
@@ -284,7 +289,13 @@ function rerunOne(sim: Sim, pull: FakePull): void {
   if (name !== undefined) rerun(sim.world, head, name);
 }
 
+const pullActions: ReadonlySet<GithubKind> = new Set(['pr.mark-ready', 'pr.evidence', 'pr.update-branch', 'pr.merge']);
+
 const mergeOwed = (sim: Sim, pull: FakePull): boolean => sim.rows.some(row => !row.settled && row.kind === 'pr.merge' && row.task.pull === pull.number);
+
+const pullActionOwed = (sim: Sim, pull: FakePull): boolean => sim.rows.some(row => !row.settled && pullActions.has(row.kind) && row.task.pull === pull.number);
+
+const openedElsewhere = (sim: Sim, pull: FakePull): boolean => sim.world.pulls.some(other => other.branch === pull.branch && other.base !== base && !other.closed && other.merged === null);
 
 const moves: readonly Move[] = [
   { name: 'land reads the merge state', weight: 3, run: land },
@@ -361,10 +372,10 @@ const moves: readonly Move[] = [
     }),
   },
   {
-    name: 'someone opens another pull request from the head branch while the merge is owed',
-    weight: 0.3,
+    name: 'someone opens another pull request from the head branch while a pull request action is owed',
+    weight: 0.5,
     run: outside((sim, pull) => {
-      if (mergeOwed(sim, pull)) openPullRequest(sim.world, pull.branch, 'release', 'Opened by someone else.', false);
+      if (pullActionOwed(sim, pull) && !openedElsewhere(sim, pull)) openPullRequest(sim.world, pull.branch, 'release', 'Opened by someone else.', false);
     }),
   },
   {
