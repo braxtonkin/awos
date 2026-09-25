@@ -14,7 +14,8 @@ import { withPostgres, type TestPostgres } from '../../tools/verify/postgres.ts'
 import { modelShape, shapeDrift } from '../../tools/verify/model-shape.ts';
 import { defineModel, type Shape } from '../../tools/verify/models.ts';
 import { lastRealState, type TlcRun, type TraceState } from '../../tools/verify/tlc.ts';
-import { checkCatalog, type Catalog } from './catalog.ts';
+import { catalogProblems, type Audit } from '../../tools/verify/catalog.ts';
+import { checkCatalog } from './catalog.ts';
 import { claim, lostTooOften } from './claim.ts';
 import { coreRunAs } from './run-as.ts';
 import { provePlants, type PlantProof } from './invariants.ts';
@@ -594,17 +595,12 @@ function stepMutantCheck(postgres: TestPostgres, mutant: StepMutantName, options
   return mutantRuns(postgres, breaks, `${breaks.join(' or ')} fails under the ${mutant} step mutant in the ${stepMutantProfile} profile`, { profile: stepMutantProfile, seeds: seedsOf(options), steps: options.steps, step: mutant }, options);
 }
 
-function catalogCheck(catalog: Catalog): Check {
-  const name = 'every named constraint, index, and trigger has a mutant or a reason in noMutantYet';
-  const problems = [
-    ...catalog.unlisted.map(guard => `${guard} is in neither list`),
-    ...catalog.absent.map(guard => `${guard} is listed, but the schema has no such guard`),
-    ...catalog.listedTwice.map(guard => `${guard} is listed twice`),
-  ];
+function catalogCheck(catalog: Audit): Check {
+  const name = 'every named constraint, index, and trigger on the tables tasks owns, apart from those named for a feature that keeps its own catalog, has a mutant or a reason in noMutantYet';
+  const problems = catalogProblems(catalog);
   const mutated = Object.keys(storeMutants).length;
-  return problems.length === 0
-    ? pass(name, `${String(catalog.guards)} guards: ${String(mutated)} with a mutant, ${String(catalog.guards - mutated)} with a reason`)
-    : fail(name, problems.join('; '));
+  const guards = catalog.guards.length;
+  return problems.length === 0 ? pass(name, `${String(guards)} guards: ${String(mutated)} with a mutant, ${String(guards - mutated)} with a reason`) : fail(name, problems.join('; '));
 }
 
 function simulatorShapeCheck(): Check {

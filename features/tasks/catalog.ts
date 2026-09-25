@@ -1,6 +1,5 @@
-import { sql } from 'kysely';
-import { connect } from '../../shared/db/client.ts';
 import type { DB } from '../../shared/db/types.ts';
+import { auditCatalog, type Audit } from '../../tools/verify/catalog.ts';
 import type { TestPostgres } from '../../tools/verify/postgres.ts';
 import { mutants } from './simulate.ts';
 
@@ -83,7 +82,6 @@ export const noMutantYet: Readonly<Record<string, readonly string[]>> = {
   'two claims of one task count the same attempt number only when they race, and one_live_attempt_per_task already refuses the second of those as busy, so dropping this index changes nothing a property can see while that one stands; the claim refuses a collision here as busy too': [
     'one_attempt_per_branch',
   ],
-  'the routines simulator in features/routines records tasks and owns this guard, and its mutant drops it there': ['task_keeps_its_routine'],
   'the badName fault writes a bad skill, step, and workflow name and a waiting reason that is not a sentence, and its seed fails unless the domain refuses the write, but dropGuard drops only table constraints, indexes, and triggers, so a domain has no mutant yet': [
     'workflow_name_is_a_slug',
     'step_name_is_a_slug',
@@ -113,47 +111,5 @@ export const noMutantYet: Readonly<Record<string, readonly string[]>> = {
   ],
 };
 
-export type Catalog = { readonly guards: number; readonly unlisted: readonly string[]; readonly absent: readonly string[]; readonly listedTwice: readonly string[] };
-
-export async function checkCatalog(postgres: TestPostgres): Promise<Catalog> {
-  const scratch = await postgres.scratch();
-  const db = connect(scratch.url, 1);
-  try {
-    const { rows } = await sql<{ name: string }>`
-      with owned as (select unnest(${ownedTables}::regclass[]) as relation)
-      select c.conname as name
-      from pg_constraint c
-      join owned o on o.relation = c.conrelid
-      join pg_class t on t.oid = c.conrelid
-      left join pg_attribute a on a.attrelid = c.conrelid and a.attnum = c.conkey[1]
-      where not (c.contype = 'p' and c.conname = t.relname || '_pkey')
-        and not (c.contype = 'n' and c.conname = t.relname || '_' || a.attname || '_not_null')
-      union all
-      select i.relname
-      from pg_index x
-      join owned o on o.relation = x.indrelid
-      join pg_class i on i.oid = x.indexrelid
-      where not exists (select 1 from pg_constraint c where c.conindid = x.indexrelid and c.contype in ('p', 'u', 'x'))
-      union all
-      select g.tgname
-      from pg_trigger g
-      join owned o on o.relation = g.tgrelid
-      where not g.tgisinternal
-      union all
-      select c.conname
-      from pg_constraint c
-      join pg_type d on d.oid = c.contypid
-      where c.contypid <> 0 and d.typnamespace = 'public'::regnamespace`.execute(db);
-    const guards = new Set(rows.map(row => row.name));
-    const listed = [...Object.keys(mutants), ...Object.values(noMutantYet).flat()];
-    return {
-      guards: guards.size,
-      unlisted: [...guards].filter(name => !listed.includes(name)).sort(),
-      absent: listed.filter(name => !guards.has(name)).sort(),
-      listedTwice: [...new Set(listed.filter((name, index) => listed.indexOf(name) !== index))].sort(),
-    };
-  } finally {
-    await db.destroy();
-    await scratch.drop();
-  }
-}
+export const checkCatalog = (postgres: TestPostgres): Promise<Audit> =>
+  auditCatalog(postgres, { tables: ownedTables, domains: true }, { mutated: Object.keys(mutants), reasoned: Object.values(noMutantYet).flat() });

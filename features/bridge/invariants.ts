@@ -251,6 +251,29 @@ export const properties = {
         and not exists (select 1 from sim_outage o where o.up_at = l.renewed_to - make_interval(secs => ${sql.lit(worldLeaseMs / 1000)}))`,
     plants: [{ setup: [], violation: sql`update attempt set lease_until = ${t0} + interval '100 seconds' where id = 1` }],
   },
+  TokenIsAHash: {
+    moment: 'each-step',
+    breaks: sql`select id as attempt, length(bridge_token_hash) as bytes from attempt where length(bridge_token_hash) <> 32`,
+    plants: [{ setup: [sql`alter table attempt drop constraint bridge_token_is_a_hash`], violation: sql`update attempt set bridge_token_hash = decode('00', 'hex') where id = 1` }],
+  },
+  ProcessFollowsItsToken: {
+    moment: 'each-step',
+    breaks: sql`select id as attempt, bridge_process from attempt where bridge_process is not null and bridge_token_hash is null`,
+    plants: [
+      {
+        setup: [sql`alter table attempt drop constraint bridge_process_follows_its_token`],
+        violation: sql`update attempt set bridge_process = '00000000-0000-4000-8000-000000007001' where id = 1`,
+      },
+    ],
+  },
+  CountersStayWhole: {
+    moment: 'each-step',
+    breaks: sql`select id as attempt, high_water, commands_received from attempt where high_water < 0 or commands_received < 0`,
+    plants: [
+      { setup: [sql`alter table attempt drop constraint bridge_high_water_counts_lines`], violation: sql`update attempt set high_water = -1 where id = 1` },
+      { setup: [sql`alter table attempt drop constraint bridge_received_counts_commands`], violation: sql`update attempt set commands_received = -1 where id = 1` },
+    ],
+  },
 } satisfies Readonly<Record<string, Property>>;
 
 export type PropertyName = keyof typeof properties;

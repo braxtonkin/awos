@@ -10,10 +10,12 @@ import { z } from 'zod';
 import { connect, type Database } from '../../shared/db/client.ts';
 import { neverStops, runLoop, type Clock } from '../../shared/loop.ts';
 import type { Workflow } from '../../shared/workflow.ts';
+import { catalogProblems } from '../../tools/verify/catalog.ts';
 import { fail, pass, type Check, type Scenario } from '../../tools/verify/check.ts';
 import { defineModel, type Shape } from '../../tools/verify/models.ts';
 import { withPostgres, type TestPostgres } from '../../tools/verify/postgres.ts';
 import { lastRealState, type TlcRun, type TraceState } from '../../tools/verify/tlc.ts';
+import { checkCatalog } from './catalog.ts';
 import { provePlants } from './invariants.ts';
 import { scheduleSource } from './schedule-source.ts';
 import { scheduler } from './scheduler.ts';
@@ -319,10 +321,17 @@ async function plantChecks(postgres: TestPostgres): Promise<readonly Check[]> {
   });
 }
 
+async function catalogCheck(postgres: TestPostgres): Promise<Check> {
+  const audit = await checkCatalog(postgres);
+  const problems = catalogProblems(audit);
+  const name = 'every named constraint, index, and trigger on routine_run and routine_overlap, and every one named routines_ on any table, has a mutant or a reason in noMutantYet';
+  return problems.length === 0 ? pass(name, audit.guards.join(', ')) : fail(name, problems.join('; '));
+}
+
 async function simulationChecks(postgres: TestPostgres, given: Options): Promise<readonly Check[]> {
   if (given.mutant !== undefined) {
     const names = given.mutant === 'all' ? mutantName.options : [given.mutant];
-    const checks: Check[] = [];
+    const checks: Check[] = given.mutant === 'all' ? [await catalogCheck(postgres)] : [];
     for (const name of names) checks.push(await mutantCheck(postgres, name, given));
     return checks;
   }
