@@ -18,7 +18,8 @@ type Task = {
 };
 
 type Standing =
-  | { readonly state: 'ready' | 'done' | 'stopped' }
+  | { readonly state: 'ready' | 'done' }
+  | { readonly state: 'stopped'; readonly review: string | null }
   | { readonly state: 'waiting'; readonly on: 'retry' | 'outside_approval'; readonly reason: Instruction }
   | { readonly state: 'waiting'; readonly on: 'approval' | 'answer'; readonly reason: Instruction; readonly review: string };
 
@@ -55,13 +56,13 @@ const kept = (task: Task): Next => ({ step: task.step, retries: task.retries, in
 
 const park = (next: Next, reason: Instruction): Next => ({ ...next, standing: { state: 'waiting', on: 'retry', reason } });
 
+const gateWait = (task: Task, next: string, review: string): Standing => ({ state: 'waiting', on: 'approval', reason: approveOrSendBack(task.step, task.key, next), review });
+
 function passed(workflow: Workflow, task: Task, kind: StepKind, attempt: string): Next {
   const base: Next = { ...kept(task), counts: without(task.counts, [...charges(kind, 'return'), ...charges(kind, 'rerun')]), retries: 0, inputWaits: 0 };
   const next = after(workflow, kind.name);
   if (next === undefined || kind.name === task.end) return { ...base, standing: { state: 'done' } };
-  if (task.gates.includes(kind.name) && !task.approved.includes(kind.name)) {
-    return { ...base, standing: { state: 'waiting', on: 'approval', reason: approveOrSendBack(kind.name, task.key, next), review: attempt } };
-  }
+  if (task.gates.includes(kind.name) && !task.approved.includes(kind.name)) return { ...base, standing: gateWait(task, next, attempt) };
   return { ...base, step: next };
 }
 
@@ -137,7 +138,10 @@ export function decide(workflow: Workflow, task: Task, verdict: StepVerdict, att
   return judged(workflow, task, kind, failure, attempt);
 }
 
-export const waitingOn = (standing: Standing): WaitingOn | null => (standing.state === 'waiting' ? standing.on : null);
+export function waitingOn(standing: Standing): WaitingOn | null {
+  if (standing.state === 'waiting') return standing.on;
+  return standing.state === 'stopped' && standing.review !== null ? 'approval' : null;
+}
 
 export type Held = Task & {
   readonly state: 'ready' | 'waiting' | 'stopped' | 'done';
@@ -168,18 +172,23 @@ export function allows(task: Held, offer: Offer): Decision | Refused {
   }
 }
 
+function afterGate(task: Held, workflow: Workflow): string {
+  const next = after(workflow, task.step);
+  if (next === undefined) throw new Error(`Task ${task.key} waits at a gate on ${task.step}, the last step of ${workflow.name}, which no gate can follow.`);
+  return next;
+}
+
 export function retried(task: Held, workflow: Workflow): Next {
+  if (task.state === 'stopped' && task.waitingOn === 'approval' && task.review !== null) return { ...kept(task), standing: gateWait(task, afterGate(task, workflow), task.review) };
   const reviewCounters = workflow.steps.flatMap(kind => charges(kind, 'review'));
   return { ...kept(task), counts: Object.fromEntries(Object.entries(task.counts).filter(([counter]) => reviewCounters.includes(counter))), retries: 0, inputWaits: 0 };
 }
 
-export const stopped = (task: Held): Next => ({ ...kept(task), standing: { state: 'stopped' } });
+export const stopped = (task: Held): Next => ({ ...kept(task), standing: { state: 'stopped', review: task.state === 'waiting' && task.waitingOn === 'approval' ? task.review : null } });
 
 export const lastStepOf = (workflow: Workflow): string => workflow.steps.at(-1)?.name ?? workflow.steps[0].name;
 
 export function approved(task: Held, workflow: Workflow): Next {
   if (task.waitingOn !== 'approval') return { ...kept(task), retries: 0 };
-  const next = after(workflow, task.step);
-  if (next === undefined) throw new Error(`Task ${task.key} waits at a gate on ${task.step}, the last step of ${workflow.name}, which no gate can follow.`);
-  return { ...kept(task), step: next, approved: [...task.approved, task.step] };
+  return { ...kept(task), step: afterGate(task, workflow), approved: [...task.approved, task.step] };
 }

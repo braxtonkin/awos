@@ -264,6 +264,7 @@ const mutants: readonly Mutant[] = [
   invariant('RetryResumesStopped', 'Retry cannot resume a stopped task', 'StoppedTaskCanResume'),
   action('RetryKeepsReviews', "a person's retry forgets the review return", 'ReviewsOnlyGrow'),
   invariant('RetryKeepsApprovals', "a person's retry forgets the task's approvals", 'StoppedTaskCanResume'),
+  action('RetryWaitsAtGate', 'Retry after a Stop at a gate reruns the gated step', 'GateStopResumesAtGate'),
   unsettled('VerifyPassKeepsLandRounds', 'a Verify pass clears the Land rounds of a task with no gate', loopsFromLandToImplement),
   unsettled('OutsideApprovalsAreFinite', 'outside approvals may never stop', approvesForever),
   action('OutsideApprovalNeedsAWait', 'an outside approval resumes a task that is not awaiting one', 'TaskChangesOnlyWithItsAttempt'),
@@ -541,6 +542,7 @@ async function profileChecks(postgres: TestPostgres, profile: ProfileName, optio
     ...(profile === 'races' ? [everyBurstHasOneWinner(runs)] : []),
     ...(profile === 'hangs' ? [everyHungAttemptLost(runs)] : []),
     ...(profile === 'reviews' ? [laterReviewsReached(runs)] : []),
+    ...(profile === 'people' ? [gateStopsRetried(runs)] : []),
     ...(engineProfiles.has(profile) ? [releasesWithinOneInterval(profile, runs), everyReleaseLoggedOnce(profile, runs)] : []),
     ...(profile === 'db-pause' ? [outagesLoggedAndResumed(runs)] : []),
     ...(profile === 'jobs' ? [jobFaultsReached(runs)] : []),
@@ -553,6 +555,12 @@ function laterReviewsReached(runs: readonly Run[]): Check {
   const name = 'reviews: a review past the cap asked for changes at Land, so LaterReviewWaitsForAPerson had a case to check';
   const reached = laterReviews(runs);
   return reached > 0 ? pass(name, `${String(reached)} later reviews across ${String(runs.length)} seeds`) : fail(name, `none across ${String(runs.length)} seeds`);
+}
+
+function gateStopsRetried(runs: readonly Run[]): Check {
+  const name = 'people: a person retried a task stopped at a gate, so GateStopResumesAtGate had a case to check';
+  const reached = runs.reduce((sum, run) => sum + (run.tally['retry at a gate'] ?? 0), 0);
+  return reached > 0 ? pass(name, `${String(reached)} retries at a gate across ${String(runs.length)} seeds`) : fail(name, `none across ${String(runs.length)} seeds`);
 }
 
 function everyWeightedFaultFired(profile: ProfileName, runs: readonly Run[]): Check {

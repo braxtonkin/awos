@@ -88,7 +88,7 @@ const columnsOf = (next: Next, stoppedBy: string | null = null) => ({
   state: next.standing.state,
   waiting_on: waitingOn(next.standing),
   waiting_reason: next.standing.state === 'waiting' ? next.standing.reason : null,
-  review_attempt: next.standing.state === 'waiting' && 'review' in next.standing ? next.standing.review : null,
+  review_attempt: 'review' in next.standing ? next.standing.review : null,
   retries: next.retries,
   input_waits: next.inputWaits,
   counts: { ...next.counts },

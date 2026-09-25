@@ -730,11 +730,19 @@ function verdictFor(turn: Turn, kind: StepKind): { readonly verdict: StepVerdict
   return chosen === undefined ? undefined : { verdict: chosen, effect: declared.find(([verdict]) => verdict === chosen)?.[1] ?? 'pass' };
 }
 
-async function tasksWhere(db: Database, filter: 'stoppable' | 'retryable' | 'review' | 'outside' | 'done'): Promise<readonly { readonly id: string; readonly review: string | null }[]> {
-  const base = db.selectFrom('task').select(['task.id', 'task.review_attempt as review']).orderBy('task.id');
+type Offered = { readonly id: string; readonly state: string; readonly review: string | null };
+
+type Pool = 'stoppable' | 'gated' | 'stopped' | 'retryable' | 'review' | 'outside' | 'done';
+
+async function tasksWhere(db: Database, filter: Pool): Promise<readonly Offered[]> {
+  const base = db.selectFrom('task').select(['task.id', 'task.state', 'task.review_attempt as review']).orderBy('task.id');
   switch (filter) {
     case 'stoppable':
       return base.where('task.state', 'in', ['ready', 'waiting']).execute();
+    case 'gated':
+      return base.where('task.state', '=', 'waiting').where('task.waiting_on', '=', 'approval').execute();
+    case 'stopped':
+      return base.where('task.state', '=', 'stopped').execute();
     case 'retryable':
       return base.where(eb => eb.or([eb('task.state', 'in', ['ready', 'stopped']), eb.and([eb('task.state', '=', 'waiting'), eb('task.waiting_on', '<>', 'approval')])])).execute();
     case 'review':
@@ -746,7 +754,10 @@ async function tasksWhere(db: Database, filter: 'stoppable' | 'retryable' | 'rev
   }
 }
 
-async function personActs(turn: Turn, pool: 'stoppable' | 'retryable' | 'review', action: (task: { readonly id: string; readonly review: string | null }) => PersonAction | undefined, label: string): Promise<string> {
+const leaning = async (turn: Turn, rare: Pool, otherwise: Pool): Promise<Pool> =>
+  (await tasksWhere(turn.db, rare)).length > 0 && turn.random() < 0.8 ? rare : otherwise;
+
+async function personActs(turn: Turn, pool: Pool, action: (task: Offered) => PersonAction | undefined, label: string): Promise<string> {
   const { db, world, random, now } = turn;
   const task = pick(random, await tasksWhere(db, pool));
   const person = pick(random, world.people);
@@ -936,11 +947,20 @@ const rules: Readonly<Record<Move, Rule>> = {
   },
   stop: {
     allowed: (_world, quiet) => !quiet,
-    perform: turn => personActs(turn, 'stoppable', () => ({ kind: 'stop' }), 'stop'),
+    perform: async turn => personActs(turn, await leaning(turn, 'gated', 'stoppable'), () => ({ kind: 'stop' }), 'stop'),
   },
   retry: {
     allowed: (_world, quiet) => !quiet,
-    perform: turn => personActs(turn, 'retryable', () => ({ kind: 'retry', note: turn.random() < 0.5 ? null : aNote(turn.random) }), 'retry'),
+    perform: async turn =>
+      personActs(
+        turn,
+        await leaning(turn, 'stopped', 'retryable'),
+        task => {
+          if (task.state === 'stopped' && task.review !== null) count(turn.world, 'retry at a gate');
+          return { kind: 'retry', note: turn.random() < 0.5 ? null : aNote(turn.random) };
+        },
+        'retry',
+      ),
   },
   approve: {
     allowed: (_world, quiet) => !quiet,

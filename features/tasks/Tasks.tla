@@ -62,7 +62,8 @@ CONSTANTS
     LostApprovalStaysLost,
     LapsedLeaseCannotRenew,
     RefusedLaunchIsNotLost,
-    FailedLaunchRelaunches
+    FailedLaunchRelaunches,
+    RetryWaitsAtGate
 
 CodeChangeSteps == <<"specify", "implement", "verify", "land">>
 
@@ -356,7 +357,7 @@ LateResult(t) ==
 Stop(t) ==
     /\ Spent < MaxHumanActions
     /\ task[t].state \in IF StopSparesDoneTasks THEN {"ready"} \cup Waiting ELSE {"ready", "done"} \cup Waiting
-    /\ task' = [task EXCEPT ![t].state = "stopped", ![t].passed = FALSE]
+    /\ task' = [task EXCEPT ![t].state = "stopped", ![t].passed = @ /\ task[t].state = "gated"]
     /\ IF StopEndsAttempt THEN EndAttemptsOn(t) ELSE UNCHANGED <<attempt, worker, lateResults, claimEpoch, runAs, launchFaults>>
     /\ humanActions' = [humanActions EXCEPT ![t] = @ + 1]
     /\ UNCHANGED <<runnable, reassignments, launchFaults>>
@@ -375,10 +376,17 @@ Retried(current) ==
                     !.passed = FALSE,
                     !.outputs = IF RetryKeepsOutputs THEN @ ELSE {}]
 
+StoppedAtGate(current) == current.state = "stopped" /\ current.passed
+
+Resumed(current) ==
+    IF RetryWaitsAtGate /\ StoppedAtGate(current)
+    THEN [current EXCEPT !.state = "gated", !.lost = 0]
+    ELSE Retried(current)
+
 Retry(t) ==
     /\ Spent < MaxHumanActions
     /\ task[t].state \in RetriesFrom
-    /\ task' = [task EXCEPT ![t] = Retried(@)]
+    /\ task' = [task EXCEPT ![t] = Resumed(@)]
     /\ IF RetryEndsAttempt THEN EndAttemptsOn(t) ELSE UNCHANGED <<attempt, worker, lateResults, claimEpoch, runAs, launchFaults>>
     /\ humanActions' = [humanActions EXCEPT ![t] = @ + 1]
     /\ UNCHANGED <<runnable, reassignments, launchFaults>>
@@ -475,13 +483,17 @@ ReviewReturnsCapped == \A t \in Tasks : task[t].reviews <= MaxReviewReturns
 
 StoppedTaskCanResume ==
     \A t \in Tasks : task[t].state = "stopped" =>
-        LET resumed == Retried(task[t])
+        LET resumed == Resumed(task[t])
         IN /\ "stopped" \in RetriesFrom
-           /\ resumed.state = "ready"
+           /\ resumed.state \in {"ready", "gated"}
            /\ resumed.step = task[t].step
            /\ resumed.outputs = task[t].outputs
            /\ resumed.approved = task[t].approved
            /\ resumed.reviews = task[t].reviews
+
+GateStopResumesAtGate ==
+    [][\A t \in Tasks : StoppedAtGate(task[t]) /\ task'[t].state # "stopped" =>
+          task'[t].state = "gated" /\ task'[t].step = task[t].step /\ task'[t].passed]_vars
 
 TaskChangesOnlyWithItsAttempt ==
     [][\A t \in Tasks : task'[t] # task[t] => AttemptEndsOn(t) \/ PersonActsOn(t) \/ OutsideApproves(t) \/ FoundNoOne(t) \/ ApprovalGoesMissing(t)]_vars

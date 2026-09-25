@@ -266,7 +266,7 @@ export const properties = {
     moment: 'each-step',
     breaks: sql`select s.id, s.was_step, s.step, s.was_approved, s.approved from diff s
       where s.id in (select task_id from acted where kind = 'retry_task') and s.was_state = 'stopped'
-        and (s.state <> 'ready'
+        and ((s.state <> 'ready' and not (s.state = 'waiting' and s.waiting_on = 'approval'))
              or s.step <> s.was_step
              or s.approved is distinct from s.was_approved
              or not (s.was_outputs <@ s.outputs)
@@ -291,6 +291,34 @@ export const properties = {
         ],
         violation: sql`insert into human_action (id, at, person_id, kind, task_id)
                        values ('00000000-0000-4000-8000-000000000007', ${t0} + interval '3 seconds', 1, 'retry_task', 1)`,
+      },
+    ],
+  },
+  GateStopResumesAtGate: {
+    moment: 'each-step',
+    breaks: sql`select s.id, s.was_state, s.state, s.was_step, s.step, s.was_waiting_on, s.waiting_on, s.was_review, s.review from diff s
+      where s.was_waiting_on = 'approval' and s.state <> s.was_state and s.state in ('stopped', 'waiting', 'ready')
+        and s.id in (select task_id from acted where kind in ('stop_task', 'retry_task'))
+        and s.id not in (select task_id from acted where kind in ('approve', 'send_back'))
+        and not (s.waiting_on is not distinct from 'approval' and s.step = s.was_step and s.review is not distinct from s.was_review)`,
+    plants: [
+      {
+        setup: [finishedAttempt('specify', 'pass'), gatedAt('specify')],
+        violation: sql`with stopped as (insert into human_action (id, at, person_id, kind, task_id)
+                         values ('00000000-0000-4000-8000-000000000006', ${t0} + interval '2 seconds', 1, 'stop_task', 1) returning id, task_id)
+                       update task set state = 'stopped', stopped_by = stopped.id, waiting_on = null, waiting_reason = null, review_attempt = null
+                       from stopped where task.id = stopped.task_id`,
+      },
+      {
+        setup: [
+          finishedAttempt('specify', 'pass'),
+          gatedAt('specify'),
+          personActs('stop_task', '00000000-0000-4000-8000-000000000006'),
+          sql`update task set state = 'stopped', stopped_by = '00000000-0000-4000-8000-000000000006', waiting_reason = null where id = 1`,
+        ],
+        violation: sql`with retried as (insert into human_action (id, at, person_id, kind, task_id)
+                         values ('00000000-0000-4000-8000-000000000007', ${t0} + interval '3 seconds', 1, 'retry_task', 1) returning task_id)
+                       update task set state = 'ready', stopped_by = null, waiting_on = null, review_attempt = null from retried where task.id = retried.task_id`,
       },
     ],
   },
@@ -811,7 +839,7 @@ const helpers = (workflows: readonly Workflow[], everyMs: number) => sql`
            array(select a::text from unnest(task.approved) a order by 1) as approved,
            array(select distinct a.step::text from attempt a where a.task_id = task.id and a.verdict = 'pass' order by 1) as outputs,
            latest.id as latest, latest.verdict as latest_verdict,
-           task.waiting_reason,
+           task.waiting_reason, task.review_attempt as review,
            coalesce((select r.run_as_id from routine r where r.id = task.routine_id), (select p.id from person p where p.jira_account_id = task.assignee_account_id)) as runs_as
     from task
     left join lateral (
@@ -820,7 +848,7 @@ const helpers = (workflows: readonly Workflow[], everyMs: number) => sql`
   was as (
     select * from jsonb_to_recordset(coalesce(before->'tasks', '[]'))
       as w(id bigint, step text, state task_state, waiting_on waiting_on, retries int, lost int, input_waits int, counts jsonb,
-           approved text[], outputs text[], latest bigint, latest_verdict verdict)),
+           approved text[], outputs text[], review bigint, latest bigint, latest_verdict verdict)),
   written as (select a.* from attempt a, prior p where age(a.xmin) < age(p.xid)),
   ended as (select a.task_id, a.id, a.verdict from attempt a, prior p where a.finished_at is not null and a.id = any(p.live)),
   judged as (
@@ -837,7 +865,7 @@ const helpers = (workflows: readonly Workflow[], everyMs: number) => sql`
     select r.id, r.workflow, w.step as was_step, r.step, w.state as was_state, r.state, w.waiting_on as was_waiting_on, r.waiting_on,
            w.retries as was_retries, r.retries, w.lost as was_lost, r.lost, w.input_waits as was_input_waits, r.input_waits,
            w.counts as was_counts, r.counts, w.approved as was_approved, r.approved, w.outputs as was_outputs, r.outputs,
-           w.latest as was_latest, w.latest_verdict as was_latest_verdict, r.waiting_reason,
+           w.latest as was_latest, w.latest_verdict as was_latest_verdict, r.waiting_reason, r.review, w.review as was_review,
            exists (select 1 from attempt a, prior p where a.task_id = r.id and a.id = any(p.live)) as was_live,
            r.runs_as
     from record r join was w on w.id = r.id),
@@ -886,7 +914,7 @@ const install = (workflows: readonly Workflow[], everyMs: number) => sql`
           'pushed', coalesce((select jsonb_object_agg(id::text, last_pushed) from attempt where finished_at is not null), '{}'::jsonb),
           'live', coalesce((select jsonb_agg(id) from attempt where finished_at is null), '[]'::jsonb),
           'tasks', coalesce((select jsonb_agg(jsonb_build_object('id', id, 'step', step, 'state', state, 'waiting_on', waiting_on,
-            'retries', retries, 'lost', lost, 'input_waits', input_waits, 'counts', counts, 'approved', approved, 'outputs', outputs,
+            'retries', retries, 'lost', lost, 'input_waits', input_waits, 'counts', counts, 'approved', approved, 'outputs', outputs, 'review', review,
             'latest', latest, 'latest_verdict', latest_verdict)) from record), '[]'::jsonb),
           'leases', coalesce((select jsonb_agg(jsonb_build_object('id', id, 'lease_until', lease_until)) from attempt where finished_at is null), '[]'::jsonb),
           'missing', coalesce((select jsonb_agg(jsonb_build_object('id', id, 'missing', missing)) from gated), '[]'::jsonb))));

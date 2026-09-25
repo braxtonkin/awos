@@ -27,6 +27,7 @@ export const noMutantYet: Readonly<Record<string, readonly string[]>> = {
     'review_when_judged',
     'waiting_has_reason',
     'waiting_says_on_what',
+    'only_a_gate_stop_keeps_its_wait',
     'review_wait_names_its_review',
     'counts_are_an_object',
     'stopped_has_stop_action',

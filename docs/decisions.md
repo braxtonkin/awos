@@ -493,7 +493,7 @@ Rejected options:
 
 ### Retry after a Stop at a gate resumes waiting at the gate
 
-Decided 24 Sep 2026. Take a task that a person stops while it waits at a gate. Retry returns it to waiting for Approve on the same review. The gated step already passed, so its work stays. A person who wants the step done again uses Send back, which takes a note. Today's code still reruns the step. The task model and Retry change to this rule in a later unit.
+Decided 24 Sep 2026. Take a task that a person stops while it waits at a gate. Retry returns it to waiting for Approve on the same review. The gated step already passed, so its work stays. A person who wants the step done again uses Send back, which takes a note. The rule holds in the task model, where `GateStopResumesAtGate` checks it, and in the code: a stopped task keeps the gate's review, and Retry makes it wait on that review again.
 
 Rejected options:
 
