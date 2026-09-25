@@ -51,6 +51,7 @@ jobs:
       - run: docker compose run --rm verify npm run verify -- environments-sim --profile all
       - run: docker compose run --rm verify npm run verify -- outbox-sim --profile all
       - run: docker compose run --rm verify npm run verify -- routines-sim --profile all
+      - run: docker compose run --rm verify npm run verify -- requests-sim --profile all
       - run: docker compose run --rm verify npm run verify -- bridge-sim --seeds 20
 
   simulation:

@@ -41,6 +41,8 @@ export type OutboxState = "done" | "dropped" | "failed" | "owed" | "refused";
 
 export type PersonKind = "person" | "shared";
 
+export type RequestAnswer = "recorded" | "refused";
+
 export type RunOutcome = "done" | "failed" | "lost" | "paused";
 
 export type RunReason = "run_now" | "schedule";
@@ -178,6 +180,22 @@ export interface Person {
   name: string;
 }
 
+export interface PersonRequest {
+  action_id: Generated<string | null>;
+  answer: RequestAnswer | null;
+  answered_at: Timestamp | null;
+  at: Timestamp;
+  id: string;
+  kind: string;
+  payload: Json;
+  person_id: Int8;
+  position: Generated<number>;
+  reason: string | null;
+  routine_id: Int8 | null;
+  target: Generated<string | null>;
+  task_id: Int8 | null;
+}
+
 export interface Repository {
   branch: string;
   draft_leaves: Generated<DraftLeaves>;
@@ -300,6 +318,7 @@ export interface DB {
   human_action: HumanAction;
   outbox: Outbox;
   person: Person;
+  person_request: PersonRequest;
   repository: Repository;
   routine: Routine;
   routine_overlap: RoutineOverlap;

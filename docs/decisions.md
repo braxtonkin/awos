@@ -600,11 +600,91 @@ Rejected options:
 - **Add the DOM library to the sandbox's `lib`.** It declares every missing name at once, but it types browser globals such as `document` in code that runs on Node, and the sandbox would typecheck under other globals than the root typecheck gives the same files.
 - **Keep a second copy under `features/e2e/sandbox/types/` and exclude it from the root tsconfig.** The repository would hold two copies that can drift, and the root tsconfig would gain an exclusion that only this folder needs.
 
+### A person's action reaches the engine as a request row
+
+Decided 25 Sep 2026 by the coordinator, as Q8 of the dashboard plan. A button on the dashboard, like `act.ts` on the command line, writes one `person_request` row. The engine's `requests` loop applies it with the same task and routine code the command line used, then records the answer on the row. Only the engine changes a task, so a dashboard deployed at another version cannot apply older rules, and the dashboard's role can insert and read requests and nothing more. `features/requests/Requests.tla` models the loop, and the AGENTS.md paved path "Person requests" says how it is built. A request's place in its target's line follows commit order, one transaction applies and answers each request, and a handler that throws gets a refusal written in a new transaction.
+
+Rejected options:
+
+- **The dashboard runs the task code itself.** It needs a second list of workflows and grants to write tasks, attempts, and the outbox, and two versions of the rules can then act on one task.
+- **The dashboard calls a new engine endpoint over HTTP.** A request then dies with the engine that took it, and the engine gains an HTTP surface that needs its own auth.
+- **Order requests by the time the dashboard stamps on them, or by a sequence.** Either can put a request that commits later ahead of one already applied, which `KeyFollowsCommitOrder` in the model rules out.
+- **Apply every request of a pass in one transaction.** One failing handler would then roll back or hold every target's requests.
+
+### The board shows one row per workflow
+
+Decided 25 Sep 2026 by the owner, as Q1 of the dashboard plan. Each workflow that has tasks gets a board row, with its columns taken from that workflow's own published steps. A fork's workflow gets its row with no page code, and approvals of every workflow also stay in Needs you.
+
+Rejected options:
+
+- **One approval lane for all.** One "Waiting for approval" lane across every workflow, beside Code change's columns.
+- **The board shows Code change only.** Other workflows appear only in Needs you and the task list.
+
+### A failed task that needs a person shows red Failed beside amber Needs you
+
+Decided 25 Sep 2026 by the owner, as Q3 of the dashboard plan. Each label carries its own word, so color never carries the meaning alone. Failed means the task waits for a Retry after a failing verdict.
+
+Rejected options:
+
+- **Amber only.** The failure is stated only in the one-sentence reason.
+- **Red only.** The failure is the reason a person is needed.
+
+### The screen word limit counts one view
+
+Decided 25 Sep 2026 by the owner, as Q4 of the dashboard plan. The 244-word limit counts the page as the person sees it, with its open tab, above the fold. Each tab is its own screen in the checks.
+
+Rejected options:
+
+- **Per page, every tab counted.** All tabs' words count at once, which pushes content off the page.
+- **Per screen, with a higher limit for pages with tabs.** A page with tabs gets a larger budget.
+
+### Two full-effort reviewers judge each page group
+
+Decided 25 Sep 2026 by the owner, as Q5 of the dashboard plan. A screen passes only when every automatic check passes and two independent full-effort reviewers each score it 4 or better. The prototype's six groups get their 12 reviewer runs once, and each page unit ends with two reviewers on its own group.
+
+Rejected options:
+
+- **One full-effort reviewer per group.** Half the cost, with no second opinion.
+- **Real pages only.** Skip the prototype's groups, and review only the real pages as they are built.
+
+### The dashboard ships a person picker with no guard
+
+Decided 25 Sep 2026 by the owner, as Q6 of the dashboard plan. A person picks who they are from a list, anyone can act as anyone, and every action is recorded under the person picked. The dashboard does not refuse to start on a public address. Picking a person runs an agent with that person's GitHub token and ChatGPT account, so whoever can reach the page can act as anyone listed.
+
+Rejected options:
+
+- **A guarded picker now, and a sign-in plan later.** The picker would sit behind an identity plug-in point, and the dashboard would refuse to start with the picker unless its address is a loopback address.
+- **Company sign-in in this batch.** OpenID Connect sign-in as an extra unit before the batch ships.
+
+### The dashboard runs on the local kind cluster, in its own pod
+
+Decided 25 Sep 2026 by the owner, as Q7 of the dashboard plan. The dashboard and the engine run in separate pods on the local kind cluster, with manifests for both services. This is closer to production than a service on the owner's machine, and it is more work now.
+
+Rejected options:
+
+- **The owner's machine, local only.** A `dashboard` service in `compose.yaml` published only on `127.0.0.1:4850`.
+- **A shared cluster.** Others could use it, but that needs real sign-in first.
+
+### The Overview shows what needs you first
+
+Decided 25 Sep 2026 by the owner, as Q9 of the dashboard plan. The Overview opens on the tasks waiting on the person picked, with their notes, then gates to approve, then logins near expiry, and running work after that. The board and the full task list are one click away.
+
+Rejected options:
+
+- **The board first.** Every task by step, at a glance.
+- **Every task first.** The full list, sortable.
+
+### A person gives AutoWorker a Codex login by pasting an auth.json
+
+Decided 25 Sep 2026 by the owner, as Q10 of the dashboard plan. A person pastes a Codex login file and marks it as made for AutoWorker. A copied login can sign out the person's own Codex when AutoWorker refreshes it. The owner would prefer the Connect button if company policy allows the device login, and notes that the agent layer may need to support other coding agents, such as Cursor, later.
+
+Rejected options:
+
+- **A Connect button with the device login.** No file handling, and the login is AutoWorker's own from the start, but company policy may not allow it.
+- **The setup file only.** Logins arrive only through the setup file, and the dashboard shows them read-only.
+
 ## Open
 
 Each open question names the current lean or default. A lean is not a decision.
 
-- **What the dashboard's Overview shows first.** The lean is what needs the person picked, with the pipeline board and the history one click away.
 - **When AutoWorker posts to chat.** The default is to post when a task parks as waiting, when a routine is overdue, and once a day as a digest.
-- **When sign-in becomes necessary.** Runs now carry personal logins, so picking a person runs an agent with that person's GitHub token and ChatGPT account. The lean is to add sign-in before the first run with real personal credentials.
-- **How a person gives AutoWorker a Codex login.** The lean is a Connect button that has the engine run `codex login --device-auth` and show the person its link and code, so the login is made for AutoWorker by construction.

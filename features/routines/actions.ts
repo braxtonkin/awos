@@ -1,73 +1,71 @@
-import { randomUUID } from 'node:crypto';
 import { sql } from 'kysely';
-import type { Database } from '../../shared/db/client.ts';
+import type { Transacting } from '../../shared/transaction.ts';
 import type { Instruction } from '../../shared/workflow.ts';
 
 export const resumeToRun: Instruction = 'Resume to run.';
 
+export type RoutineAction = { readonly id: string; readonly person: string; readonly at: Date };
+
 export type Pressed = 'pressed' | 'already-waiting' | { readonly refused: Instruction };
 
-class Unchanged extends Error {}
+const pausedBy = (tx: Transacting, routine: string): Promise<string | null> =>
+  tx
+    .selectFrom('routine')
+    .select('paused_by')
+    .where('id', '=', routine)
+    .forNoKeyUpdate()
+    .executeTakeFirstOrThrow()
+    .then(found => found.paused_by);
 
-async function unlessUnchanged<T>(work: () => Promise<T>, unchanged: T): Promise<T> {
-  try {
-    return await work();
-  } catch (error) {
-    if (error instanceof Unchanged) return unchanged;
-    throw error;
-  }
+export async function pauseWithin(tx: Transacting, routine: string, action: RoutineAction): Promise<'paused' | 'already-paused'> {
+  if ((await pausedBy(tx, routine)) !== null) return 'already-paused';
+  await tx.insertInto('human_action').values({ id: action.id, at: action.at, person_id: action.person, kind: 'pause_routine', routine_id: routine }).execute();
+  await tx.updateTable('routine').set({ paused_by: action.id }).where('id', '=', routine).execute();
+  return 'paused';
 }
 
-export function pause(db: Database, routine: string, person: string, at: Date): Promise<'paused' | 'already-paused'> {
-  return unlessUnchanged(
-    () =>
-      db.transaction().execute(async tx => {
-        const id = randomUUID();
-        await tx.insertInto('human_action').values({ id, at, person_id: person, kind: 'pause_routine', routine_id: routine }).execute();
-        const { numUpdatedRows } = await tx.updateTable('routine').set({ paused_by: id }).where('id', '=', routine).where('paused_by', 'is', null).executeTakeFirst();
-        if (numUpdatedRows === 0n) throw new Unchanged();
-        return 'paused' as const;
-      }),
-    'already-paused',
-  );
+export async function resumeWithin(tx: Transacting, routine: string, action: RoutineAction): Promise<'resumed' | 'not-paused'> {
+  if ((await pausedBy(tx, routine)) === null) return 'not-paused';
+  await tx.updateTable('routine').set({ paused_by: null }).where('id', '=', routine).execute();
+  await tx.insertInto('human_action').values({ id: action.id, at: action.at, person_id: action.person, kind: 'resume_routine', routine_id: routine }).execute();
+  return 'resumed';
 }
 
-export function resume(db: Database, routine: string, person: string, at: Date): Promise<'resumed' | 'not-paused'> {
-  return unlessUnchanged(
-    () =>
-      db.transaction().execute(async tx => {
-        const { numUpdatedRows } = await tx.updateTable('routine').set({ paused_by: null }).where('id', '=', routine).where('paused_by', 'is not', null).executeTakeFirst();
-        if (numUpdatedRows === 0n) throw new Unchanged();
-        await tx.insertInto('human_action').values({ id: randomUUID(), at, person_id: person, kind: 'resume_routine', routine_id: routine }).execute();
-        return 'resumed' as const;
-      }),
-    'not-paused',
-  );
-}
-
-export function runNow(db: Database, routine: string, person: string, at: Date): Promise<Pressed> {
-  return unlessUnchanged<Pressed>(
-    () =>
-      db.transaction().execute(async tx => {
-        const found = await tx.selectFrom('routine').select('paused_by').where('id', '=', routine).forShare().executeTakeFirstOrThrow();
-        if (found.paused_by !== null) return { refused: resumeToRun };
-        const id = randomUUID();
-        await tx.insertInto('human_action').values({ id, at, person_id: person, kind: 'run_now', routine_id: routine }).execute();
-        const pressed = await tx
-          .insertInto('routine_run')
-          .columns(['routine_id', 'version', 'reason', 'pressed_by'])
-          .expression(eb =>
-            eb
-              .selectFrom('routine_version')
-              .select(inner => [inner.cast<string>(inner.val(routine), 'bigint').as('routine_id'), inner.fn.max('version').as('version'), sql<'run_now'>`'run_now'::run_reason`.as('reason'), inner.cast<string>(inner.val(id), 'uuid').as('pressed_by')])
-              .where('routine_id', '=', routine),
-          )
-          .onConflict(conflict => conflict.doNothing())
-          .returning('id')
-          .executeTakeFirst();
-        if (pressed === undefined) throw new Unchanged();
-        return 'pressed' as const;
-      }),
-    'already-waiting',
-  );
+export async function runNowWithin(tx: Transacting, routine: string, action: RoutineAction): Promise<Pressed> {
+  if ((await pausedBy(tx, routine)) !== null) return { refused: resumeToRun };
+  const recorded = await tx
+    .with('pressed', query =>
+      query
+        .insertInto('routine_run')
+        .columns(['routine_id', 'version', 'reason', 'pressed_by'])
+        .expression(eb =>
+          eb
+            .selectFrom('routine_version')
+            .select(inner => [
+              inner.cast<string>(inner.val(routine), 'bigint').as('routine_id'),
+              inner.fn.max('version').as('version'),
+              sql<'run_now'>`'run_now'::run_reason`.as('reason'),
+              inner.cast<string>(inner.val(action.id), 'uuid').as('pressed_by'),
+            ])
+            .where('routine_id', '=', routine),
+        )
+        .onConflict(conflict => conflict.doNothing())
+        .returning('pressed_by'),
+    )
+    .insertInto('human_action')
+    .columns(['id', 'at', 'person_id', 'kind', 'routine_id'])
+    .expression(eb =>
+      eb
+        .selectFrom('pressed')
+        .select(inner => [
+          inner.cast<string>(inner.val(action.id), 'uuid').as('id'),
+          inner.cast<Date>(inner.val(action.at), 'timestamptz').as('at'),
+          inner.cast<string>(inner.val(action.person), 'bigint').as('person_id'),
+          sql<'run_now'>`'run_now'::human_action_kind`.as('kind'),
+          inner.cast<string>(inner.val(routine), 'bigint').as('routine_id'),
+        ]),
+    )
+    .returning('id')
+    .executeTakeFirst();
+  return recorded === undefined ? 'already-waiting' : 'pressed';
 }

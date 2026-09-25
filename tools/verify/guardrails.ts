@@ -194,6 +194,14 @@ const violations: readonly Violation[] = [
     expect: ['TS2741'],
   },
   {
+    name: 'tsc rejects a request handler record that leaves out a request kind',
+    file: 'services/engine/planted.ts',
+    source:
+      "import type { Handlers } from '../../features/requests/apply.ts';\nimport type { RequestKind } from '../../shared/requests.ts';\n\nconst refused = () => Promise.resolve({ refused: 'Planted.' });\n\nexport const handlers = { stop: refused, retry: refused, approve: refused, send_back: refused, answer: refused, pause: refused, resume: refused } satisfies Handlers<RequestKind>;\n",
+    tool: 'tsc',
+    expect: ['TS1360'],
+  },
+  {
     name: 'tsc rejects an unchecked index access',
     file: 'features/planted/index.ts',
     source: 'const names: string[] = [];\nexport const size = names[0].length;\n',

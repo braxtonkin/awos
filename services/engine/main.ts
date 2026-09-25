@@ -5,7 +5,8 @@ import { sql } from 'kysely';
 import { z } from 'zod';
 import { agentSteps } from '../../features/code-change/stage-output.ts';
 import { workflow as codeChange } from '../../features/code-change/workflow.ts';
-import { bridgeListener, rules } from '../../features/bridge/engine.ts';
+import { bridgeListener, numberCommand, rules } from '../../features/bridge/engine.ts';
+import { attemptId } from '../../features/bridge/protocol.ts';
 import { checkLeaseMarginMs, checkLoop, type CheckLoopSettings } from '../../features/credentials/check-loop.ts';
 import { landLoops } from '../../features/code-change/land-loop.ts';
 import { coreReview } from '../../features/code-change/land.ts';
@@ -27,8 +28,10 @@ import { enqueue } from '../../features/outbox/enqueue.ts';
 import { databaseTime, outboxLoops, registryOf } from '../../features/outbox/perform.ts';
 import { scheduleSource } from '../../features/routines/schedule-source.ts';
 import { scheduler } from '../../features/routines/scheduler.ts';
+import { pauseWithin, resumeWithin, runNowWithin, type RoutineAction } from '../../features/routines/actions.ts';
+import { requests, type Applied, type Applying, type Handlers } from '../../features/requests/apply.ts';
 import { sourcesByKind } from '../../features/routines/source.ts';
-import { advance, approveFromOutside, handOff } from '../../features/tasks/advance.ts';
+import { actWithin, advance, approveFromOutside, handOff, refusalOf, type PersonAction, type StopTurn } from '../../features/tasks/advance.ts';
 import { claim, renew } from '../../features/tasks/claim.ts';
 import { reaper } from '../../features/tasks/reaper.ts';
 import { coreRunAs, type RunAsRule } from '../../features/tasks/run-as.ts';
@@ -39,6 +42,8 @@ import { connectCluster } from '../../shared/cluster.ts';
 import { connect, type Database } from '../../shared/db/client.ts';
 import { postgresNow } from '../../shared/db/now.ts';
 import { realClock, runLoop, type Loop } from '../../shared/loop.ts';
+import type { RequestKind } from '../../shared/requests.ts';
+import type { Transacting } from '../../shared/transaction.ts';
 import { attempts } from './attempts.ts';
 import { providers } from './providers.ts';
 import { workflows, type ActionKind } from './workflows.ts';
@@ -69,6 +74,8 @@ const settings = z.object({
   ENVIRONMENT_START_DEADLINE_MS: milliseconds.default(600_000),
   LAND_EVERY_MS: milliseconds.default(10_000),
   LAND_READ_TIMEOUT_MS: milliseconds.default(20_000),
+  REQUESTS_EVERY_MS: milliseconds.default(250),
+  REQUEST_TIMEOUT_MS: milliseconds.default(10_000),
   ...jobSettings,
   JOB_ENGINE_URL: z.url({ protocol: /^https?$/ }).optional(),
   GIT_BASE_URL: z.url({ protocol: /^(https|git)$/ }).default('https://github.com/'),
@@ -102,6 +109,33 @@ const settings = z.object({
 type Settings = z.infer<typeof settings>;
 
 const runner: StepRunner = { workflows, agents: new Map([[codeChange.name, agentSteps]]), enqueue };
+
+const stopTurn: StopTurn = async (writer, attempt, now) => {
+  await numberCommand(writer, attemptId.parse(attempt), { kind: 'turn.stop' }, now);
+};
+
+const byWhom = (request: Applying<RequestKind>): RoutineAction => ({ id: request.action, person: request.person, at: request.at });
+
+const onTask = async (tx: Transacting, request: Applying<RequestKind>, action: PersonAction): Promise<Applied> => {
+  const acted = await actWithin(tx, workflows, request.target, byWhom(request), action, stopTurn);
+  return 'recorded' in acted ? 'recorded' : { refused: refusalOf(action.kind, acted.refused) };
+};
+
+const recordedOr = (done: boolean, refused: string): Applied => (done ? 'recorded' : { refused });
+
+const handlers = {
+  stop: (tx, request) => onTask(tx, request, { kind: 'stop' }),
+  retry: (tx, request) => onTask(tx, request, { kind: 'retry', note: request.payload.note }),
+  approve: (tx, request) => onTask(tx, request, { kind: 'approve', review: request.payload.review }),
+  send_back: (tx, request) => onTask(tx, request, { kind: 'send_back', review: request.payload.review, note: request.payload.note }),
+  answer: (tx, request) => onTask(tx, request, { kind: 'answer', review: request.payload.review, answer: request.payload.answer }),
+  pause: async (tx, request) => recordedOr((await pauseWithin(tx, request.target, byWhom(request))) === 'paused', 'The routine is already paused.'),
+  resume: async (tx, request) => recordedOr((await resumeWithin(tx, request.target, byWhom(request))) === 'resumed', 'The routine is not paused.'),
+  run_now: async (tx, request) => {
+    const pressed = await runNowWithin(tx, request.target, byWhom(request));
+    return typeof pressed === 'object' ? pressed : recordedOr(pressed === 'pressed', 'A Run now press already waits for this routine to start.');
+  },
+} satisfies Handlers<RequestKind>;
 
 const checkSettings = (given: Settings, key: SealingKey): CheckLoopSettings => ({
   everyMs: given.CHECKS_EVERY_MS,
@@ -157,6 +191,7 @@ const loopsFor = (given: Settings, key: SealingKey | undefined, db: Database): r
   const runAs = coreRunAs(given.JIRA_SITE === undefined ? null : currentAssignee(jira));
   return [
     reaper({ everyMs: given.REAPER_EVERY_MS, leaseMs: given.LEASE_MS }),
+    requests({ everyMs: given.REQUESTS_EVERY_MS, timeoutMs: given.REQUEST_TIMEOUT_MS, handlers, now: () => new Date() }),
     scheduler({ everyMs: given.SCHEDULER_EVERY_MS, leaseMs: given.ROUTINE_LEASE_MS, sources, workflows, now: postgresNow }),
     reconcile({ providers, everyMs: given.ENVIRONMENTS_EVERY_MS, startDeadlineMs: given.ENVIRONMENT_START_DEADLINE_MS }),
     ...landLoops({

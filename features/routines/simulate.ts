@@ -7,7 +7,8 @@ import { neverStops, runLoop, type Clock, type Loop } from '../../shared/loop.ts
 import { review } from '../../shared/review.ts';
 import { step, type Workflow } from '../../shared/workflow.ts';
 import type { TestPostgres } from '../../tools/verify/postgres.ts';
-import { pause, resume, runNow } from './actions.ts';
+import { inTransaction } from '../../shared/transaction.ts';
+import { pauseWithin, resumeWithin, runNowWithin, type Pressed } from './actions.ts';
 import { ticketTable, watch, type PropertyName, type Violation, type Watch } from './invariants.ts';
 import { scheduler, type SchedulerSettings } from './scheduler.ts';
 import type { RoutineRun, Source, WorkItem } from '../../shared/routine-source.ts';
@@ -358,8 +359,10 @@ async function personMove(world: World, move: 'pause' | 'resume' | 'press' | 're
   }
   const routine = pick(world.random, world.routines);
   if (routine === undefined) return 'no routine';
-  const outcome =
-    move === 'pause' ? await pause(world.db, routine, world.person, at) : move === 'resume' ? await resume(world.db, routine, world.person, at) : await runNow(world.db, routine, world.person, at);
+  const outcome = await inTransaction(world.db, async (tx): Promise<Pressed | 'paused' | 'already-paused' | 'resumed' | 'not-paused'> => {
+      const action = { id: randomUUID(), person: world.person, at };
+      return move === 'pause' ? await pauseWithin(tx, routine, action) : move === 'resume' ? await resumeWithin(tx, routine, action) : await runNowWithin(tx, routine, action);
+    });
   const said = typeof outcome === 'string' ? outcome : `refused: ${outcome.refused}`;
   count(world, `${move} ${said}`);
   return `routine ${routine}: ${said}`;

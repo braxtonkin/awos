@@ -2,15 +2,11 @@ import { sql, type Transaction } from 'kysely';
 import { z } from 'zod';
 import type { Database } from '../../shared/db/client.ts';
 import type { DB, HumanActionKind, Verdict } from '../../shared/db/types.ts';
-import type { Answer } from '../../shared/review.ts';
+import type { Answer, Note } from '../../shared/review.ts';
 import { inTransaction, type Transacting } from '../../shared/transaction.ts';
 import type { Instruction, Unasked, Workflow } from '../../shared/workflow.ts';
 import { allows, approved, decide, lastStepOf, retried, stopped, waitingOn, type Held, type Next } from './decide.ts';
 import type { Workflows } from './start.ts';
-
-export const note = z.string().trim().min(1).max(4000).brand<'Note'>();
-
-type Note = z.infer<typeof note>;
 
 export type PersonAction =
   | { readonly kind: 'stop' }
@@ -209,33 +205,55 @@ export type StopTurn = (writer: Writer, attempt: string, now: Date) => Promise<v
 
 export const noTurnToStop: StopTurn = () => Promise.resolve();
 
-export async function act(db: Database, workflows: Workflows, task: string, by: Person, action: PersonAction, stopTurn: StopTurn): Promise<Acted> {
-  return db.transaction().execute(async writer => {
-    const live = await writer.selectFrom('attempt').select('attempt.id').where('attempt.task_id', '=', task).where('attempt.finished_at', 'is', null).forUpdate().execute();
-    const { held, workflow } = await hold(writer, workflows, task);
-    const earlier = await writer.selectFrom('human_action').select(['human_action.task_id', 'human_action.kind']).where('human_action.id', '=', by.id).executeTakeFirst();
-    if (earlier !== undefined) return earlier.task_id === task && earlier.kind === recordOf(action).kind ? { recorded: by.id } : { refused: 'id-taken' };
-    const decision = allows(held, action.kind === 'stop' || action.kind === 'retry' ? { kind: action.kind } : { kind: action.kind, review: action.review });
-    if (decision === 'not-now' || decision === 'stale') return { refused: decision };
-    if (action.kind === 'answer' && !(await answerFits(writer, workflow, action.review, action.answer))) return { refused: 'answer-does-not-fit' };
-    const { id } = by;
-    const record = recordOf(action);
-    await writer
-      .insertInto('human_action')
-      .values({ id, at: by.at, person_id: by.person, kind: record.kind, task_id: task, attempt_id: record.attempt, detail: JSON.stringify(record.detail) })
-      .execute();
-    if (decision === 'record') return { recorded: id };
-    for (const { id: stopping } of live) await stopTurn(writer, stopping, by.at);
-    await writer.updateTable('attempt').set({ finished_at: by.at, verdict: 'stopped' }).where('attempt.task_id', '=', task).where('attempt.finished_at', 'is', null).execute();
-    const columns = decision === 'stop' ? columnsOf(stopped(held), id) : { ...columnsOf(decision === 'approve' ? approved(held, workflow) : retried(held, workflow)), lost: 0 };
-    await writer
-      .updateTable('task')
-      .set(eb => ({ ...columns, epoch: eb('task.epoch', '+', 1) }))
-      .where('task.id', '=', task)
-      .execute();
-    return { recorded: id };
-  });
+export async function actWithin(writer: Transacting, workflows: Workflows, task: string, by: Person, action: PersonAction, stopTurn: StopTurn): Promise<Acted> {
+  const live = await writer.selectFrom('attempt').select('attempt.id').where('attempt.task_id', '=', task).where('attempt.finished_at', 'is', null).forUpdate().execute();
+  const { held, workflow } = await hold(writer, workflows, task);
+  const earlier = await writer.selectFrom('human_action').select(['human_action.task_id', 'human_action.kind']).where('human_action.id', '=', by.id).executeTakeFirst();
+  if (earlier !== undefined) return earlier.task_id === task && earlier.kind === recordOf(action).kind ? { recorded: by.id } : { refused: 'id-taken' };
+  const decision = allows(held, action.kind === 'stop' || action.kind === 'retry' ? { kind: action.kind } : { kind: action.kind, review: action.review });
+  if (decision === 'not-now' || decision === 'stale') return { refused: decision };
+  if (action.kind === 'answer' && !(await answerFits(writer, workflow, action.review, action.answer))) return { refused: 'answer-does-not-fit' };
+  const { id } = by;
+  const record = recordOf(action);
+  await writer
+    .insertInto('human_action')
+    .values({ id, at: by.at, person_id: by.person, kind: record.kind, task_id: task, attempt_id: record.attempt, detail: JSON.stringify(record.detail) })
+    .execute();
+  if (decision === 'record') return { recorded: id };
+  for (const { id: stopping } of live) await stopTurn(writer, stopping, by.at);
+  await writer.updateTable('attempt').set({ finished_at: by.at, verdict: 'stopped' }).where('attempt.task_id', '=', task).where('attempt.finished_at', 'is', null).execute();
+  const columns = decision === 'stop' ? columnsOf(stopped(held), id) : { ...columnsOf(decision === 'approve' ? approved(held, workflow) : retried(held, workflow)), lost: 0 };
+  await writer
+    .updateTable('task')
+    .set(eb => ({ ...columns, epoch: eb('task.epoch', '+', 1) }))
+    .where('task.id', '=', task)
+    .execute();
+  return { recorded: id };
 }
+
+const notNow: Readonly<Record<PersonAction['kind'], Instruction>> = {
+  stop: 'The task is not running or waiting, so there is nothing to stop.',
+  retry: 'The task is done or waits for an approval, so there is nothing to retry.',
+  approve: 'The task waits on no review.',
+  send_back: 'The task waits on no review.',
+  answer: 'The task waits on no review.',
+};
+
+export function refusalOf(kind: PersonAction['kind'], refused: Extract<Acted, { readonly refused: unknown }>['refused']): Instruction {
+  switch (refused) {
+    case 'not-now':
+      return notNow[kind];
+    case 'stale':
+      return 'The task no longer waits on that review.';
+    case 'answer-does-not-fit':
+      return 'The answer does not fit any block of that review.';
+    case 'id-taken':
+      return 'Another action already has this id.';
+  }
+}
+
+export const act = (db: Database, workflows: Workflows, task: string, by: Person, action: PersonAction, stopTurn: StopTurn): Promise<Acted> =>
+  inTransaction(db, writer => actWithin(writer, workflows, task, by, action, stopTurn));
 
 export async function approveFromOutside(db: Database, task: string): Promise<boolean> {
   const { numUpdatedRows } = await db
