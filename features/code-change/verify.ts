@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { builtByStep, shapeOf, type StepVerdict, type Unasked } from '../../shared/workflow.ts';
 import { fail, pass, type Check, type Scenario } from '../../tools/verify/check.ts';
 import { modelShape, shapeDrift } from '../../tools/verify/model-shape.ts';
-import type { Change } from '../../shared/agent-step.ts';
+import type { Change, PullRequestFact } from '../../shared/agent-step.ts';
 import { reproductionPath, type RanScript, type Reproduction, type Side } from '../../shared/reproduction.ts';
 import { agentSteps } from './stage-output.ts';
 import { defineModel, type Shape } from '../../tools/verify/models.ts';
@@ -108,7 +108,7 @@ function implementChecks(): readonly Check[] {
   });
 }
 
-const verdictedVerify = (evidence: Reproduction, pullRequestOwed: boolean) => ({
+const verdictedVerify = (evidence: Reproduction, pullRequest: PullRequestFact) => ({
   step: 'verify',
   verdict: 'pass' as const,
   ticket: { key: 'SBX-1', title: 'Add clamp', description: null },
@@ -116,7 +116,7 @@ const verdictedVerify = (evidence: Reproduction, pullRequestOwed: boolean) => ({
   taskBranch: { name: 'autoworker/SBX-1', head: head },
   attempt: { branch: 'autoworker/SBX-1-attempt-3', start: head, lastPushed: null },
   branches: [],
-  pullRequestOwed,
+  pullRequest,
   firstPass: true,
   startStatus: null,
   endStatus: null,
@@ -125,7 +125,7 @@ const verdictedVerify = (evidence: Reproduction, pullRequestOwed: boolean) => ({
   evidence,
 });
 
-const shownEvidence = z.object({ kind: z.literal('pr.evidence'), payload: z.object({ head: z.string(), evidence: z.string() }) });
+const shownEvidence = z.object({ kind: z.literal('pr.evidence'), payload: z.object({ number: z.int(), evidence: z.string() }) });
 
 function pullEvidenceChecks(): readonly Check[] {
   const rounds: readonly (readonly [string, string])[] = [
@@ -134,10 +134,23 @@ function pullEvidenceChecks(): readonly Check[] {
   ];
   return rounds.map(([what, commit]) => {
     const name = `${what} owes the pull request the engine's recorded evidence, not the agent's prose (F4)`;
-    const owed = agentSteps.owes(verdictedVerify(ranBoth(side(base, ran(1)), side(commit, ran(0))), true)).flatMap(entry => shownEvidence.safeParse(entry).data ?? []);
+    const owed = agentSteps.owes(verdictedVerify(ranBoth(side(base, ran(1)), side(commit, ran(0))), { kind: 'opened', number: 7 })).flatMap(entry => shownEvidence.safeParse(entry).data ?? []);
     const text = owed[0]?.payload.evidence ?? '';
-    const good = owed.length === 1 && owed[0]?.payload.head === 'autoworker/SBX-1' && text.includes(commit) && !text.includes('The agent says');
-    return good ? pass(name, `${String(text.length)} characters naming ${commit.slice(0, 8)}`) : fail(name, `${String(owed.length)} pr.evidence rows: ${text.slice(0, 200)}`);
+    const good = owed.length === 1 && owed[0]?.payload.number === 7 && text.includes(commit) && !text.includes('The agent says');
+    return good ? pass(name, `${String(text.length)} characters naming ${commit.slice(0, 8)}, to pull request 7`) : fail(name, `${String(owed.length)} pr.evidence rows: ${text.slice(0, 200)}`);
+  });
+}
+
+const unopened: readonly (readonly [string, PullRequestFact])[] = [
+  ["the draft's opening is still owed, so no pull request number exists yet", { kind: 'owed' }],
+  ['no draft was ever owed', { kind: 'none' }],
+];
+
+function unopenedEvidenceChecks(): readonly Check[] {
+  return unopened.map(([what, pullRequest]) => {
+    const name = `a passing Verify owes no pr.evidence when ${what}, because the row would name no pull request`;
+    const owed = agentSteps.owes(verdictedVerify(ranBoth(side(base, ran(1)), side(head, ran(0))), pullRequest)).map(entry => entry.kind);
+    return owed.includes('pr.evidence') ? fail(name, owed.join(', ')) : pass(name, owed.join(', '));
   });
 }
 
@@ -467,7 +480,7 @@ export const scenarios: readonly Scenario[] = [
   {
     name: 'code-change',
     summary: "checks the Code change declaration against the task model's shape and runs each step's judge on reviews of every outcome",
-    run: () => Promise.resolve([shapeCheck(), builtCheck(), ...judgeChecks(), ...settleChecks(), ...pullEvidenceChecks(), ...implementChecks(), promptCheck()]),
+    run: () => Promise.resolve([shapeCheck(), builtCheck(), ...judgeChecks(), ...settleChecks(), ...pullEvidenceChecks(), ...unopenedEvidenceChecks(), ...implementChecks(), promptCheck()]),
   },
   landModel,
   {

@@ -338,6 +338,8 @@ export function githubClient(settings: GithubSettings) {
     },
     openDraft: (repository: string, opened: { readonly head: string; readonly base: string; readonly title: string; readonly body: string }, signal: AbortSignal): Promise<Reply<Pull>> =>
       rest(pull, 'POST /repos/{owner}/{repo}/pulls', { owner: split(repository).owner, repo: split(repository).name, ...opened, draft: true }, signal),
+    pull: (repository: string, number: number, signal: AbortSignal): Promise<Reply<Pull>> =>
+      rest(pull, 'GET /repos/{owner}/{repo}/pulls/{pull_number}', { owner: split(repository).owner, repo: split(repository).name, pull_number: number }, signal),
     setBody: (repository: string, number: number, body: string, signal: AbortSignal): Promise<Reply<Pull>> =>
       rest(pull, 'PATCH /repos/{owner}/{repo}/pulls/{pull_number}', { owner: split(repository).owner, repo: split(repository).name, pull_number: number, body }, signal),
     markReady: async (pullId: string, signal: AbortSignal): Promise<Reply<{ readonly draft: boolean }>> => {
