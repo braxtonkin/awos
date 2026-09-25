@@ -43,7 +43,7 @@ export async function sweepOnce(db: Database, cluster: Cluster): Promise<readonl
       else await cluster.core.deleteNamespacedSecret({ name: entry.name, namespace });
       lines.push(`deleted ${entry.kind} ${entry.name}${entry.detail}, because attempt ${entry.attempt || '(none)'} ${reason}`);
     } catch (error) {
-      if (!missing(error)) throw error;
+      if (!missing(error)) lines.push(`did not delete ${entry.kind} ${entry.name}, so the next pass tries again: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
   return lines;
