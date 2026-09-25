@@ -46,13 +46,13 @@ export type LandRecord = {
   readonly evidence: string;
 };
 
-type NoApproval<K extends string> = K extends `${string}approve${string}` ? never : unknown;
+type ReviewKind = (typeof actionKinds.ticketComment | typeof actionKinds.ticketTransition)['kind'];
 
 const reviewed = Symbol('reviewed');
 
-export type ReviewAction = Owe & { readonly [reviewed]: true };
+export type ReviewAction = Owe<ReviewKind> & { readonly [reviewed]: true };
 
-export const reviewOwes = <K extends string, P, R>(kind: ActionSpec<K, P, R> & NoApproval<K>, payload: P): ReviewAction => ({ ...owe(kind, payload), [reviewed]: true });
+export const reviewOwes = <K extends ReviewKind, P, R>(kind: ActionSpec<K, P, R>, payload: P): ReviewAction => ({ ...owe(kind, payload), [reviewed]: true });
 
 export type ReviewAnswer = { readonly actions: readonly ReviewAction[]; readonly note: Instruction };
 

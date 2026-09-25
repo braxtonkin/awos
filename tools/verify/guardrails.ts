@@ -127,9 +127,18 @@ const violations: readonly Violation[] = [
     expect: ['TS2345'],
   },
   {
-    name: 'tsc rejects a review step that owes an action it did not build with reviewOwes',
+    name: 'tsc rejects a review step that owes pr.merge, which would bypass the ready rule and the gates',
+    file: 'features/planted/merges.ts',
+    source:
+      "import { actionKinds } from '../../shared/actions.ts';\nimport { reviewOwes, type ReviewStep } from '../code-change/land.ts';\n\nexport const merging: ReviewStep = pull => ({ actions: [reviewOwes(actionKinds.prMerge, { repository: pull.repository, head: pull.branch, commit: 'a'.repeat(40) })], note: 'The planted step merged.' });\n",
+    tool: 'tsc',
+    expect: ['TS2345'],
+  },
+  {
+    name: 'tsc rejects a review step that owes an allowed kind it did not build with reviewOwes',
     file: 'features/planted/owes.ts',
-    source: "import { z } from 'zod';\nimport { owe, type ActionSpec } from '../../shared/actions.ts';\nimport type { ReviewStep } from '../code-change/land.ts';\n\nconst approve: ActionSpec<'pr.approve', { readonly repository: string }, { readonly review: string }> = { kind: 'pr.approve', payload: z.object({ repository: z.string() }), result: z.object({ review: z.string() }) };\n\nexport const approving: ReviewStep = pull => ({ actions: [owe(approve, { repository: pull.repository })], note: 'The planted step approved.' });\n",
+    source:
+      "import { actionKinds, owe } from '../../shared/actions.ts';\nimport type { ReviewStep } from '../code-change/land.ts';\n\nexport const commenting: ReviewStep = (_pull, task) => ({ actions: [owe(actionKinds.ticketComment, { ticket: task.key, text: 'Please review.', linkPullRequest: true })], note: 'The planted step commented.' });\n",
     tool: 'tsc',
     expect: ['TS2322'],
   },
@@ -1162,9 +1171,10 @@ const allowances: readonly Allowance[] = [
     shows: 'simulation: docker compose run --rm -T verify npm run verify -- planted --seeds 3\n',
   },
   {
-    name: 'tsc accepts a review step that owes a review request',
+    name: 'tsc accepts a review step that owes a ticket comment, a kind the review allow-list holds',
     file: 'features/planted/requests.ts',
-    source: "import { z } from 'zod';\nimport type { ActionSpec } from '../../shared/actions.ts';\nimport { reviewOwes, type ReviewStep } from '../code-change/land.ts';\n\nconst request: ActionSpec<'pr.request-review', { readonly repository: string }, { readonly requested: boolean }> = { kind: 'pr.request-review', payload: z.object({ repository: z.string() }), result: z.object({ requested: z.boolean() }) };\n\nexport const requesting: ReviewStep = pull => ({ actions: [reviewOwes(request, { repository: pull.repository })], note: 'The planted step asked for a review.' });\n",
+    source:
+      "import { actionKinds } from '../../shared/actions.ts';\nimport { reviewOwes, type ReviewStep } from '../code-change/land.ts';\n\nexport const requesting: ReviewStep = (pull, task) => ({ actions: [reviewOwes(actionKinds.ticketComment, { ticket: task.key, text: `Please review ${pull.repository}.`, linkPullRequest: true })], note: 'The planted step asked for a review.' });\n",
     tool: 'tsc',
   },
   {
