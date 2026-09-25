@@ -20,11 +20,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
+          fetch-depth: 0
       - run: docker compose build verify
       - run: docker compose run --rm verify npm ci
       - run: docker compose run --rm verify npm run check
       - run: docker compose run --rm verify npm run verify -- guardrails
       - run: docker compose run --rm verify npm run verify -- doctor
+      - run: docker compose run --rm verify npm run budget -- --since-pr-base
 
   models:
     runs-on: ubuntu-24.04
