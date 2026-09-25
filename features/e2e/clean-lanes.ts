@@ -298,12 +298,12 @@ async function cleanLane(args: readonly string[]): Promise<readonly Check[]> {
   if (!checks.every(check => check.passed)) return checks;
   const cluster = connectCluster(`e2e-clean-${randomBytes(3).toString('hex')}`);
   await cluster.core.createNamespace({ body: { metadata: { name: cluster.namespace } } });
-  checks.push(pass('namespace ready', cluster.namespace));
-  if (values['read-github']) {
-    const runBranches = await githubFromEnvironment(process.env, values.repository).branchesStartingWith('e2e/run-');
-    checks.push(runBranches.length > 0 ? pass('the GitHub read finds branches by prefix', `${String(runBranches.length)} under e2e/run-`) : fail('the GitHub read finds branches by prefix', `nothing under e2e/run- in ${values.repository}`));
-  }
   try {
+    checks.push(pass('namespace ready', cluster.namespace));
+    if (values['read-github']) {
+      const runBranches = await githubFromEnvironment(process.env, values.repository).branchesStartingWith('e2e/run-');
+      checks.push(runBranches.length > 0 ? pass('the GitHub read finds branches by prefix', `${String(runBranches.length)} under e2e/run-`) : fail('the GitHub read finds branches by prefix', `nothing under e2e/run- in ${values.repository}`));
+    }
     return await withPostgres(async postgres => {
       const sourcesFor = (database: Database, world: World): CleanSources => ({ database, cluster, branchesStartingWith: listed(world.onGitHub) });
       const clean = await inWorld(postgres, cleanWorld, db => leftovers(sourcesFor(db, cleanWorld), ticket));
@@ -429,7 +429,7 @@ async function reportLane(): Promise<readonly Check[]> {
 export const cleanScenarios: readonly Scenario[] = [
   {
     name: 'e2e-clean',
-    summary: 'checks a finished world for leftovers against Postgres, kind, and GitHub, then plants a labeled Secret, an owed outbox row, an event gap, a twice-completed item, a left fragment, an item left open in a turn that never completed, an unstopped environment, and two branches left on GitHub, and passes only when each is named and a reasoning item Codex left open in a turn that completed is accepted',
+    summary: 'checks a finished world for leftovers against Postgres, kind, and GitHub, then plants a labeled Secret, Job, and Pod, a failed and an owed outbox row, an event gap, a twice-completed item, a left fragment, an item left open in a turn that never completed, an unstopped environment, and three branches left on GitHub, one the record does not name, and passes only when each is named and a reasoning item Codex left open in a turn that completed is accepted',
     run: cleanLane,
   },
   {

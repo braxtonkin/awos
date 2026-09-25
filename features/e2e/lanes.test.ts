@@ -10,15 +10,17 @@ const regression = lanes.find(lane => lane.slug === 'regression');
 
 test('a failing check that does not decide the lane prints INFO failed, never PASS, and is not counted', () => {
   if (noAssignee === undefined) throw new Error('lane 4 is missing');
-  const planted = [fail('merged', 'not reached'), info('ticket filed to merged within 45 minutes', 'n/a', 'not merged'), pass('lane 4: no attempt row exists', '0 attempts')];
+  const planted = [fail('merged', 'not reached'), info('ticket filed to merged within 45 minutes', 'n/a', 'not merged'), pass('ticket filed', 'SBX-1'), pass('task recorded', 'task 1'), pass('lane 4: no attempt row exists', '0 attempts')];
   const { text, exitCode } = render(laneLines(noAssignee, planted));
   expect(text).toBe(
     [
       'INFO  merged  (failed: not reached)',
       'INFO  ticket filed to merged within 45 minutes  (n/a: not merged)',
+      'PASS  ticket filed  (SBX-1)',
+      'PASS  task recorded  (task 1)',
       'PASS  lane 4: no attempt row exists  (0 attempts)',
-      'PASS  lane 4 no-assignee: 1 of 1 deciding checks passed',
-      '2 of 2 checks passed, and 2 info lines decide nothing',
+      'PASS  lane 4 no-assignee: 3 of 3 deciding checks passed',
+      '4 of 4 checks passed, and 2 info lines decide nothing',
       '',
     ].join('\n'),
   );
@@ -88,7 +90,7 @@ test('lane 2 fails and names its fault check when the driver stopped too late to
       'PASS  duplicate comments 0  (none)',
       `FAIL  attempt continued  (${missing})`,
       'FAIL  lane 2 engine-restart: 4 of 5 deciding checks passed  (attempt continued)',
-      '4 of 5 checks passed',
+      '4 of 6 checks passed',
       '',
     ].join('\n'),
   );
@@ -106,7 +108,7 @@ test('lane 3 fails and names a counted check that never came', () => {
       'PASS  clean  (nothing left)',
       "FAIL  pull requests  (no check of this kind is in the run's output, and this lane expects one)",
       'FAIL  lane 3 lost-job: 3 of 4 deciding checks passed  (pull requests)',
-      '3 of 4 checks passed',
+      '3 of 5 checks passed',
       '',
     ].join('\n'),
   );

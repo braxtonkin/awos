@@ -50,7 +50,7 @@ export async function recordChecks(db: Database, ticket: string, runAs: string, 
   const seen: string[] = [];
   for (const attempt of attempts.filter(entry => agentSteps.has(entry.step))) seen.push(...(await threadStartModels(db, attempt.id)).map(model => `${attempt.id} ${model}`));
   const agentAttempts = attempts.filter(entry => agentSteps.has(entry.step)).length;
-  checks.push(check(`record: every agent attempt ran on ${agentModel}`, seen.length === agentAttempts && seen.every(entry => entry.endsWith(` ${agentModel}`)), seen.join(', ') || 'no thread/start answer stored'));
+  checks.push(check(`record: every agent attempt ran on ${agentModel}`, agentAttempts > 0 && seen.length === agentAttempts && seen.every(entry => entry.endsWith(` ${agentModel}`)), seen.join(', ') || `no thread/start answer stored, from ${String(agentAttempts)} agent attempts`));
   const environments = await db
     .selectFrom('verify_environment')
     .innerJoin('attempt', 'attempt.id', 'verify_environment.attempt_id')
