@@ -1377,6 +1377,18 @@ const budgetViolations: readonly Violation[] = [
   },
 ];
 
+const plantedFixture = 'tools/verify/fixtures/planted.html';
+
+const wideFixture = `<p>${'f'.repeat(900)}</p>\n`;
+
+const fixtureViolation: Violation = {
+  name: 'the budget check still counts fixture lines against the fixtures ceiling',
+  file: plantedFixture,
+  source: wideFixture,
+  tool: 'budget',
+  expect: [`${budgetFile} lines/fixtures is`],
+};
+
 const budgetAllowances: readonly Allowance[] = [
   {
     name: 'the budget check accepts a product file that a raise file covers',
@@ -1384,6 +1396,27 @@ const budgetAllowances: readonly Allowance[] = [
     source: grownSource,
     tool: 'budget',
     companions: [{ file: plantedRaise, source: raiseFile({ 'lines/product': 1, 'characters/product': 20 }) }],
+  },
+  {
+    name: 'the budget check skips a binary file and says so',
+    file: 'tools/verify/planted.woff2',
+    source: `wOF2\u0000${'x'.repeat(1000)}\n`,
+    tool: 'budget',
+    shows: 'Skipped 1 binary files, which hold a NUL byte or are not UTF-8: tools/verify/planted.woff2',
+  },
+  {
+    name: 'the budget check holds a fixture to no longest-line ceiling once a raise covers its lines',
+    file: plantedFixture,
+    source: wideFixture,
+    tool: 'budget',
+    companions: [{ file: plantedRaise, source: raiseFile({ 'lines/fixtures': 1, 'characters/fixtures': 1000 }) }],
+  },
+  {
+    name: 'the budget check holds a markdown line to no longest-line ceiling once a raise covers its lines',
+    file: 'docs/planted.md',
+    source: `| ${'row '.repeat(1500)}|\n`,
+    tool: 'budget',
+    companions: [{ file: plantedRaise, source: raiseFile({ 'lines/docs': 1, 'characters/docs': 5000 }) }],
   },
 ];
 
@@ -1841,7 +1874,7 @@ export const guardrails: Scenario = {
     ...(await withCopy(async copy => {
       const clean = run('budget', copy, '.');
       const checks: Check[] = [clean.status === 0 ? pass('the unplanted copy passes budget', '') : fail('the unplanted copy passes budget', firstLines(clean))];
-      for (const violation of budgetViolations) checks.push(await reject(copy, violation));
+      for (const violation of [...budgetViolations, fixtureViolation]) checks.push(await reject(copy, violation));
       for (const allowance of budgetAllowances) checks.push(await accept(copy, allowance));
       return [...checks, ...(await commitChecks(copy))];
     })),
