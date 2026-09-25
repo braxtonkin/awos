@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { setTimeout as wait } from 'node:timers/promises';
@@ -167,7 +168,7 @@ export async function runBridge(settings: BridgeSettings, afterTurn: AfterTurn, 
     authorization: `Bearer ${settings.token}`,
     [headers.attempt]: settings.attempt,
     [headers.protocol]: String(protocolVersion),
-    [headers.pid]: String(process.pid),
+    [headers.process]: randomUUID(),
     [headers.image]: settings.image,
   };
 

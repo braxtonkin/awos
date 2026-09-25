@@ -495,14 +495,14 @@ async function finishingLane(world: World): Promise<readonly Check[]> {
   return [ended, delivery === 'sent' ? pass(name, `command ${String(steer)} is ${delivery}`) : fail(name, `command ${String(steer)} is ${String(delivery)}; log: ${run.log.join(' | ')}`)];
 }
 
-async function post(world: World, lines: readonly Line[], overrides: Partial<Record<'token' | 'protocol' | 'pid' | 'image', string>> = {}): Promise<{ readonly status: number; readonly body: unknown }> {
+async function post(world: World, lines: readonly Line[], overrides: Partial<Record<'token' | 'protocol' | 'process' | 'image', string>> = {}): Promise<{ readonly status: number; readonly body: unknown }> {
   const response = await fetch(new URL('events', world.engine.url), {
     method: 'POST',
     headers: {
       authorization: `Bearer ${overrides.token ?? world.token}`,
       [headers.attempt]: world.attempt,
       [headers.protocol]: overrides.protocol ?? String(protocolVersion),
-      [headers.pid]: overrides.pid ?? '4242',
+      [headers.process]: overrides.process ?? '00000000-0000-4000-8000-000000004242',
       [headers.image]: overrides.image ?? 'autoworker/attempt:lane',
       'content-type': 'application/json',
     },
@@ -521,7 +521,7 @@ async function wireLane(world: World): Promise<readonly Check[]> {
   const gap = await post(world, [appLine(4), appLine(6), appLine(7)]);
   const afterGap = await rowsNow();
   const resend = await post(world, [appLine(5), appLine(6), appLine(7)]);
-  const other = await post(world, [appLine(8)], { pid: '4343' });
+  const other = await post(world, [appLine(8)], { process: '00000000-0000-4000-8000-000000004343' });
   const wrongToken = await post(world, [appLine(8)], { token: 'x'.repeat(43) });
   const protocol = await post(world, [appLine(8)], { protocol: String(protocolVersion + 1), image: 'registry.example/attempt@sha256:abc' });
   const expect = (name: string, ok: boolean, detail: unknown): Check => (ok ? pass(name, JSON.stringify(detail)) : fail(name, JSON.stringify(detail)));
