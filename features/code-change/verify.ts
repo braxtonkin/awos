@@ -394,7 +394,7 @@ const simulationFlags = {
 } as const;
 
 const simulationOptions = z.object({
-  seeds: z.coerce.number().int().positive().default(40),
+  seeds: z.coerce.number().int().positive().default(200),
   from: z.coerce.number().int().nonnegative().default(1),
   seed: z.coerce.number().int().nonnegative().optional(),
   steps: z.coerce.number().int().positive().default(150),
