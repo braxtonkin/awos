@@ -43,7 +43,7 @@ export function checkModel(folder: string, module: string, config: string, { wor
   try {
     const result = spawnSync(
       'java',
-      ['-XX:+UseParallelGC', '-cp', tlaTools, 'tlc2.TLC', '-workers', workers, ...(liveness === undefined ? [] : ['-lncheck', liveness]), '-metadir', join(work, 'states'), '-config', configFile, `${module}.tla`],
+      ['-XX:+UseParallelGC', '-XX:MaxRAMPercentage=75', '-cp', tlaTools, 'tlc2.TLC', '-workers', workers, ...(liveness === undefined ? [] : ['-lncheck', liveness]), '-metadir', join(work, 'states'), '-config', configFile, `${module}.tla`],
       { cwd: folder, encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 },
     );
     const output = result.error === undefined ? `${result.stdout}${result.stderr}` : `TLC did not run: ${result.error.message}`;
