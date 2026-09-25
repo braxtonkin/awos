@@ -1,0 +1,245 @@
+import { spawnSync, type SpawnSyncReturns } from 'node:child_process';
+import { closeSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { z } from 'zod';
+
+type Yaml = null | string | readonly Yaml[] | { readonly [key: string]: Yaml };
+
+type Line = { readonly number: number; readonly indent: number; readonly text: string };
+
+type Step = { readonly name: string; readonly args: readonly string[] };
+
+type Plan = { readonly steps: readonly Step[]; readonly problems: readonly string[] };
+
+type Result = { readonly name: string; readonly exit: number | null; readonly seconds: number; readonly log: string };
+
+const root = fileURLToPath(new URL('../../', import.meta.url));
+const workflowFile = '.github/workflows/ci.yml';
+const setupJob = 'setup';
+const setupRuns: ReadonlySet<string> = new Set(['docker compose build verify', 'docker compose run --rm verify npm ci']);
+const verifyRun = 'docker compose run --rm verify ';
+const plainWord = /^[A-Za-z0-9_./=:@+-]+$/;
+const mappingEntry = /^([A-Za-z0-9_-]+):(?: (.*))?$/;
+const unreadableStart = /^[-?:,\]{}#&*!|>%@`]/;
+
+class Unreadable extends Error {}
+
+const unreadable = (line: Line, problem: string): Unreadable => new Unreadable(`${workflowFile}:${String(line.number)} ${problem}`);
+
+function linesOf(text: string): Line[] {
+  return text.split('\n').flatMap((raw, index) => {
+    const line = raw.replace(/\r$/, '');
+    const at = { number: index + 1, indent: 0, text: line };
+    if (line.includes('\t')) throw unreadable(at, 'holds a tab. Indent with spaces.');
+    const text = line.trimStart();
+    if (text === '') return [];
+    const found = { number: index + 1, indent: line.length - text.length, text: text.trimEnd() };
+    if (text.startsWith('#')) throw unreadable(found, 'holds a comment, which the ci-local reader does not read.');
+    return [found];
+  });
+}
+
+function scalar(line: Line, value: string): Yaml {
+  if (value.startsWith("'")) {
+    if (!/^'(?:[^']|'')*'$/.test(value)) throw unreadable(line, `holds the single-quoted value ${value}, which does not end on its line.`);
+    return value.slice(1, -1).replaceAll("''", "'");
+  }
+  if (value.startsWith('"')) {
+    if (!/^"[^"\\]*"$/.test(value)) throw unreadable(line, `holds the double-quoted value ${value}, which ends off its line or holds an escape.`);
+    return value.slice(1, -1);
+  }
+  if (value.startsWith('[')) {
+    if (!value.endsWith(']')) throw unreadable(line, `holds the flow sequence ${value}, which does not end on its line.`);
+    return value
+      .slice(1, -1)
+      .split(',')
+      .map(item => item.trim())
+      .map(item => {
+        if (!plainWord.test(item)) throw unreadable(line, `holds the flow item "${item}", which is not a plain word.`);
+        return item;
+      });
+  }
+  if (unreadableStart.test(value)) throw unreadable(line, `holds the value "${value}", which starts with ${value.charAt(0)}, and the ci-local reader does not read that form.`);
+  if (value.includes(' #') || value.includes(': ')) throw unreadable(line, `holds the value "${value}", which holds " #" or ": ", and the ci-local reader does not read that form.`);
+  return value;
+}
+
+function readYaml(text: string): Yaml {
+  const lines = linesOf(text);
+  let at = 0;
+  const peek = (): Line | undefined => lines[at];
+
+  const block = (indent: number): Yaml => {
+    const first = peek();
+    if (first === undefined || first.indent !== indent) throw new Unreadable(`${workflowFile} ends where a nested value belongs.`);
+    return first.text === '-' || first.text.startsWith('- ') ? sequence(indent) : mapping(indent);
+  };
+
+  const nested = (parent: Line): Yaml => {
+    const next = peek();
+    return next === undefined || next.indent <= parent.indent ? null : block(next.indent);
+  };
+
+  const sequence = (indent: number): Yaml => {
+    const items: Yaml[] = [];
+    for (let line = peek(); line?.indent === indent && (line.text === '-' || line.text.startsWith('- ')); line = peek()) {
+      const content = line.text.slice(1).trimStart();
+      if (content === '') {
+        at += 1;
+        items.push(nested(line));
+      } else if (mappingEntry.test(content)) {
+        lines[at] = { number: line.number, indent: indent + line.text.length - content.length, text: content };
+        items.push(mapping(indent + line.text.length - content.length));
+      } else {
+        at += 1;
+        items.push(scalar(line, content));
+      }
+    }
+    return items;
+  };
+
+  const mapping = (indent: number): Yaml => {
+    const entries: Record<string, Yaml> = {};
+    for (let line = peek(); line?.indent === indent; line = peek()) {
+      const [, key, value] = mappingEntry.exec(line.text) ?? [];
+      if (key === undefined) throw unreadable(line, `holds "${line.text}", which is not a key and a value.`);
+      if (Object.hasOwn(entries, key)) throw unreadable(line, `repeats the key ${key}.`);
+      at += 1;
+      entries[key] = value === undefined ? nested(line) : scalar(line, value);
+    }
+    return entries;
+  };
+
+  const value = block(0);
+  const left = peek();
+  if (left !== undefined) throw unreadable(left, 'is indented where no value can hold it.');
+  return value;
+}
+
+const checkoutStep = z.strictObject({
+  uses: z.string().regex(/^actions\/checkout@[0-9a-f]{40}$/),
+  with: z.strictObject({ 'persist-credentials': z.literal('false') }).optional(),
+});
+
+const runStep = z.strictObject({ name: z.string().optional(), run: z.string() });
+
+const workflowSchema = z.strictObject({
+  name: z.string().optional(),
+  on: z.unknown(),
+  concurrency: z.unknown(),
+  permissions: z.unknown(),
+  jobs: z.record(z.string(), z.strictObject({ 'runs-on': z.string(), 'timeout-minutes': z.string().optional(), steps: z.array(z.unknown()).min(1) })),
+});
+
+const described = (step: unknown): string => {
+  if (typeof step !== 'object' || step === null || Array.isArray(step)) return `is ${JSON.stringify(step)}`;
+  return 'uses' in step && typeof step.uses === 'string' ? `uses ${step.uses}` : `has the keys ${Object.keys(step).join(', ')}`;
+};
+
+function command(run: string): readonly string[] | undefined {
+  if (run === 'docker compose build verify') return run.split(' ').slice(1);
+  if (!run.startsWith(verifyRun)) return undefined;
+  const words = run.slice(verifyRun.length).split(' ');
+  return words.every(word => plainWord.test(word)) ? ['compose', 'run', '--rm', '-T', 'verify', ...words] : undefined;
+}
+
+function planOf(text: string): Plan {
+  let tree: Yaml;
+  try {
+    tree = readYaml(text);
+  } catch (error) {
+    if (error instanceof Unreadable) return { steps: [], problems: [error.message] };
+    throw error;
+  }
+  const parsed = workflowSchema.safeParse(tree);
+  if (!parsed.success) return { steps: [], problems: parsed.error.issues.map(issue => `${workflowFile} ${issue.path.map(String).join('.')}: ${issue.message}`) };
+  const setup: Step[] = [];
+  const steps: Step[] = [];
+  const problems: string[] = [];
+  for (const [job, { steps: listed }] of Object.entries(parsed.data.jobs)) {
+    listed.forEach((step, index) => {
+      const where = `${workflowFile} job ${job} step ${String(index + 1)}`;
+      if (checkoutStep.safeParse(step).success) return;
+      const run = runStep.safeParse(step);
+      if (!run.success) {
+        problems.push(`${where} ${described(step)}, which ci-local cannot run. It runs only run: steps and actions/checkout.`);
+        return;
+      }
+      const args = command(run.data.run);
+      if (args === undefined) {
+        problems.push(`${where} runs "${run.data.run}", which ci-local cannot run. It runs docker compose build verify, and docker compose run --rm verify followed by plain words.`);
+        return;
+      }
+      const isSetup = setupRuns.has(run.data.run);
+      if (isSetup && setup.some(known => known.args.join(' ') === args.join(' '))) return;
+      (isSetup ? setup : steps).push({ name: `${isSetup ? setupJob : job}: docker ${args.join(' ')}`, args });
+    });
+  }
+  return { steps: [...setup, ...steps], problems };
+}
+
+function git(args: readonly string[]): string {
+  const result = spawnSync('git', args, { cwd: root, encoding: 'utf8' });
+  if (result.status !== 0) throw new Error(`git ${args.join(' ')} failed: ${result.stderr.trim()}`);
+  return result.stdout.trim();
+}
+
+function runStepOf(step: Step, index: number, folder: string): Result {
+  const log = join(folder, `${String(index + 1).padStart(2, '0')}-${step.name.replace(/[^A-Za-z0-9]+/g, '-').replace(/^-|-$/g, '').toLowerCase()}.log`);
+  const fd = openSync(log, 'w');
+  const started = performance.now();
+  let result: SpawnSyncReturns<Buffer>;
+  try {
+    writeFileSync(fd, `$ docker ${step.args.join(' ')}\n`);
+    result = spawnSync('docker', step.args, {
+      cwd: root,
+      stdio: ['ignore', fd, fd],
+      env: process.platform === 'win32' ? { ...process.env, MSYS_NO_PATHCONV: '1' } : process.env,
+    });
+    if (result.error !== undefined) writeFileSync(fd, `\ndocker did not start: ${result.error.message}\n`);
+  } finally {
+    closeSync(fd);
+  }
+  return { name: step.name, exit: result.status, seconds: Math.round((performance.now() - started) / 1000), log };
+}
+
+function runAll(plan: readonly Step[]): number {
+  const sha = git(['rev-parse', 'HEAD']);
+  process.stdout.write(`ci-local at ${sha}\n`);
+  const dirty = git(['status', '--porcelain']);
+  if (dirty !== '') {
+    process.stderr.write(`The worktree has uncommitted changes, so a result could not be tied to ${sha}. Commit or stash them first:\n${dirty}\n`);
+    return 2;
+  }
+  const folder = join(root, 'ci-local', sha);
+  rmSync(folder, { recursive: true, force: true });
+  mkdirSync(folder, { recursive: true });
+  const header = `ci-local at ${sha}, started ${new Date().toISOString()}\n`;
+  const results = plan.map((step, index) => {
+    process.stdout.write(`${step.name}\n`);
+    const result = runStepOf(step, index, folder);
+    process.stdout.write(`  exit ${String(result.exit)} in ${String(result.seconds)}s, log ${result.log}\n`);
+    return result;
+  });
+  const passed = results.every(result => result.exit === 0);
+  const rows = results.map(result => `${String(result.exit).padEnd(6)}${String(result.seconds).padStart(7)}s  ${result.name}`);
+  const summary = `${header}exit  seconds  step\n${rows.join('\n')}\n${passed ? 'PASS' : 'FAIL'}\n`;
+  writeFileSync(join(folder, 'summary.txt'), summary);
+  process.stdout.write(`\n${summary}`);
+  return passed ? 0 : 1;
+}
+
+const mode = process.argv.slice(2);
+const { steps, problems } = planOf(readFileSync(join(root, workflowFile), 'utf8'));
+if (problems.length > 0) {
+  for (const problem of problems) process.stderr.write(`${problem}\n`);
+  process.exitCode = 1;
+} else if (mode.length === 1 && mode[0] === '--plan') {
+  for (const step of steps) process.stdout.write(`${step.name}\n`);
+} else if (mode.length === 0) {
+  process.exitCode = runAll(steps);
+} else {
+  process.stderr.write('Run node tools/ci-local/main.ts to run CI, or add --plan to print its steps without running them.\n');
+  process.exitCode = 2;
+}

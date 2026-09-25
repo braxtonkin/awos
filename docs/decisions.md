@@ -492,6 +492,26 @@ Rejected options:
 
 - **Keep the daily schedule.** Each run holds the models job and every simulator shard for up to 4 hours, and it would fail every night on the Tasks model's heap.
 
+### CI runs locally while GitHub Actions is disabled
+
+Decided 25 Sep 2026. GitHub marked the owner's account as spam, and a request to reinstate it is pending. The owner disabled GitHub Actions for the repository on 25 Sep 2026, so no pull request or push gets a CI run on GitHub.
+
+Until Actions is enabled again, `node tools/ci-local/main.ts` runs CI on the machine that integrates. It reads every `run:` step of `.github/workflows/ci.yml`, so the local run and the GitHub run can't drift: a new CI step goes in `ci.yml` alone. It builds the verify image and installs packages once, then runs every other step in job order inside the verify container, and it runs every step even after one fails. It refuses a worktree with uncommitted changes and names the head SHA first, then writes one log per step and a summary to `ci-local/<sha>/`. A head is integrated only when that summary says `PASS`. `npm run ci-plan`, part of `npm run check`, fails on any step that the local run can't perform, such as a `uses:` action other than checkout, so `ci.yml` can't gain a step that CI on GitHub runs and the local run skips.
+
+What the local run doesn't give:
+
+- **A clean machine per run.** Every step shares this machine's Docker, its image cache, and the `node_modules` volume of the worktree's compose project. A step can pass here and fail on a fresh runner.
+- **Parallel jobs and time limits.** The jobs run one after another, and `timeout-minutes` is not enforced.
+- **A record anyone else can see.** The summary stays on this machine, and GitHub shows no check on the pull request.
+- **The nightly workflow.** It has no local runner, so its larger model bounds and long simulator runs don't run until Actions returns.
+
+When the account is reinstated, the owner enables Actions again, and `ci.yml` runs on GitHub with the same steps. Then CI on GitHub gates integration again. The local runner can stay as a way to reproduce CI before pushing.
+
+Rejected options:
+
+- **A second list of local steps.** It is quicker to write, but it drifts from `ci.yml` the first time someone adds a step to one and not the other.
+- **Run the workflow with a GitHub Actions emulator.** It would run the `uses:` steps too, but it adds a tool the Stack doesn't list and a second way to run CI, and `ci.yml` needs only its `run:` steps.
+
 ## Open
 
 Each open question names the current lean or default. A lean is not a decision.

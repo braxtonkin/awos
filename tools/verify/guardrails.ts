@@ -5,7 +5,7 @@ import { basename, dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { fail, pass, type Check, type Scenario } from './check.ts';
 
-type Tool = 'tsc' | 'node' | 'eslint' | 'depcruise' | 'check' | 'shape' | 'sql-comments' | 'model-names' | 'step-names' | 'strict-schemas' | 'db-types' | 'models';
+type Tool = 'tsc' | 'node' | 'eslint' | 'depcruise' | 'check' | 'shape' | 'sql-comments' | 'model-names' | 'step-names' | 'strict-schemas' | 'ci-plan' | 'db-types' | 'models';
 
 type Edit = { readonly from: string; readonly to: string };
 
@@ -25,6 +25,7 @@ type Violation = Plant & {
 type Allowance = Plant & {
   readonly name: string;
   readonly tool: Tool;
+  readonly shows?: string;
   readonly companions?: readonly Plant[];
   readonly env?: Readonly<Record<string, string>>;
 };
@@ -99,6 +100,19 @@ const bodyFirst = `${codeChange} specify $.properties.blocks.items.anyOf[0] star
 const plantedStep = "name: 'planted', reads: [], runBy: 'agent', prompt: 'Planted.', startsEnvironment: false, needsRepository: true, canEnd: true, owes: [], output: review, requires: ['text'], failures: { fail: { kind: 'fail' } }";
 
 const noBrandAssertions = 'autoworker/no-brand-assertions';
+
+const ciWorkflow = '.github/workflows/ci.yml';
+
+const afterDoctor = (added: string): Edit => ({
+  from: '      - run: docker compose run --rm verify npm run verify -- doctor\n',
+  to: `      - run: docker compose run --rm verify npm run verify -- doctor\n${added}`,
+});
+
+const setupNode = 'actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020';
+
+const setupNodeStep = afterDoctor(`      - uses: ${setupNode}\n`);
+
+const unknownStep = `${ciWorkflow} job check step 7 uses ${setupNode}, which ci-local cannot run`;
 
 const accessOnlyLoginFrom = "import { accessOnly, type AccessOnlyLogin } from '../../shared/codex-login.ts';\n\nconst launch = (login: AccessOnlyLogin): string => login;\n";
 
@@ -1084,6 +1098,48 @@ const violations: readonly Violation[] = [
     tool: 'tsc',
     expect: ['TS2322'],
   },
+  {
+    name: 'ci-plan rejects a uses: step other than actions/checkout, and names it',
+    file: ciWorkflow,
+    edit: setupNodeStep,
+    tool: 'ci-plan',
+    expect: [unknownStep],
+  },
+  {
+    name: 'ci-plan rejects a run: step outside the verify container',
+    file: ciWorkflow,
+    edit: afterDoctor('      - run: npm test\n'),
+    tool: 'ci-plan',
+    expect: [`${ciWorkflow} job check step 7 runs "npm test", which ci-local cannot run`],
+  },
+  {
+    name: 'ci-plan rejects a verify step that needs a shell',
+    file: ciWorkflow,
+    edit: afterDoctor('      - run: docker compose run --rm verify npm test && echo done\n'),
+    tool: 'ci-plan',
+    expect: [`${ciWorkflow} job check step 7 runs "docker compose run --rm verify npm test && echo done", which ci-local cannot run`],
+  },
+  {
+    name: 'ci-plan rejects a block scalar',
+    file: ciWorkflow,
+    edit: afterDoctor('      - run: |\n          npm test\n'),
+    tool: 'ci-plan',
+    expect: ['which starts with |, and the ci-local reader does not read that form'],
+  },
+  {
+    name: 'ci-plan rejects a job key it does not run, such as env',
+    file: ciWorkflow,
+    edit: { from: '  models:\n    runs-on: ubuntu-24.04\n', to: '  models:\n    env:\n      PLANTED: one\n    runs-on: ubuntu-24.04\n' },
+    tool: 'ci-plan',
+    expect: [`${ciWorkflow} jobs.models: Unrecognized key: "env"`],
+  },
+  {
+    name: 'npm run check runs the local CI plan',
+    file: ciWorkflow,
+    edit: setupNodeStep,
+    tool: 'check',
+    expect: [unknownStep],
+  },
 ];
 
 const plantedModel: Violation = {
@@ -1095,6 +1151,16 @@ const plantedModel: Violation = {
 };
 
 const allowances: readonly Allowance[] = [
+  {
+    name: 'ci-plan runs a new run: step in the verify container with no code change',
+    file: ciWorkflow,
+    edit: {
+      from: '      - run: docker compose run --rm verify npm run verify -- jira\n',
+      to: '      - run: docker compose run --rm verify npm run verify -- jira\n      - run: docker compose run --rm verify npm run verify -- planted --seeds 3\n',
+    },
+    tool: 'ci-plan',
+    shows: 'simulation: docker compose run --rm -T verify npm run verify -- planted --seeds 3\n',
+  },
   {
     name: 'tsc accepts a review step that owes a review request',
     file: 'features/planted/requests.ts',
@@ -1337,6 +1403,10 @@ const tools: Record<
     command: () => ['npm', 'run', '--silent', 'strict-schemas'],
     caught: startsALine,
   },
+  'ci-plan': {
+    command: () => ['npm', 'run', '--silent', 'ci-plan'],
+    caught: (outcome, _file, code) => outcome.output.includes(code),
+  },
   'db-types': {
     command: () => ['npm', 'run', '--silent', 'db-types'],
     caught: startsALine,
@@ -1396,7 +1466,8 @@ const reject = (copy: string, violation: Violation): Promise<Check> =>
 const accept = (copy: string, allowance: Allowance): Promise<Check> =>
   withPlanted(copy, [allowance, ...(allowance.companions ?? [])], () => {
     const outcome = run(allowance.tool, copy, allowance.file, allowance.env);
-    return outcome.status === 0 ? pass(allowance.name, 'accepted') : fail(allowance.name, (tools[allowance.tool].summary ?? firstLines)(outcome));
+    if (outcome.status !== 0) return fail(allowance.name, (tools[allowance.tool].summary ?? firstLines)(outcome));
+    return allowance.shows === undefined || outcome.output.includes(allowance.shows) ? pass(allowance.name, 'accepted') : fail(allowance.name, `accepted without printing "${allowance.shows}"`);
   });
 
 async function withCopy(work: (copy: string) => Promise<readonly Check[]>, leftOut: readonly string[] = []): Promise<readonly Check[]> {
@@ -1415,7 +1486,7 @@ export const guardrails: Scenario = {
   summary: 'plants each violation a check must reject and each line it must accept, and proves both',
   run: async () => [
     ...(await withCopy(async copy => {
-      const checks: Check[] = (['tsc', 'eslint', 'depcruise', 'shape', 'sql-comments', 'model-names', 'step-names', 'strict-schemas', 'db-types'] as const).map(tool => {
+      const checks: Check[] = (['tsc', 'eslint', 'depcruise', 'shape', 'sql-comments', 'model-names', 'step-names', 'strict-schemas', 'ci-plan', 'db-types'] as const).map(tool => {
         const clean = run(tool, copy, '.');
         const name = `the unplanted copy passes ${tool}`;
         const problem = clean.status === 0 ? tools[tool].unclean?.(clean) : (tools[tool].summary ?? firstLines)(clean);
