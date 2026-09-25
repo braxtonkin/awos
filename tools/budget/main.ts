@@ -30,7 +30,7 @@ import {
 
 type Widest = { readonly path: string; readonly line: number; readonly width: number };
 
-type Measured = { readonly values: ReadonlyMap<string, number>; readonly widest: ReadonlyMap<string, readonly Widest[]> };
+type Measured = { readonly values: ReadonlyMap<string, number>; readonly widest: ReadonlyMap<string, readonly Widest[]>; readonly binary: readonly string[] };
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
 const skipped = new Set(['.git', 'node_modules']);
@@ -50,6 +50,18 @@ function* walk(prefix: string): Generator<string> {
 const matchesAny = (path: string, globs: readonly string[]): boolean => globs.some(glob => matchesGlob(path, glob));
 
 const read = (path: string): string => readFileSync(join(root, path), 'utf8');
+
+const utf8 = new TextDecoder('utf-8', { fatal: true });
+
+function textOf(path: string): string | undefined {
+  const bytes = readFileSync(join(root, path));
+  if (bytes.includes(0)) return undefined;
+  try {
+    return utf8.decode(bytes);
+  } catch {
+    return undefined;
+  }
+}
 
 const upParts = (sql: string): string => sql.split(/^-- migrate:down.*$/m)[0] ?? '';
 
@@ -105,26 +117,35 @@ function measure(budget: Budget): Measured {
   const paths = [...walk('')].filter(path => !matchesAny(path, budget.exclude));
   const values = new Map<string, number>();
   const widest = new Map<string, Widest[]>();
-  for (const entry of budget.roles) for (const measureName of roleMeasures) values.set(roleKey(measureName, entry.name), 0);
+  const binary: string[] = [];
+  const breakable = budget.breakable ?? ['**'];
+  for (const entry of budget.roles) for (const measureName of roleMeasures) if (entry[measureName] !== undefined) values.set(roleKey(measureName, entry.name), 0);
   for (const path of paths) {
     const owner = budget.roles.find(entry => matchesAny(path, entry.files));
     if (owner === undefined) continue;
-    const lines = read(path).split('\n').map(line => line.replace(/\r$/, ''));
+    const text = textOf(path);
+    if (text === undefined) {
+      binary.push(path);
+      continue;
+    }
+    const lines = text.split('\n').map(line => line.replace(/\r$/, ''));
     const add = (measureName: 'lines' | 'characters', amount: number): void => {
       const key = roleKey(measureName, owner.name);
       values.set(key, (values.get(key) ?? 0) + amount);
     };
     add('lines', lines.filter(line => line.trim() !== '').length);
     add('characters', lines.reduce((sum, line) => sum + line.replace(/\s/g, '').length, 0));
+    const ceiling = owner['longest-line'];
+    if (ceiling === undefined || !matchesAny(path, breakable)) continue;
     const longest = roleKey('longest-line', owner.name);
     lines.forEach((line, index) => {
       if (line.length > (values.get(longest) ?? 0)) values.set(longest, line.length);
-      if (line.length > owner['longest-line']) widest.set(owner.name, [...(widest.get(owner.name) ?? []), { path, line: index + 1, width: line.length }]);
+      if (line.length > ceiling) widest.set(owner.name, [...(widest.get(owner.name) ?? []), { path, line: index + 1, width: line.length }]);
     });
   }
   const structure = structureOf(paths);
   for (const entry of structureNames) values.set(structureKey(entry), structure[entry]);
-  return { values, widest };
+  return { values, widest, binary };
 }
 
 function coverage(budget: Budget, ceilings: Ceilings): readonly string[] {
@@ -319,6 +340,7 @@ function main(): number {
   }
   if (values.lower === true) return lower(loaded, measured, values.states);
   if (values.report === true) report(loaded, measured);
+  if (measured.binary.length > 0) process.stdout.write(`Skipped ${String(measured.binary.length)} binary files, which hold a NUL byte or are not UTF-8: ${measured.binary.join(', ')}\n`);
   const found = [...overruns(loaded, measured), ...coverage(loaded.budget, effectiveCeilings(loaded.budget, loaded.raises))];
   for (const line of found) process.stdout.write(`${line}\n`);
   return found.length === 0 ? 0 : 1;

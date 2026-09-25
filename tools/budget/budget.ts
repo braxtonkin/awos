@@ -40,13 +40,14 @@ const role = z.strictObject({
   files: z.array(z.string().min(1)).min(1),
   lines: count,
   characters: count,
-  'longest-line': count,
+  'longest-line': count.optional(),
 });
 
 const keyed = z.strictObject({ why, ceilings: z.record(z.string().regex(plainName), count) });
 
 const budgetSchema = z.strictObject({
   exclude: z.array(z.string().min(1)),
+  breakable: z.array(z.string().min(1)).optional(),
   roles: z.array(role).min(1),
   structure,
   states: keyed,
@@ -70,7 +71,10 @@ export const secondsKey = (job: string): string => `seconds/${job}`;
 
 export function ceilingsOf(budget: Budget): Ceilings {
   return new Map([
-    ...budget.roles.flatMap(entry => roleMeasures.map((measure): [string, number] => [roleKey(measure, entry.name), entry[measure]])),
+    ...budget.roles.flatMap(entry => roleMeasures.flatMap((measure): [string, number][] => {
+      const ceiling = entry[measure];
+      return ceiling === undefined ? [] : [[roleKey(measure, entry.name), ceiling]];
+    })),
     ...structureNames.map((entry): [string, number] => [structureKey(entry), budget.structure[entry].ceiling]),
     ...Object.entries(budget.states.ceilings).map(([model, ceiling]): [string, number] => [stateKey(model), ceiling]),
     ...Object.entries(budget.seconds.ceilings).map(([job, ceiling]): [string, number] => [secondsKey(job), ceiling]),
@@ -87,13 +91,16 @@ export function withCeilings(budget: Budget, ceilings: Ceilings): Budget {
   const nextStructure = { ...budget.structure };
   for (const entry of structureNames) nextStructure[entry] = { ...budget.structure[entry], ceiling: at(structureKey(entry), budget.structure[entry].ceiling) };
   return {
-    exclude: budget.exclude,
-    roles: budget.roles.map(entry => ({
-      ...entry,
-      lines: at(roleKey('lines', entry.name), entry.lines),
-      characters: at(roleKey('characters', entry.name), entry.characters),
-      'longest-line': at(roleKey('longest-line', entry.name), entry['longest-line']),
-    })),
+    ...budget,
+    roles: budget.roles.map(entry => {
+      const longest = entry['longest-line'];
+      return {
+        ...entry,
+        lines: at(roleKey('lines', entry.name), entry.lines),
+        characters: at(roleKey('characters', entry.name), entry.characters),
+        ...(longest === undefined ? {} : { 'longest-line': at(roleKey('longest-line', entry.name), longest) }),
+      };
+    }),
     structure: nextStructure,
     states: { why: budget.states.why, ceilings: prefixed(ceilings, 'states/') },
     seconds: { why: budget.seconds.why, ceilings: prefixed(ceilings, 'seconds/') },
