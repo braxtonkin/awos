@@ -56,7 +56,7 @@ type Mutant = { readonly guard: Guard; readonly breaks: PropertyName; readonly p
 const lagging = (settings: SchedulerSettings, virtual: VirtualClock): SchedulerSettings => ({
   ...settings,
   now: async db => {
-    const real = virtual.clock.now().getTime();
+    const real = virtual.now().getTime();
     const { newest } = await db.selectFrom('routine_run').select(eb => eb.fn.max('slot').as('newest')).executeTakeFirstOrThrow();
     return new Date(newest === null ? real : Math.min(real, newest.getTime() + routineEveryMs + 1));
   },
@@ -95,7 +95,7 @@ const outerMoves = ['pause', 'resume', 'press', 'reassign', 'downtime'] as const
 
 type OuterMove = (typeof outerMoves)[number];
 
-const innerMoves = ['none', 'pause', 'press', 'reassign', 'lapse', 'crash', 'otherEngine', 'failSearch'] as const;
+const innerMoves = ['none', 'pause', 'press', 'reassign', 'lapse', 'reclaim', 'crash', 'otherEngine', 'failSearch'] as const;
 
 type InnerMove = (typeof innerMoves)[number];
 
@@ -116,7 +116,7 @@ const leaseMs = 30_000;
 
 const quietOuter = { pause: 0, resume: 0, press: 0, reassign: 0, downtime: 0 } as const;
 
-const calmInner = { none: 10, pause: 0, press: 0, reassign: 0, lapse: 0, crash: 0, otherEngine: 0, failSearch: 0 } as const;
+const calmInner = { none: 10, pause: 0, press: 0, reassign: 0, lapse: 0, reclaim: 0, crash: 0, otherEngine: 0, failSearch: 0 } as const;
 
 const everything = {
   engines: 2,
@@ -124,7 +124,7 @@ const everything = {
   downtimeSlots: 3,
   stepMs: 3_000,
   outer: { pause: 0.4, resume: 0.8, press: 1, reassign: 1, downtime: 0.05 },
-  inner: { none: 6, pause: 0.3, press: 0.5, reassign: 0.5, lapse: 0.4, crash: 0.3, otherEngine: 1, failSearch: 0.3 },
+  inner: { none: 6, pause: 0.3, press: 0.5, reassign: 0.5, lapse: 0.4, reclaim: 0.3, crash: 0.3, otherEngine: 1, failSearch: 0.3 },
 } as const satisfies Profile;
 
 export const profiles: Readonly<Record<ProfileName, Profile>> = {
@@ -132,7 +132,7 @@ export const profiles: Readonly<Record<ProfileName, Profile>> = {
   'two-engines': { ...everything, outer: { ...quietOuter, press: 0.5, reassign: 0.5 }, inner: { ...calmInner, otherEngine: 3, press: 0.3 } },
   downtime: { ...everything, engines: 1, downtimeSlots: 5, outer: { ...quietOuter, downtime: 0.1, press: 0.3 }, inner: { ...calmInner, crash: 0.5, lapse: 0.3 } },
   pause: { ...everything, outer: { ...quietOuter, pause: 1, resume: 1, press: 1.5 }, inner: { ...calmInner, pause: 2, press: 1, otherEngine: 1 } },
-  hangs: { ...everything, outer: { ...quietOuter, press: 1, reassign: 0.3 }, inner: { ...calmInner, lapse: 2, crash: 1, otherEngine: 2, press: 0.5 } },
+  hangs: { ...everything, outer: { ...quietOuter, press: 1, reassign: 0.3 }, inner: { ...calmInner, lapse: 2, reclaim: 1, crash: 1, otherEngine: 2, press: 0.5 } },
   'run-now': { ...everything, outer: { ...quietOuter, press: 4 }, inner: { ...calmInner, press: 2, otherEngine: 1 } },
   'shared-key': { ...everything, outer: { ...quietOuter, reassign: 0.5, press: 0.5 }, inner: { ...calmInner, otherEngine: 2, reassign: 0.3 } },
   assignee: { ...everything, outer: { ...quietOuter, reassign: 3 }, inner: { ...calmInner, reassign: 2, otherEngine: 1 } },
@@ -189,14 +189,16 @@ export type Run = {
   readonly summary: Summary;
   readonly engineLog: readonly string[];
   readonly trace: readonly Entry[];
+  readonly digest: string;
 };
 
 type Random = () => number;
 
-type Timer = { readonly at: number; readonly wake: () => void };
+type Timer = { readonly at: number; readonly owner: number; readonly wake: () => void };
 
 type VirtualClock = {
-  readonly clock: Clock;
+  readonly now: () => Date;
+  readonly clockFor: (owner: number) => Clock;
   readonly start: (run: () => Promise<void>) => Promise<void>;
   readonly nextDue: () => number | undefined;
   readonly advance: (to: number) => void;
@@ -222,6 +224,7 @@ type World = {
   readonly trace: Entry[];
   watched: Watch | undefined;
   failure: Failure | undefined;
+  crashOnClaim: string | undefined;
   quiet: boolean;
   depth: number;
   step: number;
@@ -246,7 +249,7 @@ function seeded(seed: number): Random {
 }
 
 function virtualClock(startAt: number): VirtualClock {
-  let now = startAt;
+  let at = startAt;
   let active = 0;
   let timers: readonly Timer[] = [];
   let waiting: (() => void)[] = [];
@@ -263,8 +266,9 @@ function virtualClock(startAt: number): VirtualClock {
           waiting.push(resolve);
         });
   const nextDue = (): number | undefined => timers.reduce<number | undefined>((soonest, timer) => (soonest === undefined || timer.at < soonest ? timer.at : soonest), undefined);
-  const clock: Clock = {
-    now: () => new Date(now),
+  const now = (): Date => new Date(at);
+  const clockFor = (owner: number): Clock => ({
+    now,
     sleep: (ms, stop) =>
       new Promise(resolve => {
         if (stop.aborted) {
@@ -277,14 +281,15 @@ function virtualClock(startAt: number): VirtualClock {
           active += 1;
           resolve();
         };
-        timers = [...timers, { at: now + Math.max(0, ms), wake }];
+        timers = [...timers, { at: at + Math.max(0, ms), owner, wake }];
         stop.addEventListener('abort', wake, { once: true });
         active -= 1;
         settle();
       }),
-  };
+  });
   return {
-    clock,
+    now,
+    clockFor,
     start: run => {
       active += 1;
       return run().finally(() => {
@@ -294,14 +299,18 @@ function virtualClock(startAt: number): VirtualClock {
     },
     nextDue,
     advance: to => {
-      now = Math.max(now, to);
+      at = Math.max(at, to);
     },
     fire: async () => {
       const due = nextDue();
       if (due === undefined) return;
-      now = Math.max(now, due);
-      for (const timer of timers.filter(candidate => candidate.at === due)) timer.wake();
-      await idle();
+      at = Math.max(at, due);
+      const inEngineOrder = timers.filter(timer => timer.at === due).sort((one, other) => one.owner - other.owner);
+      for (const timer of inEngineOrder) {
+        if (!timers.includes(timer)) continue;
+        timer.wake();
+        await idle();
+      }
     },
     idle,
   };
@@ -324,7 +333,7 @@ function count(world: World, outcome: string): void {
   world.tally.set(outcome, (world.tally.get(outcome) ?? 0) + 1);
 }
 
-const now = (world: World): Date => world.virtual.clock.now();
+const now = (world: World): Date => world.virtual.now();
 
 async function checkStep(world: World, move: string, detail: string): Promise<void> {
   const at = now(world).getTime();
@@ -375,15 +384,14 @@ async function innerMove(world: World, index: number, run: RoutineRun, move: Exc
       count(world, 'lapsed');
       return `run ${run.run} hung past its lease`;
     }
+    case 'reclaim':
+      return reclaim(world, index, run);
     case 'crash':
       if (engine === undefined || engine.crashed) return 'the engine already crashed';
-      engine.crashed = true;
-      engine.stop.abort();
-      await engine.db.destroy();
-      count(world, 'crashed');
+      await crash(world, engine);
       return `engine ${String(index + 1)} crashed during run ${run.run}`;
     case 'otherEngine': {
-      const other = world.engines.findIndex((candidate, at) => at !== index && candidate !== undefined && !candidate.crashed);
+      const other = otherEngine(world, index);
       const peer = world.engines[other];
       if (peer === undefined) return 'no other engine is running';
       const lines = await peer.loop.pass(peer.db, { now: now(world), late: () => false, stop: neverStops });
@@ -394,11 +402,44 @@ async function innerMove(world: World, index: number, run: RoutineRun, move: Exc
   }
 }
 
+const otherEngine = (world: World, index: number): number => world.engines.findIndex((candidate, at) => at !== index && candidate !== undefined && !candidate.crashed);
+
+async function crash(world: World, engine: Engine): Promise<void> {
+  engine.crashed = true;
+  engine.stop.abort();
+  await engine.db.destroy();
+  count(world, 'crashed');
+}
+
+async function reclaim(world: World, index: number, run: RoutineRun): Promise<string> {
+  const lease = await leaseOf(world.db, run.run);
+  if (lease - now(world).getTime() > routineEveryMs * 10) return 'the lease is too long to outlast';
+  if (run.reason === 'schedule' && lease + 1 >= run.occurrence.getTime() + routineEveryMs) return 'a newer slot would replace the run before its lease lapses';
+  const other = otherEngine(world, index);
+  const peer = world.engines[other];
+  if (peer === undefined) return 'no other engine is running';
+  world.virtual.advance(lease + 1);
+  world.crashOnClaim = run.run;
+  let refused = 'nothing';
+  try {
+    world.log.push(...(await peer.loop.pass(peer.db, { now: now(world), late: () => false, stop: neverStops })).map(line => `engine ${String(other + 1)} ${peer.loop.name}: ${line}`));
+  } catch (error) {
+    refused = error instanceof Error ? error.message : String(error);
+  } finally {
+    world.crashOnClaim = undefined;
+  }
+  if (!peer.crashed) return `run ${run.run} hung past its lease, and engine ${String(other + 1)} passed without claiming it`;
+  count(world, 're-claimed without a finish');
+  return `run ${run.run} hung past its lease, and engine ${String(other + 1)} claimed it and crashed before finishing: ${refused}`;
+}
+
 function seededSource(world: World, index: number): Source {
   return {
     kind: 'tickets',
     find: async run => {
       await checkStep(world, 'claim', `engine ${String(index + 1)} claimed run ${run.run} of routine ${run.routine}`);
+      const engine = world.engines[index];
+      if (world.crashOnClaim === run.run && engine !== undefined) await crash(world, engine);
       let failed = false;
       if (world.depth === 0 && !world.quiet) {
         world.depth += 1;
@@ -442,7 +483,7 @@ async function startEngine(world: World, index: number): Promise<void> {
   const stop = new AbortController();
   const loop = engineLoop(world, index);
   const done = world.virtual.start(() =>
-    runLoop(loop, db, world.virtual.clock, stop.signal, line => {
+    runLoop(loop, db, world.virtual.clockFor(index), stop.signal, line => {
       world.log.push(`engine ${String(index + 1)} ${line}`);
     }),
   );
@@ -603,6 +644,7 @@ async function runSeed(postgres: TestPostgres, plan: Plan, seed: number): Promis
       trace: [],
       watched: undefined,
       failure: undefined,
+      crashOnClaim: undefined,
       quiet: false,
       depth: 0,
       step: 0,
@@ -627,6 +669,7 @@ async function runSeed(postgres: TestPostgres, plan: Plan, seed: number): Promis
       summary: await summarize(db),
       engineLog: current.log,
       trace: current.failure === undefined ? current.trace.slice(-traceTail) : current.trace,
+      digest: createHash('sha256').update(JSON.stringify([current.trace, current.log, [...tally].sort()])).digest('hex').slice(0, 16),
     };
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);

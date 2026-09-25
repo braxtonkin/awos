@@ -247,9 +247,9 @@ function profileSpecific(profile: ProfileName, runs: readonly Run[]): readonly C
     case 'hangs':
       return [
         expect(
-          'hangs: runs whose lease lapsed recorded nothing, and their slots ran again or closed as lost',
-          total(runs, 'lapsed') > 0 && runs.some(run => run.engineLog.some(line => line.includes('recorded nothing, because'))),
-          `${String(total(runs, 'lapsed'))} lapsed leases, ${String(sum(runs, run => run.engineLog.filter(line => line.includes('recorded nothing, because')).length))} refused records, ${String(outcome('lost'))} runs lost`,
+          'hangs: runs whose lease lapsed recorded nothing, runs another engine re-claimed were refused their late finish, and their slots ran again or closed as lost',
+          total(runs, 'lapsed') > 0 && total(runs, 're-claimed without a finish') > 0 && runs.some(run => run.engineLog.some(line => line.includes('another engine claimed the run after its lease lapsed'))),
+          `${String(total(runs, 'lapsed'))} lapsed leases, ${String(total(runs, 're-claimed without a finish'))} re-claims without a finish, ${String(sum(runs, run => run.engineLog.filter(line => line.includes('recorded nothing, because')).length))} refused records, ${String(outcome('lost'))} runs lost`,
         ),
       ];
     case 'run-now':
@@ -288,7 +288,15 @@ async function profileChecks(postgres: TestPostgres, profile: ProfileName, given
   const steps = sum(runs, run => run.steps);
   const name = `${profile}: ${String(runs.length)} seeds, ${String(failed.length)} violations`;
   const detail = `${String(given.steps)} steps each plus a quiet phase, ${String(steps)} steps in ${seconds.toFixed(1)} s, ${String(sum(runs, run => run.summary.runs))} runs, ${String(sum(runs, run => run.summary.tasks))} tasks`;
-  return [first === undefined ? pass(name, detail) : fail(name, violation(first)), ...profileSpecific(profile, runs)];
+  return [first === undefined ? pass(name, detail) : fail(name, violation(first)), ...profileSpecific(profile, runs), await replayCheck(postgres, profile, given, runs)];
+}
+
+async function replayCheck(postgres: TestPostgres, profile: ProfileName, given: Options, runs: readonly Run[]): Promise<Check> {
+  const [first] = runs;
+  if (first === undefined) return fail(`${profile}: a seed replays exactly`, 'no seed ran');
+  const [again] = await simulate(postgres, [{ profile, seeds: [first.seed], steps: given.steps }]);
+  const name = `${profile}: seed ${String(first.seed)} replays exactly, with the same moves, engine lines, and tallies`;
+  return again?.digest === first.digest ? pass(name, `digest ${first.digest} both times`) : fail(name, `digest ${first.digest}, then ${again?.digest ?? 'no run'}`);
 }
 
 async function mutantCheck(postgres: TestPostgres, name: MutantName, given: Options): Promise<Check> {
