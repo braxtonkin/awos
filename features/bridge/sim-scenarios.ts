@@ -298,5 +298,6 @@ export const simScenarios: readonly Scenario[] = [
       const options = parseOptions(args);
       return withPostgres(postgres => simulationChecks(postgres, options));
     },
+    nightly: () => [['--seeds', '1000', '--trace', 'traces/bridge-sim']],
   },
 ];

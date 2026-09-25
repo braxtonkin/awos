@@ -1,6 +1,6 @@
 import type { Scenario } from '../../tools/verify/check.ts';
 import { defineModel, type Shape } from '../../tools/verify/models.ts';
-import type { TlcRun, TraceState } from '../../tools/verify/tlc.ts';
+import { actionsOf, type TraceState } from '../../tools/verify/tlc.ts';
 import { liveScenarios } from './live.ts';
 import { simScenarios } from './sim-scenarios.ts';
 
@@ -12,8 +12,6 @@ const numbersIn = (state: TraceState | undefined, variable: string): readonly nu
     .filter(item => item.trim() !== '')
     .map(Number);
 };
-
-const actionsOf = (run: TlcRun): readonly string[] => run.trace.map(state => state.action);
 
 const endSteps: ReadonlySet<string> = new Set(['Finish', 'Stop', 'Reap']);
 

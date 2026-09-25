@@ -100,6 +100,7 @@ export const scenarios: readonly Scenario[] = [
       if (!parsed.success) throw new Error(z.prettifyError(parsed.error));
       return simulationChecks(parsed.data);
     },
+    nightly: () => [['--seeds', '1000']],
   },
   liveScenario,
 ];

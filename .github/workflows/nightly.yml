@@ -2,12 +2,19 @@ name: nightly
 
 on:
   workflow_dispatch:
+    inputs:
+      jobs:
+        description: Which jobs to run
+        type: choice
+        options: [all, models, sims]
+        default: all
 
 permissions:
   contents: read
 
 jobs:
   models:
+    if: inputs.jobs == 'all' || inputs.jobs == 'models'
     runs-on: ubuntu-24.04
     timeout-minutes: 240
     steps:
@@ -19,31 +26,22 @@ jobs:
       - run: docker compose run --rm verify npm run verify -- models nightly
 
   simulation:
+    if: inputs.jobs == 'all' || inputs.jobs == 'sims'
     runs-on: ubuntu-24.04
     timeout-minutes: 240
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - { name: tasks-default, run: tasks-sim --profile default --trace traces }
-          - { name: tasks-races, run: tasks-sim --profile races --trace traces }
-          - { name: tasks-hangs, run: tasks-sim --profile hangs --trace traces }
-          - { name: tasks-verdicts, run: tasks-sim --profile verdicts --trace traces }
-          - { name: tasks-people, run: tasks-sim --profile people --trace traces }
-          - { name: tasks-needs-input, run: tasks-sim --profile needs-input --trace traces }
-          - { name: tasks-mixed, run: tasks-sim --profile mixed --trace traces }
-          - { name: tasks-behavior, run: tasks-sim --profile behavior --trace traces }
-          - { name: tasks-environment, run: tasks-sim --profile environment --trace traces }
-          - { name: credentials, run: credentials-sim }
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
       - run: docker compose build verify
       - run: docker compose run --rm verify npm ci
-      - run: docker compose run --rm verify npm run verify -- ${{ matrix.run }} --seeds 1000 --steps 1000 --from $(( $(date -u +%s) / 86400 * 1000 ))
+      - run: docker compose run --rm verify npm run verify -- sims nightly --shard ${{ matrix.shard }}/12
       - if: failure() || cancelled()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: ${{ matrix.name }}-traces
+          name: sims-shard-${{ matrix.shard }}-traces
           path: traces/

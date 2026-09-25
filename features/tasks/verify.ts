@@ -1,6 +1,6 @@
 import { spawn, spawnSync } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { randomBytes, randomUUID } from 'node:crypto';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as wait } from 'node:timers/promises';
@@ -12,7 +12,8 @@ import { shapeOf } from '../../shared/workflow.ts';
 import { fail, pass, type Check, type Scenario } from '../../tools/verify/check.ts';
 import { withPostgres, type TestPostgres } from '../../tools/verify/postgres.ts';
 import { modelShape, shapeDrift } from '../../tools/verify/model-shape.ts';
-import { checkModel, type TlcRun, type TraceState } from '../../tools/verify/tlc.ts';
+import { defineModel, type Shape } from '../../tools/verify/models.ts';
+import { lastRealState, type TlcRun, type TraceState } from '../../tools/verify/tlc.ts';
 import { checkCatalog, type Catalog } from './catalog.ts';
 import { claim, lostTooOften } from './claim.ts';
 import { coreRunAs } from './run-as.ts';
@@ -42,23 +43,9 @@ import {
   type Run,
 } from './simulate.ts';
 
-type Shape = { readonly label: string; readonly holds: (run: TlcRun) => boolean };
-
-type Mutant = {
-  readonly guard: string;
-  readonly without: string;
-  readonly kind: 'INVARIANT' | 'PROPERTY';
-  readonly property: string;
-  readonly violation: string;
-  readonly overrides?: Readonly<Record<string, string>>;
-  readonly shape?: Shape;
-};
-
 type TaskView = { readonly id: string; readonly step: string; readonly state: string; readonly runnable: boolean };
 
 type AttemptView = { readonly worker: string; readonly task: string };
-
-const folder = fileURLToPath(new URL('.', import.meta.url));
 
 const unrunnableIn = (state: TraceState): readonly string[] =>
   [...(/runnable = \(([^)]*)\)/.exec(state.text)?.[1] ?? '').matchAll(/(t\d+) :> FALSE/g)].map(([, id = '']) => id);
@@ -77,8 +64,6 @@ const attemptsIn = (state: TraceState): readonly AttemptView[] =>
 const hungIn = (state: TraceState): readonly string[] => [...state.text.matchAll(/(w\d+) :> "hung"/g)].map(([, worker = '']) => worker);
 
 const failedIn = (state: TraceState): readonly string[] => [...state.text.matchAll(/(w\d+) :> "failed"/g)].map(([, worker = '']) => worker);
-
-const lastRealState = (run: TlcRun): TraceState | undefined => run.trace.filter(state => state.action !== 'Stuttering').at(-1);
 
 const loopedTask = (run: TlcRun, looping: (views: readonly TaskView[]) => boolean): boolean =>
   run.loop.length > 0 && [...new Set(run.loop.flatMap(tasksIn).map(view => view.id))].some(id => looping(run.loop.flatMap(tasksIn).filter(view => view.id === id)));
@@ -174,6 +159,48 @@ const hungWorkerHoldsItsTask: Shape = {
   },
 };
 
+const guards = [
+  'ClaimIsExclusive',
+  'ClaimNeedsReadyTask',
+  'ClaimNeedsAPerson',
+  'NoOneParksTask',
+  'LateResultIsRefused',
+  'RoundsAreCapped',
+  'EnvRerunsAreCapped',
+  'LostAttemptsAreCapped',
+  'StageRetriesAreCapped',
+  'InputWaitsAreCapped',
+  'PassResetsStageRetries',
+  'RetryResetsStageRetries',
+  'BehaviorFailureReturnsToImplement',
+  'BehaviorFailureLeavesVerify',
+  'EnvironmentFailureStaysInVerify',
+  'FailureParksTask',
+  'RetryKeepsOutputs',
+  'RetryEndsAttempt',
+  'StopEndsAttempt',
+  'StopSparesDoneTasks',
+  'EndingSparesOtherTasks',
+  'ReaperIsFair',
+  'EndStageIsFinal',
+  'GateBlocksUntilApproved',
+  'ReturnClearsApprovals',
+  'MergeChecksGates',
+  'MergeWaitsForMergeable',
+  'ReviewReturnIsCapped',
+  'RetryResumesStopped',
+  'RetryKeepsReviews',
+  'VerifyPassKeepsLandRounds',
+  'OutsideApprovalsAreFinite',
+  'LaterReviewParks',
+  'OutsideApprovalNeedsAWait',
+  'RetryKeepsApprovals',
+  'LostApprovalStaysLost',
+  'LapsedLeaseCannotRenew',
+  'RefusedLaunchIsNotLost',
+  'FailedLaunchRelaunches',
+] as const;
+
 const renewsLapsedLeaseForever: Shape = {
   label: 'by a worker whose lease lapses and renews forever',
   holds: run => run.loopActions.includes('Hang') && run.loopActions.includes('Wake') && !run.loopActions.includes('Reap'),
@@ -189,253 +216,129 @@ const failedLaunchHoldsItsTask: Shape = {
   },
 };
 
-const invariant = (guard: string, without: string, property: string, shape?: Shape): Mutant => ({
-  guard,
-  without,
-  kind: 'INVARIANT',
-  property,
-  violation: `Invariant ${property} is violated`,
-  ...(shape === undefined ? {} : { shape }),
-});
+const properties = {
+  OneLiveAttempt: 'INVARIANTS',
+  LiveAttemptMeansReady: 'INVARIANTS',
+  LiveAttemptIsCurrent: 'INVARIANTS',
+  AttemptRunsAsAPerson: 'INVARIANTS',
+  OutputsSurvive: 'INVARIANTS',
+  RoundsCapped: 'INVARIANTS',
+  EnvRerunsCapped: 'INVARIANTS',
+  LostAttemptsCapped: 'INVARIANTS',
+  StageRetriesCapped: 'INVARIANTS',
+  InputWaitsCapped: 'INVARIANTS',
+  PassLeavesNoStageRetries: 'INVARIANTS',
+  StopsAtItsEndStage: 'INVARIANTS',
+  ApprovalsMatchGatesPassed: 'INVARIANTS',
+  ReviewReturnsCapped: 'INVARIANTS',
+  StoppedTaskCanResume: 'INVARIANTS',
+  LateWriteChangesNothing: 'PROPERTIES',
+  TaskChangesOnlyWithItsAttempt: 'PROPERTIES',
+  AttemptEndsOnlyWithItsTask: 'PROPERTIES',
+  FailedRoundReturnsToImplement: 'PROPERTIES',
+  OutputsOnlyGrow: 'PROPERTIES',
+  StageAdvancesOnlyOnPass: 'PROPERTIES',
+  DoneIsFinal: 'PROPERTIES',
+  StageMovesOneStep: 'PROPERTIES',
+  OnlyAPersonStops: 'PROPERTIES',
+  RetryLeavesNoStageRetries: 'PROPERTIES',
+  GatePassesOnlyOnApprove: 'PROPERTIES',
+  MergeNeedsEveryGate: 'PROPERTIES',
+  ReviewsOnlyGrow: 'PROPERTIES',
+  LaterReviewWaitsForAPerson: 'PROPERTIES',
+  EndStagePassIsDone: 'PROPERTIES',
+  ReleasedOnlyAfterItsLease: 'PROPERTIES',
+  LapsedLeaseNeverRenews: 'PROPERTIES',
+  EveryTaskSettles: 'PROPERTIES',
+} as const;
 
-const action = (guard: string, without: string, property: string, extra: Pick<Mutant, 'overrides' | 'shape'> = {}): Mutant => ({
-  guard,
-  without,
-  kind: 'PROPERTY',
-  property,
-  violation: `Action property ${property} is violated`,
-  ...extra,
-});
+type Guard = (typeof guards)[number];
 
-const unsettled = (guard: string, without: string, shape: Shape, extra: Pick<Mutant, 'overrides'> = {}): Mutant => ({
-  guard,
-  without,
-  kind: 'PROPERTY',
-  property: 'EveryTaskSettles',
-  violation: 'Temporal properties were violated',
-  shape,
-  ...extra,
-});
+type Property = keyof typeof properties;
+
+type Setting = 'MaxHumanActions' | 'IgnoreLaterReviews' | 'ReadyBeforeGreen' | 'GateSteps';
+
+type Extra = { readonly shape?: Shape; readonly overrides?: Readonly<Partial<Record<Setting, string>>> };
+
+const breaks = (guard: Guard, without: string, property: Property, extra: Extra = {}) => ({ guard, without, property, ...extra });
+
+const unsettled = (guard: Guard, without: string, shape: Shape) => breaks(guard, without, 'EveryTaskSettles', { shape });
 
 const onlyReaps = { MaxHumanActions: '0' };
 
-const mutants: readonly Mutant[] = [
-  invariant('ClaimIsExclusive', 'a second worker can insert an attempt', 'OneLiveAttempt', twoWorkersClaimOneTask),
-  invariant('ClaimNeedsReadyTask', 'a worker can claim a task that is not ready', 'LiveAttemptMeansReady'),
-  invariant('ClaimNeedsAPerson', 'a claim runs a task nobody can run as', 'AttemptRunsAsAPerson', claimRunsTaskNobodyCanRunAs),
-  unsettled('NoOneParksTask', 'a task nobody can run as stays ready', readyTaskNoClaimTakes),
-  invariant('StopEndsAttempt', 'stopping a task leaves its attempt live', 'LiveAttemptMeansReady', stoppedTaskKeepsAttempt),
-  invariant('RetryEndsAttempt', 'a retry leaves the old attempt live', 'LiveAttemptIsCurrent'),
-  action('LateResultIsRefused', 'a late result still applies', 'LateWriteChangesNothing', { overrides: onlyReaps, shape: lateResultAfterReap }),
-  action('LateResultIsRefused', 'a late result still applies', 'TaskChangesOnlyWithItsAttempt', { overrides: onlyReaps, shape: lateResultAfterReap }),
-  invariant('RetryKeepsOutputs', 'a retry drops earlier outputs', 'OutputsSurvive'),
-  action('RetryKeepsOutputs', 'a retry drops earlier outputs', 'OutputsOnlyGrow'),
-  action('EnvironmentFailureStaysInVerify', 'an environment failure counts as a pass', 'StageAdvancesOnlyOnPass'),
-  action('StopSparesDoneTasks', 'a person can stop a done task', 'DoneIsFinal'),
-  action('BehaviorFailureReturnsToImplement', 'a behavior failure returns to specify', 'StageMovesOneStep'),
-  action('BehaviorFailureLeavesVerify', 'a behavior failure reruns Verify', 'FailedRoundReturnsToImplement'),
-  action('EndingSparesOtherTasks', 'a stop or retry ends every live attempt', 'AttemptEndsOnlyWithItsTask', { shape: personEndsALiveAttempt }),
-  action('FailureParksTask', 'a failed stage stops the task', 'OnlyAPersonStops'),
-  unsettled('RoundsAreCapped', 'verify rounds have no cap', loopsBetweenImplementAndVerify),
-  invariant('RoundsAreCapped', 'verify rounds have no cap', 'RoundsCapped'),
-  unsettled('EnvRerunsAreCapped', 'environment reruns have no cap', rerunsVerifyForever),
-  invariant('EnvRerunsAreCapped', 'environment reruns have no cap', 'EnvRerunsCapped'),
-  unsettled('LostAttemptsAreCapped', 'lost attempts have no cap', losesAttemptsForever),
-  invariant('LostAttemptsAreCapped', 'lost attempts have no cap', 'LostAttemptsCapped'),
-  unsettled('StageRetriesAreCapped', 'stage retries have no cap', rerunsFailedStageForever),
-  invariant('StageRetriesAreCapped', 'stage retries have no cap', 'StageRetriesCapped'),
-  invariant('InputWaitsAreCapped', 'needs input has no cap', 'InputWaitsCapped'),
-  invariant('PassResetsStageRetries', 'a pass keeps the stage retries', 'PassLeavesNoStageRetries'),
-  action('RetryResetsStageRetries', "a person's retry keeps the stage retries", 'RetryLeavesNoStageRetries'),
-  unsettled('ReaperIsFair', 'the reaper has no fairness', hungWorkerHoldsItsTask),
-  action('LapsedLeaseCannotRenew', 'a worker renews a lease that has lapsed', 'LapsedLeaseNeverRenews'),
-  unsettled('LapsedLeaseCannotRenew', 'a worker renews a lease that has lapsed', renewsLapsedLeaseForever),
-  action('RefusedLaunchIsNotLost', 'a refused launch counts as a lost attempt', 'ReleasedOnlyAfterItsLease'),
-  unsettled('FailedLaunchRelaunches', 'a launch that failed is never tried again', failedLaunchHoldsItsTask),
-  invariant('EndStageIsFinal', "passing a routine's end stage does not end the task", 'StopsAtItsEndStage'),
-  action('GateBlocksUntilApproved', 'a gated stage passes straight to the next stage', 'GatePassesOnlyOnApprove'),
-  action('ReturnClearsApprovals', 'a return to Implement keeps the approval of a gate it must pass again', 'GatePassesOnlyOnApprove'),
-  invariant('ReturnClearsApprovals', 'a return to Implement keeps the approval of a gate it must pass again', 'ApprovalsMatchGatesPassed'),
-  invariant('LostApprovalStaysLost', 'a return to Implement restores the approval of an earlier gate that went missing at Land', 'ApprovalsMatchGatesPassed'),
-  action('MergeChecksGates', "Land merges a task that a fault left without a gate's approval", 'MergeNeedsEveryGate'),
-  action('MergeWaitsForMergeable', 'Land merges past a red check on a pull request that left draft before its checks were green', 'MergeNeedsEveryGate', { overrides: { IgnoreLaterReviews: '{}' } }),
-  action('MergeWaitsForMergeable', 'Land merges past a later review that its routine ignores', 'MergeNeedsEveryGate', { overrides: { ReadyBeforeGreen: '{}', GateSteps: '{"specify"}' } }),
-  invariant('ReviewReturnIsCapped', 'every review that asks for changes returns the task to Implement', 'ReviewReturnsCapped'),
-  invariant('RetryResumesStopped', 'Retry cannot resume a stopped task', 'StoppedTaskCanResume'),
-  action('RetryKeepsReviews', "a person's retry forgets the review return", 'ReviewsOnlyGrow'),
-  invariant('RetryKeepsApprovals', "a person's retry forgets the task's approvals", 'StoppedTaskCanResume'),
-  unsettled('VerifyPassKeepsLandRounds', 'a Verify pass clears the Land rounds of a task with no gate', loopsFromLandToImplement),
-  unsettled('OutsideApprovalsAreFinite', 'outside approvals may never stop', approvesForever),
-  action('OutsideApprovalNeedsAWait', 'an outside approval resumes a task that is not awaiting one', 'TaskChangesOnlyWithItsAttempt'),
-  action('LaterReviewParks', 'a later review of a routine that does not ignore them waits for an outside approval', 'LaterReviewWaitsForAPerson'),
-  action('EndStageIsFinal', "passing a routine's end stage does not end the task", 'EndStagePassIsDone'),
-];
-
-const readConfig = (file: string): string => readFileSync(new URL(file, import.meta.url), 'utf8');
-
-const typeInvariant = 'TypeOK';
-
-const bounds = ['Tasks', 'Workers', 'MaxRounds', 'MaxEnvReruns', 'MaxLost', 'MaxStageRetries', 'MaxInputWaits', 'MaxHumanActions', 'MaxReassignments', 'MaxLaunchFaults'] as const;
-
-type Bound = (typeof bounds)[number];
-
-const floors: Readonly<Record<string, Readonly<Record<Bound, number>>>> = {
-  'Tasks.cfg': { Tasks: 2, Workers: 2, MaxRounds: 2, MaxEnvReruns: 2, MaxLost: 2, MaxStageRetries: 1, MaxInputWaits: 1, MaxHumanActions: 2, MaxReassignments: 1, MaxLaunchFaults: 1 },
-  'Tasks.nightly.cfg': { Tasks: 2, Workers: 2, MaxRounds: 3, MaxEnvReruns: 3, MaxLost: 3, MaxStageRetries: 2, MaxInputWaits: 2, MaxHumanActions: 3, MaxReassignments: 1, MaxLaunchFaults: 1 },
-};
-
-type Section = 'CONSTANTS' | 'INVARIANTS' | 'PROPERTIES';
-
-type ConfigShape = {
-  readonly constants: ReadonlyMap<string, string>;
-  readonly listed: Readonly<Record<Mutant['kind'], ReadonlySet<string>>>;
-  readonly problems: readonly string[];
-};
-
-const sections: readonly Section[] = ['CONSTANTS', 'INVARIANTS', 'PROPERTIES'];
-
-const isSection = (line: string): line is Section => sections.some(section => section === line);
-
-function parseConfig(config: string): ConfigShape {
-  const constants = new Map<string, string>();
-  const invariants = new Set<string>();
-  const properties = new Set<string>();
-  const problems: string[] = [];
-  let section: Section | undefined;
-  for (const line of config.split('\n').map(raw => raw.trimEnd())) {
-    const assignment = /^ {4}(\w+) (?:=|<-) (\S.*)$/.exec(line);
-    const listed = /^ {4}(\w+)$/.exec(line)?.[1];
-    if (line === '' || line === 'SPECIFICATION Spec') continue;
-    if (/\\\*|\(\*/.test(line)) problems.push(`comment in "${line}"`);
-    else if (isSection(line)) section = line;
-    else if (section === 'CONSTANTS' && assignment !== null) {
-      const [, name = '', value = ''] = assignment;
-      if (constants.has(name)) problems.push(`${name} is assigned twice`);
-      constants.set(name, value.trim());
-    } else if (section === 'INVARIANTS' && listed !== undefined) invariants.add(listed);
-    else if (section === 'PROPERTIES' && listed !== undefined) properties.add(listed);
-    else problems.push(`unexpected line "${line}"`);
-  }
-  return { constants, listed: { INVARIANT: invariants, PROPERTY: properties }, problems };
-}
-
-function boundOf(constants: ReadonlyMap<string, string>, bound: Bound): number | undefined {
-  const value = constants.get(bound);
-  if (value === undefined) return undefined;
-  return value.startsWith('{') ? new Set(value.replace(/[{}\s]/g, '').split(',').filter(item => item !== '')).size : Number(value);
-}
-
-type ConfigReview = { readonly findings: readonly string[]; readonly summary: string };
-
-function reviewConfig(file: string, config: string, rows: readonly Mutant[] = mutants): ConfigReview {
-  const { constants, listed, problems } = parseConfig(config);
-  const floor = floors[file];
-  const everyListed = [...listed.INVARIANT, ...listed.PROPERTY];
-  const broken = new Set(rows.map(mutant => mutant.property));
-  const mutated = new Set(rows.map(mutant => mutant.guard));
-  const guards = [...constants].filter(([, value]) => value === 'TRUE').map(([name]) => name);
-  const findings = [
-    ...problems,
-    ...(listed.INVARIANT.has(typeInvariant) ? [] : [`${typeInvariant} is not listed under INVARIANTS`]),
-    ...rows.filter(mutant => !listed[mutant.kind].has(mutant.property)).map(mutant => `${mutant.property} is not listed under ${mutant.kind === 'INVARIANT' ? 'INVARIANTS' : 'PROPERTIES'}`),
-    ...everyListed.filter(property => property !== typeInvariant && !broken.has(property)).map(property => `${property} has no mutant`),
-    ...guards.filter(guard => !mutated.has(guard)).map(guard => `guard ${guard} has no mutant`),
-    ...rows.flatMap(mutant => Object.keys(mutant.overrides ?? {}).filter(name => constants.get(name) === 'TRUE').map(name => `the mutant of ${mutant.guard} also turns off guard ${name}`)),
-    ...(floor === undefined
-      ? [`${file} has no floors`]
-      : bounds.flatMap(bound => {
-          const value = boundOf(constants, bound);
-          return value !== undefined && value >= floor[bound] ? [] : [`${bound} is ${String(value)}, below its floor of ${String(floor[bound])}`];
-        })),
-  ];
-  return { findings: [...new Set(findings)], summary: `${String(broken.size)} properties, ${String(guards.length)} guards` };
-}
-
-function checkConfig(file: string): Check {
-  const { findings, summary } = reviewConfig(file, readConfig(file));
-  const name = `${file} lists each property in its section with a mutant, every guard with a mutant, and bounds no lower than its floors`;
-  return findings.length === 0 ? pass(name, summary) : fail(name, findings.join('; '));
-}
-
-type Plant = {
-  readonly change: string;
-  readonly harmful: boolean;
-  readonly edit: (config: string) => string;
-  readonly rows?: (rows: readonly Mutant[]) => readonly Mutant[];
-};
-
-const withOverride = (guard: string, overrides: Readonly<Record<string, string>>) => (rows: readonly Mutant[]) =>
-  rows.some(row => row.guard === guard) ? rows.map(row => (row.guard === guard ? { ...row, overrides } : row)) : rows;
-
-const plants: readonly Plant[] = [
-  { change: 'a comment hides a smaller Tasks', harmful: true, edit: config => config.replace('    Tasks = {t1, t2}', '    Tasks = {t1} \\* {t1, t2}') },
-  { change: 'a comment follows a guard', harmful: true, edit: config => config.replace('    ReaperIsFair = TRUE', '    ReaperIsFair = TRUE \\* fair') },
-  { change: 'an invariant moves under PROPERTIES', harmful: true, edit: config => config.replace('    RoundsCapped\n', '').replace('PROPERTIES\n', 'PROPERTIES\n    RoundsCapped\n') },
-  { change: 'Tasks is assigned twice', harmful: true, edit: config => config.replace('    Workers =', '    Tasks = {t1}\n    Workers =') },
-  { change: 'Tasks repeats a member', harmful: true, edit: config => config.replace('{t1, t2}', '{t1, t1}') },
-  { change: 'TypeOK is dropped', harmful: true, edit: config => config.replace('    TypeOK\n', '') },
-  { change: 'a line ends in a tab', harmful: false, edit: config => config.replace('    TypeOK\n', '    TypeOK\t\n') },
-  { change: 'a blank line holds spaces', harmful: false, edit: config => config.replace('\nINVARIANTS', '\n    \nINVARIANTS') },
-  { change: 'lines end in CRLF', harmful: false, edit: config => config.replace(/\n/g, '\r\n') },
-  { change: 'a mutant also turns off another guard', harmful: true, edit: config => config, rows: withOverride('MergeChecksGates', { GateBlocksUntilApproved: 'FALSE' }) },
-  { change: 'a mutant picks a setting', harmful: false, edit: config => config, rows: withOverride('MergeChecksGates', { ReadyBeforeGreen: '{}' }) },
-];
-
-function checkPlants(file: string): Check {
-  const config = readConfig(file);
-  const misses = plants.flatMap(plant => {
-    const planted = plant.edit(config);
-    const rows = plant.rows?.(mutants) ?? mutants;
-    if (planted === config && rows === mutants) return [`${plant.change} no longer changes ${file}`];
-    const rejected = reviewConfig(file, planted, rows).findings.length > 0;
-    return rejected === plant.harmful ? [] : [`${plant.change} is ${rejected ? 'rejected' : 'accepted'}`];
-  });
-  const name = `the review of ${file} rejects each harmful plant and accepts each harmless one`;
-  return misses.length === 0 ? pass(name, `${String(plants.length)} plants`) : fail(name, misses.join('; '));
-}
-
-function mutantConfig(config: string, mutant: Mutant): string {
-  const [constants = '', properties] = config.split('\nINVARIANTS');
-  if (properties === undefined || !constants.includes(`${mutant.guard} = TRUE`)) throw new Error(`Tasks.cfg must set ${mutant.guard} = TRUE before its INVARIANTS`);
-  const overridden = Object.entries(mutant.overrides ?? {}).reduce((text, [name, value]) => text.replace(new RegExp(`^( +${name} = ).*$`, 'm'), `$1${value}`), constants);
-  return `${overridden.replace(`${mutant.guard} = TRUE`, `${mutant.guard} = FALSE`)}\n${mutant.kind}\n    ${mutant.property}\n`;
-}
-
-const traceLine = (run: TlcRun): string => {
-  const actions = run.trace.map(state => state.action);
-  const shown = actions.length > 8 ? ['...', ...actions.slice(-8)] : actions;
-  const ending = run.loop.length > 0 ? `, then loops back over the last ${String(run.loop.length)} states` : '';
-  return `${shown.join(' -> ')}${ending}`;
-};
-
-const liveness = 'EveryTaskSettles';
-
-function splitByLiveness(config: string): readonly [string, string] {
-  const [constants = ''] = config.split('\nINVARIANTS');
-  return [config.replace(`    ${liveness}\n`, ''), `${constants}\nPROPERTY\n    ${liveness}\n`];
-}
-
-function checkHolds(file: string): Check {
-  const name = `${file} holds every property`;
-  const [safetyConfig, livenessConfig] = splitByLiveness(readConfig(file));
-  const safety = checkModel(folder, 'Tasks', safetyConfig);
-  const settles = checkModel(folder, 'Tasks', livenessConfig);
-  const failed = [safety, settles].find(run => !run.clean);
-  if (failed !== undefined) return fail(name, failed.error ?? failed.output.trim().split('\n').slice(-3).join(' | '));
-  return pass(
-    name,
-    `${String(settles.distinctStates)} distinct states, safety in ${safety.seconds.toFixed(1)} s and ${liveness} in ${settles.seconds.toFixed(1)} s, no error has been found`,
-  );
-}
-
-function checkMutant(config: string, mutant: Mutant): Check {
-  const run = checkModel(folder, 'Tasks', mutantConfig(config, mutant), mutant.property === 'EveryTaskSettles' ? 'auto' : '1');
-  const name = `${mutant.property} fails when ${mutant.without}${mutant.shape === undefined ? '' : `, ${mutant.shape.label}`}`;
-  const violated = run.error?.includes(mutant.violation) === true;
-  const shaped = mutant.shape === undefined || mutant.shape.holds(run);
-  const got = run.error ?? (run.clean ? 'no violation' : (run.output.trim().split('\n').at(-1) ?? 'no output'));
-  return violated && shaped ? pass(name, traceLine(run)) : fail(name, `expected ${mutant.violation}${shaped ? '' : ' with that trace'}, got ${got}`);
-}
+const tasksModel = defineModel({
+  name: 'tasks',
+  module: new URL('Tasks.tla', import.meta.url),
+  configs: {
+    pr: {
+      file: 'Tasks.cfg',
+      floors: { Tasks: 2, Workers: 2, MaxRounds: 2, MaxEnvReruns: 2, MaxLost: 2, MaxStageRetries: 1, MaxInputWaits: 1, MaxHumanActions: 2, MaxReassignments: 1, MaxLaunchFaults: 1 },
+    },
+    nightly: {
+      file: 'Tasks.nightly.cfg',
+      floors: { Tasks: 2, Workers: 2, MaxRounds: 3, MaxEnvReruns: 3, MaxLost: 3, MaxStageRetries: 2, MaxInputWaits: 2, MaxHumanActions: 3, MaxReassignments: 1, MaxLaunchFaults: 1 },
+    },
+  },
+  guards,
+  properties,
+  liveness: ['EveryTaskSettles'],
+  settings: ['IgnoreLaterReviews', 'ReadyBeforeGreen', 'GateSteps'],
+  mutants: [
+    breaks('ClaimIsExclusive', 'a second worker can insert an attempt', 'OneLiveAttempt', { shape: twoWorkersClaimOneTask }),
+    breaks('ClaimNeedsReadyTask', 'a worker can claim a task that is not ready', 'LiveAttemptMeansReady'),
+    breaks('ClaimNeedsAPerson', 'a claim runs a task nobody can run as', 'AttemptRunsAsAPerson', { shape: claimRunsTaskNobodyCanRunAs }),
+    unsettled('NoOneParksTask', 'a task nobody can run as stays ready', readyTaskNoClaimTakes),
+    breaks('StopEndsAttempt', 'stopping a task leaves its attempt live', 'LiveAttemptMeansReady', { shape: stoppedTaskKeepsAttempt }),
+    breaks('RetryEndsAttempt', 'a retry leaves the old attempt live', 'LiveAttemptIsCurrent'),
+    breaks('LateResultIsRefused', 'a late result still applies', 'LateWriteChangesNothing', { overrides: onlyReaps, shape: lateResultAfterReap }),
+    breaks('LateResultIsRefused', 'a late result still applies', 'TaskChangesOnlyWithItsAttempt', { overrides: onlyReaps, shape: lateResultAfterReap }),
+    breaks('RetryKeepsOutputs', 'a retry drops earlier outputs', 'OutputsSurvive'),
+    breaks('RetryKeepsOutputs', 'a retry drops earlier outputs', 'OutputsOnlyGrow'),
+    breaks('EnvironmentFailureStaysInVerify', 'an environment failure counts as a pass', 'StageAdvancesOnlyOnPass'),
+    breaks('StopSparesDoneTasks', 'a person can stop a done task', 'DoneIsFinal'),
+    breaks('BehaviorFailureReturnsToImplement', 'a behavior failure returns to specify', 'StageMovesOneStep'),
+    breaks('BehaviorFailureLeavesVerify', 'a behavior failure reruns Verify', 'FailedRoundReturnsToImplement'),
+    breaks('EndingSparesOtherTasks', 'a stop or retry ends every live attempt', 'AttemptEndsOnlyWithItsTask', { shape: personEndsALiveAttempt }),
+    breaks('FailureParksTask', 'a failed stage stops the task', 'OnlyAPersonStops'),
+    unsettled('RoundsAreCapped', 'verify rounds have no cap', loopsBetweenImplementAndVerify),
+    breaks('RoundsAreCapped', 'verify rounds have no cap', 'RoundsCapped'),
+    unsettled('EnvRerunsAreCapped', 'environment reruns have no cap', rerunsVerifyForever),
+    breaks('EnvRerunsAreCapped', 'environment reruns have no cap', 'EnvRerunsCapped'),
+    unsettled('LostAttemptsAreCapped', 'lost attempts have no cap', losesAttemptsForever),
+    breaks('LostAttemptsAreCapped', 'lost attempts have no cap', 'LostAttemptsCapped'),
+    unsettled('StageRetriesAreCapped', 'stage retries have no cap', rerunsFailedStageForever),
+    breaks('StageRetriesAreCapped', 'stage retries have no cap', 'StageRetriesCapped'),
+    breaks('InputWaitsAreCapped', 'needs input has no cap', 'InputWaitsCapped'),
+    breaks('PassResetsStageRetries', 'a pass keeps the stage retries', 'PassLeavesNoStageRetries'),
+    breaks('RetryResetsStageRetries', "a person's retry keeps the stage retries", 'RetryLeavesNoStageRetries'),
+    unsettled('ReaperIsFair', 'the reaper has no fairness', hungWorkerHoldsItsTask),
+    breaks('LapsedLeaseCannotRenew', 'a worker renews a lease that has lapsed', 'LapsedLeaseNeverRenews'),
+    unsettled('LapsedLeaseCannotRenew', 'a worker renews a lease that has lapsed', renewsLapsedLeaseForever),
+    breaks('RefusedLaunchIsNotLost', 'a refused launch counts as a lost attempt', 'ReleasedOnlyAfterItsLease'),
+    unsettled('FailedLaunchRelaunches', 'a launch that failed is never tried again', failedLaunchHoldsItsTask),
+    breaks('EndStageIsFinal', "passing a routine's end stage does not end the task", 'StopsAtItsEndStage'),
+    breaks('GateBlocksUntilApproved', 'a gated stage passes straight to the next stage', 'GatePassesOnlyOnApprove'),
+    breaks('ReturnClearsApprovals', 'a return to Implement keeps the approval of a gate it must pass again', 'GatePassesOnlyOnApprove'),
+    breaks('ReturnClearsApprovals', 'a return to Implement keeps the approval of a gate it must pass again', 'ApprovalsMatchGatesPassed'),
+    breaks('LostApprovalStaysLost', 'a return to Implement restores the approval of an earlier gate that went missing at Land', 'ApprovalsMatchGatesPassed'),
+    breaks('MergeChecksGates', "Land merges a task that a fault left without a gate's approval", 'MergeNeedsEveryGate'),
+    breaks('MergeWaitsForMergeable', 'Land merges past a red check on a pull request that left draft before its checks were green', 'MergeNeedsEveryGate', {
+      overrides: { IgnoreLaterReviews: '{}' },
+    }),
+    breaks('MergeWaitsForMergeable', 'Land merges past a later review that its routine ignores', 'MergeNeedsEveryGate', {
+      overrides: { ReadyBeforeGreen: '{}', GateSteps: '{"specify"}' },
+    }),
+    breaks('ReviewReturnIsCapped', 'every review that asks for changes returns the task to Implement', 'ReviewReturnsCapped'),
+    breaks('RetryResumesStopped', 'Retry cannot resume a stopped task', 'StoppedTaskCanResume'),
+    breaks('RetryKeepsReviews', "a person's retry forgets the review return", 'ReviewsOnlyGrow'),
+    breaks('RetryKeepsApprovals', "a person's retry forgets the task's approvals", 'StoppedTaskCanResume'),
+    unsettled('VerifyPassKeepsLandRounds', 'a Verify pass clears the Land rounds of a task with no gate', loopsFromLandToImplement),
+    unsettled('OutsideApprovalsAreFinite', 'outside approvals may never stop', approvesForever),
+    breaks('OutsideApprovalNeedsAWait', 'an outside approval resumes a task that is not awaiting one', 'TaskChangesOnlyWithItsAttempt'),
+    breaks('LaterReviewParks', 'a later review of a routine that does not ignore them waits for an outside approval', 'LaterReviewWaitsForAPerson'),
+    breaks('EndStageIsFinal', "passing a routine's end stage does not end the task", 'EndStagePassIsDone'),
+  ],
+});
 
 const simulationFlags = {
   profile: { type: 'string' },
@@ -866,6 +769,46 @@ function noUrlCheck(): Check {
   return started.status === 1 && started.said.includes('DATABASE_URL') ? pass(name, started.said.replaceAll('\n', ' ')) : fail(name, `exit ${String(started.status)}: ${started.said}`);
 }
 
+const alwaysRun = ['reaper', 'scheduler', 'environments', 'outbox'] as const;
+
+const skipReasons = {
+  checks: 'has no CREDENTIAL_KEY, so it opens and checks no credentials',
+  sweep: 'has no JOB_IMAGE, so it launches no Jobs and sweeps none',
+} as const;
+
+function unnamedLoops(said: string): readonly string[] {
+  const line = said.split('\n').find(entry => entry.startsWith(startLine)) ?? '';
+  const named = new Set([...line.matchAll(/(\w+) every \d+ ms/g)].map(([, loop = '']) => loop));
+  return [
+    ...alwaysRun.filter(loop => !named.has(loop)),
+    ...Object.entries(skipReasons)
+      .filter(([loop, reason]) => !named.has(loop) && !said.includes(reason))
+      .map(([loop]) => loop),
+  ];
+}
+
+const credentialKey = { CREDENTIAL_KEY: randomBytes(32).toString('base64'), CREDENTIAL_KEY_VERSION: '1' };
+
+async function loopNamesCheck(postgres: TestPostgres): Promise<Check> {
+  const name = 'an engine with a credential key names each of its loops in its startup line, or says why it skips one, and a keyless start line fails the same check';
+  const scratch = await postgres.scratch();
+  try {
+    const keyed = runEngine(scratch.stableUrl, { ...quickEngine, ...credentialKey });
+    const keyedUp = await keyed.waitFor(startLine);
+    const keyedStatus = await keyed.terminate();
+    const keyless = runEngine(scratch.stableUrl, quickEngine);
+    const keylessUp = await keyless.waitFor(startLine);
+    const keylessStatus = await keyless.terminate();
+    const missing = unnamedLoops(keyed.said());
+    const control = unnamedLoops(keyless.said().replace(skipReasons.checks, ''));
+    return keyedUp && keyedStatus === 0 && missing.length === 0 && keylessUp && keylessStatus === 0 && control.join() === 'checks'
+      ? pass(name, `${keyed.said().replaceAll('\n', ' ')} | without the key and its reason, the check finds ${control.join(', ')} unnamed`)
+      : fail(name, `keyed start ${String(keyedUp)}, exit ${String(keyedStatus)}, unnamed ${missing.join(', ') || 'none'}; keyless start ${String(keylessUp)}, exit ${String(keylessStatus)}, unnamed ${control.join(', ') || 'none'}: ${keyed.said()} ${keyed.errors()}`);
+  } finally {
+    await scratch.drop();
+  }
+}
+
 async function idleCheck(postgres: TestPostgres): Promise<Check> {
   const name = 'the engine runs at least 3 reaper intervals on an empty database with no error, then exits 0 on SIGTERM';
   const scratch = await postgres.scratch();
@@ -917,7 +860,7 @@ async function sigtermChecks(postgres: TestPostgres): Promise<readonly Check[]> 
     const claimedAt = new Date();
     const attempts: string[] = [];
     for (const [index, task] of tasks.entries()) {
-      const claimed = await claim(db, task.id, claimedAt, index < 8 ? 1_000 : 6_000, await coreRunAs(null)(db, task.id), null);
+      const claimed = await claim(db, task.id, claimedAt, index < 8 ? 1_000 : 3_600_000, await coreRunAs(null)(db, task.id), null);
       if (!('attempt' in claimed)) throw new Error(`the lane could not claim task ${task.id}: ${claimed.refused}`);
       attempts.push(claimed.attempt);
     }
@@ -960,6 +903,10 @@ async function sigtermChecks(postgres: TestPostgres): Promise<readonly Check[]> 
       .orderBy('task.id')
       .execute();
     const halfReleased = halves.filter(row => row.lost !== Number(row.lostAttempts ?? '0'));
+    const releasedByFirst = await lost(backlog);
+    await db.updateTable('attempt').set({ lease_until: new Date(Date.now() - 1_000) }).where('id', 'in', backlog).execute();
+    await wait(1_000);
+    const releasedWhileDown = await lost(backlog);
     const restarted = runEngine(scratch.stableUrl, { REAPER_EVERY_MS: '250', LEASE_MS: '1000' });
     const restartedUp = await restarted.waitFor(startLine);
     const finished = restartedUp && (await until(15_000, async () => (await lost(backlog)) === backlog.length));
@@ -972,9 +919,15 @@ async function sigtermChecks(postgres: TestPostgres): Promise<readonly Check[]> 
         ? pass(stopName, `the pass waited on a locked attempt when SIGTERM arrived, the engine was still running 500 ms later, then released ${String(releasedFirst)} of ${String(first.length)} expired attempts in that pass and exited 0: ${firstSaid.replaceAll('\n', ' ')}`)
         : fail(stopName, `blocked mid-pass ${String(midPass)}, still running after SIGTERM ${String(heldOn)}, exit ${String(firstStatus)}, released ${String(releasedFirst)} of ${String(first.length)}: ${firstSaid} ${engine.errors()}`),
       halfReleased.length === 0 ? pass(halfName, `${String(halves.length)} tasks checked`) : fail(halfName, JSON.stringify(halfReleased)),
-      finished && secondStatus === 0
-        ? pass(backlogName, restarted.said().replaceAll('\n', ' '))
-        : fail(backlogName, `started ${String(restartedUp)}, released ${String(await lost(backlog))} of ${String(backlog.length)}, exit ${String(secondStatus)}: ${restarted.said()} ${restarted.errors()}`),
+      releasedByFirst === 0 && releasedWhileDown === 0 && finished && secondStatus === 0
+        ? pass(
+            backlogName,
+            `the first engine released 0 of ${String(backlog.length)} backlog attempts, whose leases lapsed only after it exited, 0 were released while no engine ran, then the restarted engine released all of them: ${restarted.said().replaceAll('\n', ' ')}`,
+          )
+        : fail(
+            backlogName,
+            `the first engine released ${String(releasedByFirst)} and ${String(releasedWhileDown)} were released while no engine ran, where both must be 0; the restarted engine started ${String(restartedUp)}, released ${String(await lost(backlog))} of ${String(backlog.length)}, exit ${String(secondStatus)}: ${restarted.said()} ${restarted.errors()}`,
+          ),
     ];
   } finally {
     await db.destroy();
@@ -1024,15 +977,7 @@ function parseSimulationOptions(args: readonly string[]): SimulationOptions {
 }
 
 export const scenarios: readonly Scenario[] = [
-  {
-    name: 'tasks-model',
-    summary: 'model-checks task claims, leases, and workflow steps in TLC, and proves each property fails without its guard',
-    run: args => {
-      if (args.includes('nightly')) return Promise.resolve([checkConfig('Tasks.nightly.cfg'), checkPlants('Tasks.nightly.cfg'), checkHolds('Tasks.nightly.cfg')]);
-      const config = readConfig('Tasks.cfg');
-      return Promise.resolve([checkConfig('Tasks.cfg'), checkPlants('Tasks.cfg'), checkHolds('Tasks.cfg'), ...mutants.map(mutant => checkMutant(config, mutant))]);
-    },
-  },
+  tasksModel,
   {
     name: 'tasks-sim',
     summary: 'runs seeded workers that claim, renew, pass, hang, crash, and race against real Postgres, and checks every property after each step',
@@ -1040,13 +985,14 @@ export const scenarios: readonly Scenario[] = [
       const options = parseSimulationOptions(args);
       return withPostgres(postgres => simulationChecks(postgres, options));
     },
+    nightly: day => profileName.options.filter(profile => !engineProfiles.has(profile)).map(profile => ['--profile', profile, '--seeds', '1000', '--steps', '1000', '--from', String(day * 1000), '--trace', 'traces/tasks-sim']),
   },
   {
     name: 'engine-start',
     summary:
       "starts the engine's entry point against Postgres: it refuses a routine's unknown workflow and a missing DATABASE_URL, idles on an empty database, and on SIGTERM finishes its reaper pass and exits 0",
     run: () =>
-      withPostgres(async postgres => [...(await engineStartChecks(postgres)), noUrlCheck(), await idleCheck(postgres), ...(await sigtermChecks(postgres)), await restartCheck(postgres)]),
+      withPostgres(async postgres => [...(await engineStartChecks(postgres)), await loopNamesCheck(postgres), noUrlCheck(), await idleCheck(postgres), ...(await sigtermChecks(postgres)), await restartCheck(postgres)]),
   },
   {
     name: 'reaper-perf',

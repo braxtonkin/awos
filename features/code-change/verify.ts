@@ -7,7 +7,7 @@ import type { Change, PullRequestFact } from '../../shared/agent-step.ts';
 import { reproductionPath, type RanScript, type Reproduction, type Side } from '../../shared/reproduction.ts';
 import { agentSteps } from './stage-output.ts';
 import { defineModel, type Shape } from '../../tools/verify/models.ts';
-import type { TlcRun } from '../../tools/verify/tlc.ts';
+import { actionsOf, realStates, variablesIn, type TlcRun } from '../../tools/verify/tlc.ts';
 import { mutantName, mutants, runSeed, simulate, type MutantName, type Run } from './simulate.ts';
 import { workflow } from './workflow.ts';
 
@@ -188,9 +188,6 @@ type TraceView = Pick<TlcRun, 'loopActions' | 'stutters'> & {
   readonly loop: readonly StateView[];
 };
 
-const variablesIn = (text: string): ReadonlyMap<string, string> =>
-  new Map([...text.replace(/["\s]/g, '').matchAll(/\/\\(\w+)=([^/]*)/g)].map(([, name = '', value = '']): [string, string] => [name, value]));
-
 const entriesIn = (value: string): ReadonlyMap<string, string> =>
   new Map([...value.matchAll(/(\w+):>(\w+)/g)].map(([, key = '', entry = '']): [string, string] => [key, entry]));
 
@@ -224,9 +221,9 @@ function viewOf(text: string): StateView {
 }
 
 function traceViewOf(run: TlcRun): TraceView {
-  const real = run.trace.filter(state => state.action !== 'Stuttering');
+  const real = realStates(run);
   return {
-    actions: run.trace.map(state => state.action),
+    actions: actionsOf(run),
     states: run.trace.map(state => viewOf(state.text)),
     last: viewOf(real.at(-1)?.text ?? ''),
     beforeLast: viewOf(real.at(-2)?.text ?? ''),
@@ -410,7 +407,7 @@ const simulationFlags = {
 } as const;
 
 const simulationOptions = z.object({
-  seeds: z.coerce.number().int().positive().default(40),
+  seeds: z.coerce.number().int().positive().default(200),
   from: z.coerce.number().int().nonnegative().default(1),
   seed: z.coerce.number().int().nonnegative().optional(),
   steps: z.coerce.number().int().positive().default(150),
@@ -487,6 +484,7 @@ export const scenarios: readonly Scenario[] = [
     name: 'land-sim',
     summary: "runs Land's real decision table and pass against a seeded fake of GitHub and the outbox, and checks each property of Land.tla by name; --mutant turns one guard off",
     run: simulationChecks,
+    nightly: day => [['--seeds', '1000', '--from', String(day * 1000)]],
   },
   {
     name: 'land-live',
