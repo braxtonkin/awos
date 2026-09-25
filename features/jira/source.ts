@@ -1,8 +1,7 @@
 import { z } from 'zod';
+import { ticket as ticketKey } from '../../shared/actions.ts';
 import type { Source } from '../../shared/routine-source.ts';
 import { jiraAs, signedInAs, type JiraAccess } from './client.ts';
-
-const ticketKey = /^[A-Z][A-Z0-9_]*-d+$/;
 
 const described = z.object({ fields: z.object({ description: z.string().nullish() }) });
 
@@ -31,7 +30,7 @@ export const currentAssignee =
 export const ticketDescription =
   (access: JiraAccess) =>
   async (ticket: string, person: string): Promise<string | null> => {
-    if (!ticketKey.test(ticket)) return null;
+    if (!ticketKey.safeParse(ticket).success) return null;
     const jira = await jiraAs(access, person, AbortSignal.timeout(access.timeoutMs));
     const { fields } = await jira.call('GET', `/rest/api/2/issue/${encodeURIComponent(ticket)}?fields=description`, described);
     return fields.description ?? null;

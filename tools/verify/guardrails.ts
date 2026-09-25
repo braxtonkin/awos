@@ -89,6 +89,13 @@ const optionalVerifyField: Edit = {
 
 const optionalExtra = `${codeChange} verify $.properties.extra is not in required`;
 
+const textBlockStartsWithBody: Edit = {
+  from: "z.strictObject({ kind: z.enum(['text']), title: z.string().nullable(), body: z.string() })",
+  to: "z.strictObject({ body: z.string(), kind: z.enum(['text']), title: z.string().nullable() })",
+};
+
+const bodyFirst = `${codeChange} specify $.properties.blocks.items.anyOf[0] starts with body`;
+
 const plantedStep = "name: 'planted', reads: [], runBy: 'agent', prompt: 'Planted.', startsEnvironment: false, needsRepository: true, canEnd: true, owes: [], output: review, requires: ['text'], failures: { fail: { kind: 'fail' } }";
 
 const noBrandAssertions = 'autoworker/no-brand-assertions';
@@ -969,6 +976,13 @@ const violations: readonly Violation[] = [
     edit: optionalVerifyField,
     tool: 'strict-schemas',
     expect: [optionalExtra],
+  },
+  {
+    name: 'strict-schemas rejects a block kind whose first field is not kind',
+    file: 'shared/review.ts',
+    edit: textBlockStartsWithBody,
+    tool: 'strict-schemas',
+    expect: [bodyFirst],
   },
   {
     name: 'npm run check runs the strict-schemas check',

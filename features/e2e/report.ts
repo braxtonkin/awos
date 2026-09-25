@@ -33,6 +33,7 @@ export type RunReport = {
   readonly steps: readonly StepRun[];
   readonly links: RunLinks;
   readonly overheadMs: number;
+  readonly autoworkerOverheadMs: number | undefined;
 };
 
 export const tokenUsageMethod = 'thread/tokenUsage/updated';
@@ -98,6 +99,6 @@ export function renderReport(report: RunReport): string {
       : ['||Step||Attempt||Verdict||Duration||Input tokens||', ...report.steps.map(stepRow), `Input tokens in all: ${count(recorded.reduce((sum, value) => sum + value, 0))}, from ${String(recorded.length)} of ${String(report.steps.length)} attempts.`]),
     '',
     linkLine(report.links),
-    `Harness overhead: ${seconds(report.overheadMs)}.`,
+    `Harness overhead: ${seconds(report.overheadMs)}.${report.autoworkerOverheadMs === undefined ? '' : ` AutoWorker's overhead, the run's time to clean less the agent's turn time: ${seconds(report.autoworkerOverheadMs)}.`}`,
   ].join('\n');
 }

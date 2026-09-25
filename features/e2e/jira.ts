@@ -22,6 +22,7 @@ export const jiraPayloads = {
       labels: z.array(z.string()),
       created: z.string().min(1),
       assignee: z.object({ accountId: z.string().min(1) }).nullable(),
+      status: z.object({ name: z.string().min(1) }),
     }),
   }),
   comment: Comment,
@@ -36,7 +37,7 @@ type NewTicket = {
   readonly summary: string;
   readonly description: string;
   readonly label: string;
-  readonly assignee: string;
+  readonly assignee: string | null;
 };
 
 export type Jira = {
@@ -89,11 +90,11 @@ export function jiraAt(site: string, email: string, token: string): Jira {
             summary: ticket.summary,
             description: ticket.description,
             labels: [ticket.label],
-            assignee: { accountId: ticket.assignee },
+            assignee: ticket.assignee === null ? null : { accountId: ticket.assignee },
           },
         })
       ).key,
-    issue: key => call('GET', `/rest/api/2/issue/${encodeURIComponent(key)}?fields=summary,description,labels,created,assignee`, jiraPayloads.issue),
+    issue: key => call('GET', `/rest/api/2/issue/${encodeURIComponent(key)}?fields=summary,description,labels,created,assignee,status`, jiraPayloads.issue),
     comments: async key => {
       const found: Comment[] = [];
       for (;;) {

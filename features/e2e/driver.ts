@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { connect } from '../../shared/db/client.ts';
-import { driveAutoWorker } from './autoworker.ts';
+import { driveAutoWorker, type Drive } from './autoworker.ts';
 import { evidenceComment, planComment } from './frontier.ts';
 import type { GitHub, Pull } from './github.ts';
 import type { Issue, Jira } from './jira.ts';
@@ -17,15 +17,10 @@ const scriptTimeoutMs = 120_000;
 const checkWaitMs = 20 * 60_000;
 const checkPollMs = 10_000;
 
-export type Assignment = {
-  readonly ticket: string;
-  readonly branch: string;
-  readonly databaseUrl: string;
+export type Assignment = Drive & {
   readonly jira: Jira;
   readonly github: GitHub;
   readonly workdir: string;
-  readonly signal: AbortSignal;
-  readonly log: (line: string) => void;
 };
 
 type Workspace = { readonly clone: string; readonly script: string; readonly scratch: string; readonly assignment: Assignment };
@@ -209,7 +204,7 @@ const playAutoWorker =
     await succeed('git', ['push', '--quiet', 'origin', `HEAD:refs/heads/${head}`], { ...git, env: { ...git.env, ...github.pushEnvironment } });
     const opened = await github.openDraft({ head, base: branch, title: `${ticket} ${issue.fields.summary}`, body: `Resolves ${ticket}: ${jira.browse(ticket)}\n\n${change.plan.trim()}` });
     log(`draft pull request ${opened.html_url}`);
-    await jira.comment(ticket, evidenceComment({ script: change.script, before: beforeRun, after: afterRun }));
+    await jira.comment(ticket, evidenceComment({ script: change.script, before: { ...beforeRun, command: `bash ${scriptFile}` }, after: { ...afterRun, command: `bash ${scriptFile}` } }));
     log('evidence posted');
     await github.markReady(opened);
     await waitForSandbox(github, opened, assignment.signal);

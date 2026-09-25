@@ -7,7 +7,7 @@ import { sql } from 'kysely';
 import { z } from 'zod';
 import { connectCluster, labels, type Cluster } from '../../shared/cluster.ts';
 import { connect, type Database } from '../../shared/db/client.ts';
-import { fail, pass, type Check, type Scenario } from '../../tools/verify/check.ts';
+import { checksOf, fail, pass, type Check, type Scenario } from '../../tools/verify/check.ts';
 import { kind } from '../../tools/verify/kind.ts';
 import { withPostgres, type TestPostgres } from '../../tools/verify/postgres.ts';
 import { cleanChecks, leftovers, type CleanSources, type Leftover, type Place } from './clean.ts';
@@ -56,9 +56,14 @@ type World = {
   readonly lines: (plan: AttemptPlan) => readonly Line[];
   readonly prune: boolean;
   readonly after: (db: Database, attempts: readonly string[]) => Promise<unknown>;
+  readonly onGitHub: readonly string[];
 };
 
-const cleanWorld: World = { lines: transcript, prune: true, after: () => Promise.resolve() };
+const taskBranch = `autoworker/${ticket}`;
+
+const attemptBranch = (index: number): string => `${taskBranch}-attempt-${String(index + 1)}`;
+
+const cleanWorld: World = { lines: transcript, prune: true, after: () => Promise.resolve(), onGitHub: ['e2e/run-clean', 'autoworker/CLEAN-10', 'autoworker/CLEAN-10-attempt-1'] };
 
 async function seed(db: Database, world: World): Promise<readonly string[]> {
   const person = (await db.insertInto('person').values({ email: 'owner@example.com', name: 'Owner', jira_account_id: 'owner-account' }).returning('id').executeTakeFirstOrThrow()).id;
@@ -83,7 +88,17 @@ async function seed(db: Database, world: World): Promise<readonly string[]> {
     const attempt = (
       await db
         .insertInto('attempt')
-        .values({ task_id: task, routine_id: routine, routine_version: 1, step: plan.step, epoch: 0, run_as_id: person, started_at: at(plan.from), lease_until: at(plan.from + 30) })
+        .values({
+          task_id: task,
+          routine_id: routine,
+          routine_version: 1,
+          step: plan.step,
+          epoch: 0,
+          run_as_id: person,
+          started_at: at(plan.from),
+          lease_until: at(plan.from + 30),
+          ...(plan.inputTokens === undefined ? {} : { branch: attemptBranch(attempts.length), start_commit: 'b'.repeat(40) }),
+        })
         .returning('id')
         .executeTakeFirstOrThrow()
     ).id;
@@ -109,6 +124,10 @@ async function seed(db: Database, world: World): Promise<readonly string[]> {
   await db
     .insertInto('outbox')
     .values({ task_id: task, position: 1, kind: 'ticket.comment', payload: JSON.stringify({}), acts_as: person, idempotency_key: 'clean-world-comment-marker-1', owed_at: at(10), state: 'done', result: JSON.stringify({}), settled_at: at(11), tries: 1 })
+    .execute();
+  await db
+    .insertInto('outbox')
+    .values({ task_id: task, position: 2, kind: 'pr.open-draft', payload: JSON.stringify({ repository: 'example/sandbox', head: taskBranch, base: 'main', title: 'Clean', body: 'Clean' }), acts_as: person, idempotency_key: 'clean-world-open-draft-marker-2', owed_at: at(300), state: 'done', result: JSON.stringify({ number: 7, url: 'https://github.com/example/sandbox/pull/7' }), settled_at: at(301), tries: 1 })
     .execute();
   await world.after(db, attempts);
   return attempts;
@@ -139,9 +158,9 @@ const plants: readonly Plant[] = [
     world: {
       ...cleanWorld,
       after: db =>
-        db.insertInto('outbox').values({ task_id: '1', position: 2, kind: 'ticket.transition', payload: JSON.stringify({}), acts_as: '1', idempotency_key: 'clean-world-planted-owed-row', owed_at: at(600) }).execute(),
+        db.insertInto('outbox').values({ task_id: '1', position: 3, kind: 'ticket.transition', payload: JSON.stringify({}), acts_as: '1', idempotency_key: 'clean-world-planted-owed-row', owed_at: at(600) }).execute(),
     },
-    expect: () => ({ place: 'outbox', name: 'outbox row 2 (ticket.transition)' }),
+    expect: () => ({ place: 'outbox', name: 'outbox row 3 (ticket.transition)' }),
   },
   {
     name: 'a gap in the stored events',
@@ -172,7 +191,22 @@ const plants: readonly Plant[] = [
     world: { ...cleanWorld, after: db => db.updateTable('verify_environment').set({ stopped_at: null }).execute() },
     expect: () => ({ place: 'environments', name: 'Verify environment 1 (tests-only)' }),
   },
+  {
+    name: "an attempt's branch left on GitHub",
+    world: { ...cleanWorld, onGitHub: [...cleanWorld.onGitHub, attemptBranch(1)] },
+    expect: () => ({ place: 'github', name: `branch ${attemptBranch(1)}` }),
+  },
+  {
+    name: "the pull request's branch left on GitHub",
+    world: { ...cleanWorld, onGitHub: [...cleanWorld.onGitHub, taskBranch] },
+    expect: () => ({ place: 'github', name: `branch ${taskBranch}` }),
+  },
 ];
+
+const listed =
+  (branches: readonly string[]) =>
+  (prefix: string): Promise<readonly string[]> =>
+    Promise.resolve(branches.filter(branch => branch.startsWith(prefix)));
 
 const describe = (found: readonly Leftover[]): string => (found.length === 0 ? 'nothing left' : found.map(entry => `${entry.place}: ${entry.name} ${entry.detail}`).join('; '));
 
@@ -188,26 +222,27 @@ async function inWorld<T>(postgres: TestPostgres, world: World, work: (db: Datab
 }
 
 async function cleanLane(args: readonly string[]): Promise<readonly Check[]> {
-  const { values } = parseArgs({ args: [...args], options: { repository: { type: 'string', default: 'braxtonkdev/autoworker-oss' } } });
-  if ((process.env['GITHUB_TOKEN'] ?? '') === '') return [fail('GITHUB_TOKEN is set', 'run e2e-clean in the live service, which reads GitHub with the sandbox token')];
-  const github = githubFromEnvironment(process.env, values.repository);
-  const checks: Check[] = [...(await kind.run(['up']))];
+  const { values } = parseArgs({ args: [...args], options: { repository: { type: 'string', default: 'braxtonkdev/autoworker-oss' }, 'read-github': { type: 'boolean', default: false } } });
+  if (values['read-github'] && (process.env['GITHUB_TOKEN'] ?? '') === '') return [fail('GITHUB_TOKEN is set', '--read-github runs in the live service, which reads GitHub with the sandbox token')];
+  const checks: Check[] = [...(checksOf(await kind.run(['up'])))];
   if (!checks.every(check => check.passed)) return checks;
   const cluster = connectCluster(`e2e-clean-${randomBytes(3).toString('hex')}`);
   await cluster.core.createNamespace({ body: { metadata: { name: cluster.namespace } } });
   checks.push(pass('namespace ready', cluster.namespace));
-  const runBranches = await github.branchesStartingWith('e2e/run-');
-  checks.push(runBranches.length > 0 ? pass('the GitHub read finds branches by prefix', `${String(runBranches.length)} under e2e/run-`) : fail('the GitHub read finds branches by prefix', `nothing under e2e/run- in ${values.repository}`));
+  if (values['read-github']) {
+    const runBranches = await githubFromEnvironment(process.env, values.repository).branchesStartingWith('e2e/run-');
+    checks.push(runBranches.length > 0 ? pass('the GitHub read finds branches by prefix', `${String(runBranches.length)} under e2e/run-`) : fail('the GitHub read finds branches by prefix', `nothing under e2e/run- in ${values.repository}`));
+  }
   try {
     return await withPostgres(async postgres => {
-      const sourcesFor = (database: Database): CleanSources => ({ database, cluster, branchesStartingWith: github.branchesStartingWith });
-      const clean = await inWorld(postgres, cleanWorld, db => leftovers(sourcesFor(db), ticket));
+      const sourcesFor = (database: Database, world: World): CleanSources => ({ database, cluster, branchesStartingWith: listed(world.onGitHub) });
+      const clean = await inWorld(postgres, cleanWorld, db => leftovers(sourcesFor(db, cleanWorld), ticket));
       checks.push(...cleanChecks(clean).map(check => ({ ...check, name: `clean world, ${check.name}` })));
       for (const plant of plants) {
         const check = await inWorld(postgres, plant.world, async (db, attempts) => {
           await plant.cluster?.(cluster, attempts);
           try {
-            const found = await leftovers(sourcesFor(db), ticket);
+            const found = await leftovers(sourcesFor(db, plant.world), ticket);
             const expected = plant.expect(attempts);
             const named = found.length === 1 && found[0]?.place === expected.place && found[0].name === expected.name;
             return named ? pass(`the clean check fails on ${plant.name} and names it`, describe(found)) : fail(`the clean check fails on ${plant.name} and names it`, `expected ${expected.place}: ${expected.name}, found ${describe(found)}`);
@@ -291,18 +326,19 @@ async function reportLane(): Promise<readonly Check[]> {
         steps: runs,
         links: linksFrom(jira.browse(ticket), [{ links: reportLinks }]),
         overheadMs: 4000,
+        autoworkerOverheadMs: 90_000,
       });
       const posted = await jira.comment(ticket, body);
       const link = jira.commentLink(ticket, posted);
       const sent = fake.posted[0]?.body ?? '';
-      const rows = ['|specify|1|pass|60 s|1,200|', '|implement|2|pass|300 s|5,400|', '|verify|3|pass|120 s|2,300|', '|land|4|pass|20 s|none recorded|', 'Input tokens in all: 8,900, from 3 of 4 attempts.'];
+      const rows = ['|specify|1|pass|60 s|1,200|', '|implement|2|pass|300 s|5,400|', '|verify|3|pass|120 s|2,300|', '|land|4|pass|20 s|none recorded|', 'Input tokens in all: 8,900, from 3 of 4 attempts.', "AutoWorker's overhead, the run's time to clean less the agent's turn time: 90 s."];
       const missingRows = rows.filter(row => !sent.includes(row));
       checks.push(fake.posted.length === 1 && fake.posted[0]?.path === `/rest/api/2/issue/${ticket}/comment` ? pass('the report is posted once as a comment on the ticket', fake.posted[0].path) : fail('the report is posted once as a comment on the ticket', JSON.stringify(fake.posted.map(entry => entry.path))));
       checks.push(missingRows.length === 0 ? pass('the report holds each step with its duration and input tokens', rows.join(' ')) : fail('the report holds each step with its duration and input tokens', `missing ${missingRows.join(' ')}`));
       const missingLinks = [{ label: 'ticket', url: jira.browse(ticket) }, ...reportLinks].filter(entry => !sent.includes(`[${entry.label}|${entry.url}]`)).map(entry => entry.label);
       checks.push(missingLinks.length === 0 && !sent.includes('Missing:') ? pass('the report links the ticket, the pull request, the merge commit, and both CI runs', ['ticket', ...reportLinks.map(entry => entry.label)].join(', ')) : fail('the report links the ticket, the pull request, the merge commit, and both CI runs', `missing ${missingLinks.join(', ')}`));
       checks.push(link.startsWith(`${fake.url}/browse/${ticket}?focusedCommentId=`) ? pass('the report comment has a link', link) : fail('the report comment has a link', link));
-      const partial = renderReport({ branch: 'e2e/run-clean', driver: 'none', entry: 'titleCase', furthest: 'ticket filed', stop: 'timed out', timeline: [], steps: [], links: linksFrom(jira.browse(ticket), []), overheadMs: 0 });
+      const partial = renderReport({ branch: 'e2e/run-clean', driver: 'none', entry: 'titleCase', furthest: 'ticket filed', stop: 'timed out', timeline: [], steps: [], links: linksFrom(jira.browse(ticket), []), overheadMs: 0, autoworkerOverheadMs: undefined });
       checks.push(partial.includes('Missing: pull request, merge commit, pull request CI run, run branch CI run') ? pass('a report without the later links says which are missing', 'pull request, merge commit, pull request CI run, run branch CI run') : fail('a report without the later links says which are missing', partial));
     } finally {
       await fake.close();

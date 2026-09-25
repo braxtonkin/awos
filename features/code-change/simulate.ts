@@ -286,6 +286,7 @@ function storeOf(world: World, reads: Map<number, LandRead>): LandStore {
               awaiting: task.state === 'waiting',
               owes: task.rows.some(row => row.state === 'owed' || row.state === 'claimed'),
               attempt: task.attempt,
+              statuses: { start: null, end: null },
               record: {
                 draftLeaves: task.repo.draft,
                 answered: [...task.answered],

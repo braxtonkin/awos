@@ -1,3 +1,4 @@
+import { sql } from 'kysely';
 import type { Database } from '../../shared/db/client.ts';
 import type { Verdict } from '../../shared/db/types.ts';
 
@@ -12,13 +13,9 @@ export type AttemptRecord = {
   readonly finishedAt: Date | null;
 };
 
-export type AttemptBranch = { readonly attempt: string; readonly branch: string; readonly startCommit: string; readonly pushed: readonly string[] };
+export type AttemptBranch = { readonly attempt: string; readonly branch: string; readonly startCommit: string; readonly lastPushed: string | null };
 
-export type EvidenceRow = { readonly attempt: string; readonly body: unknown; readonly recordedAt: Date };
-
-export class WaitsForP3 extends Error {
-  override readonly name = 'WaitsForP3';
-}
+export type EvidenceRow = { readonly attempt: string; readonly step: string; readonly body: unknown; readonly recordedAt: Date };
 
 export async function taskFor(db: Database, ticket: string): Promise<TaskRecord | undefined> {
   return db.selectFrom('task').select(['id', 'key', 'state', 'step']).where('key', '=', ticket).executeTakeFirst();
@@ -36,8 +33,35 @@ export async function attemptsInOrder(db: Database, task: string): Promise<reado
   return rows.map(row => ({ id: row.id, step: row.step, verdict: row.verdict, runAs: row.email, startedAt: row.started_at, finishedAt: row.finished_at }));
 }
 
-export const attemptBranches: (db: Database, task: string) => Promise<readonly AttemptBranch[]> = () =>
-  Promise.reject(new WaitsForP3("attemptBranches reads each attempt's branch, start commit, and pushed commits from the columns P3 adds to attempt. P7 writes it once P3 lands."));
+export async function attemptBranches(db: Database, task: string): Promise<readonly AttemptBranch[]> {
+  const rows = await db
+    .selectFrom('attempt')
+    .select(['attempt.id', 'attempt.branch', 'attempt.start_commit', 'attempt.last_pushed'])
+    .where('attempt.task_id', '=', task)
+    .where('attempt.branch', 'is not', null)
+    .orderBy('attempt.id')
+    .execute();
+  return rows.flatMap(row => (row.branch === null || row.start_commit === null ? [] : [{ attempt: row.id, branch: row.branch, startCommit: row.start_commit, lastPushed: row.last_pushed }]));
+}
 
-export const evidenceRows: (db: Database, task: string) => Promise<readonly EvidenceRow[]> = () =>
-  Promise.reject(new WaitsForP3("evidenceRows reads Verify's evidence from the table P3 adds. P7 writes it once P3 lands."));
+export async function pullRequestBranches(db: Database, task: string): Promise<readonly string[]> {
+  const rows = await db
+    .selectFrom('outbox')
+    .select(sql<string | null>`outbox.payload ->> 'head'`.as('head'))
+    .where('outbox.task_id', '=', task)
+    .where('outbox.kind', '=', 'pr.open-draft')
+    .orderBy('outbox.position')
+    .execute();
+  return [...new Set(rows.flatMap(row => (row.head === null ? [] : [row.head])))];
+}
+
+export async function evidenceRows(db: Database, task: string): Promise<readonly EvidenceRow[]> {
+  const rows = await db
+    .selectFrom('evidence')
+    .innerJoin('attempt', 'attempt.id', 'evidence.attempt_id')
+    .select(['evidence.attempt_id', 'attempt.step', 'evidence.body', 'evidence.recorded_at'])
+    .where('evidence.task_id', '=', task)
+    .orderBy('evidence.attempt_id')
+    .execute();
+  return rows.map(row => ({ attempt: row.attempt_id, step: row.step, body: row.body, recordedAt: row.recorded_at }));
+}

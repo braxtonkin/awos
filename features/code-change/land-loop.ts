@@ -64,6 +64,8 @@ async function atLand(db: Database, only: string | null): Promise<readonly AtLan
       'repository.id as repository_id',
       'repository.github',
       'repository.draft_leaves',
+      'version.jira_start_status',
+      'version.jira_end_status',
       sql<boolean>`version.gates <@ task.approved`.as('gates_approved'),
       eb.selectFrom('attempt').select('attempt.id').whereRef('attempt.task_id', '=', 'task.id').where('attempt.finished_at', 'is', null).as('attempt'),
       eb
@@ -148,6 +150,7 @@ async function atLand(db: Database, only: string | null): Promise<readonly AtLan
       awaiting: row.state === 'waiting',
       owes: row.owed_actions > 0,
       attempt: row.attempt,
+      statuses: { start: row.jira_start_status, end: row.jira_end_status },
       record: {
         draftLeaves: row.draft_leaves,
         answered: answers.safeParse(row.answered ?? []).data ?? [],

@@ -68,7 +68,7 @@ const papering = (agent: AgentSteps): AgentSteps => ({
   ...agent,
   settle: reply => {
     const settled = agent.settle(reply);
-    return review.safeParse(settled.output).success ? settled : { output: passing, evidence: null };
+    return review.safeParse(settled.output).success ? settled : { output: passing, evidence: null, observed: settled.observed };
   },
 });
 
