@@ -463,7 +463,7 @@ const repositoryRoot = fileURLToPath(new URL('../../', import.meta.url));
 
 const setupCommand = join(repositoryRoot, 'services', 'engine', 'setup.ts');
 
-const setupBudget = { runs: 5, freshMs: 5000, repeatMs: 2000 };
+const setupBudget = { runs: 5, repeatToFresh: 1.5 };
 
 const setupTables = ['person', 'credential', 'human_action', 'repository', 'routine', 'routine_version', 'routine_step'] as const;
 
@@ -857,7 +857,13 @@ async function dashboardCannotReadSetupLogins(world: SetupWorld): Promise<Outcom
   }
 }
 
-function setupSpeed(postgres: TestPostgres): Promise<Outcome> {
+const slowRepeatMs = 1500;
+
+const slowStart = `--import=data:text/javascript,await%20new%20Promise(done%3D%3EsetTimeout(done%2C${String(slowRepeatMs)}))`;
+
+const repeatLimit = `a repeat apply takes at most ${String(setupBudget.repeatToFresh)} times as long as a fresh apply, by the median of ${String(setupBudget.runs)} interleaved runs of each`;
+
+function setupSpeed(postgres: TestPostgres, repeatEnv: Readonly<Record<string, string>> = {}): Promise<Outcome> {
   return inSetupWorld(postgres, async repeated => {
     const seeded = await repeated.apply(setupFile);
     const fresh: number[] = [];
@@ -867,20 +873,26 @@ function setupSpeed(postgres: TestPostgres): Promise<Outcome> {
       const run = await inSetupWorld(postgres, world => world.apply(setupFile));
       if (run.stdout !== firstRun) problems.push(`a fresh apply gave ${describeRun(run)}`);
       fresh.push(run.ms);
-      const again = await repeated.apply(setupFile);
+      const again = await repeated.apply(setupFile, { ...repeated.env, ...repeatEnv });
       if (again.stdout !== repeatRun) problems.push(`a repeat apply gave ${describeRun(again)}`);
       repeats.push(again.ms);
     }
     const shown = (values: readonly number[]): string => values.map(ms => ms.toFixed(0)).join(', ');
+    const ratio = median(repeats) / median(fresh);
     return {
-      problems: [
-        ...problems,
-        ...fresh.filter(ms => ms > setupBudget.freshMs).map(ms => `a fresh apply took ${ms.toFixed(0)} ms, over ${String(setupBudget.freshMs)}`),
-        ...repeats.filter(ms => ms > setupBudget.repeatMs).map(ms => `a repeat apply took ${ms.toFixed(0)} ms, over ${String(setupBudget.repeatMs)}`),
-      ],
-      detail: `fresh applies ${shown(fresh)} ms (median ${median(fresh).toFixed(0)}, budget ${String(setupBudget.freshMs)}); repeat applies ${shown(repeats)} ms (median ${median(repeats).toFixed(0)}, budget ${String(setupBudget.repeatMs)}), each timing the whole node process`,
+      problems: [...problems, ...(ratio <= setupBudget.repeatToFresh ? [] : [`the median repeat apply took ${ratio.toFixed(2)} times the median fresh apply, over ${String(setupBudget.repeatToFresh)}`])],
+      detail: `fresh applies ${shown(fresh)} ms (median ${median(fresh).toFixed(0)}); repeat applies ${shown(repeats)} ms (median ${median(repeats).toFixed(0)}); ratio ${ratio.toFixed(2)} against ${String(setupBudget.repeatToFresh)}, each timing the whole node process`,
     };
   });
+}
+
+async function slowRepeatFails(postgres: TestPostgres): Promise<Outcome> {
+  const planted = await setupSpeed(postgres, { NODE_OPTIONS: slowStart });
+  const caught = planted.problems.find(problem => problem.startsWith('the median repeat apply took'));
+  return {
+    problems: caught === undefined ? [`the speed check passed a repeat apply slowed by ${String(slowRepeatMs)} ms: ${planted.detail}`] : [],
+    detail: `${caught ?? ''}; ${planted.detail}`,
+  };
 }
 
 const setupChecks: readonly Entry[] = [
@@ -895,10 +907,8 @@ const setupChecks: readonly Entry[] = [
   { name: 'a run-as person the file does not list is refused by name, and nothing is written', run: inSetup(refusesUnknownRunAs) },
   { name: 'two people with one Jira account id are refused by Postgres, and the people section rolls back', run: inSetup(duplicateAccountRollsBack) },
   { name: 'after setup, the dashboard role cannot select a sealed column', run: inSetup(dashboardCannotReadSetupLogins) },
-  {
-    name: `a fresh apply takes at most ${String(setupBudget.freshMs)} ms and a repeat apply at most ${String(setupBudget.repeatMs)} ms, over ${String(setupBudget.runs)} of each`,
-    run: setupSpeed,
-  },
+  { name: repeatLimit, run: postgres => setupSpeed(postgres) },
+  { name: `the speed check fails when each repeat apply starts ${String(slowRepeatMs)} ms late`, run: slowRepeatFails },
 ];
 
 async function settle(name: string, work: () => Promise<Outcome>): Promise<Check> {
@@ -1169,7 +1179,7 @@ export const scenarios: readonly Scenario[] = [
   {
     name: 'setup',
     summary:
-      'runs node services/engine/setup.ts as a child process against fresh Postgres databases with made-up logins, and proves it applies a file once, refuses inline tokens and unmarked refreshable Codex logins, records each replacement, never prints or stores a secret in the clear, and stays within its time budget',
+      'runs node services/engine/setup.ts as a child process against fresh Postgres databases with made-up logins, and proves it applies a file once, refuses inline tokens and unmarked refreshable Codex logins, keeps a login the engine refreshed, records each replacement, never prints or stores a secret in the clear, and that a repeat apply takes at most 1.5 times as long as a fresh one',
     run: () => withPostgres(postgres => runEntries(postgres, setupChecks)),
   },
 ];

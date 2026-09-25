@@ -193,8 +193,7 @@ async function run(given: Settings, key: SealingKey | undefined): Promise<void> 
       (error: unknown) => (error instanceof Error ? error.message : String(error)),
     );
     if (unreachable !== undefined) {
-      process.stderr.write(`The engine did not start, because it could not reach Postgres at ${new URL(given.DATABASE_URL).host}, the host in DATABASE_URL. ${unreachable}
-`);
+      process.stderr.write(`The engine did not start, because it could not reach Postgres at ${new URL(given.DATABASE_URL).host}, the host in DATABASE_URL. ${unreachable}\n`);
       process.exitCode = 1;
       return;
     }

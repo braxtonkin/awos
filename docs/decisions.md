@@ -560,6 +560,22 @@ Rejected options:
 - **Drop the NUL character.** It hides that anything was there, and it can join two words.
 - **Store the escaped text `\u0000` as six characters.** A reader can't tell it from an app server that wrote those six characters.
 
+### Setup keeps a stored login that expires later than the file's
+
+Decided 25 Sep 2026 after the audit before the merge of the end-to-end branch (FX3a). The engine refreshes a Codex login and writes the new one back, and a refresh token works only once. Before this decision, running setup again with the same file sealed the file's older login over the refreshed one, so the engine's next refresh presented a used token and lost the login. Now `applyLogins` in `features/credentials/setup.ts` locks the credential row and seals the file's login only when it expires later than the stored one, and setup prints how many logins it kept. `node services/engine/setup.ts --replace-logins <file>` seals the file's logins anyway. A login with no expiry, such as a GitHub token or a Jira login, is replaced whenever it differs. `ReapplyNeedsNewerLogin` in `features/credentials/Checks.tla` models the rule, and the `setup` scenario refreshes a login and then applies the same file again.
+
+Rejected options:
+
+- **The file always wins.** Setup stays a plain copy of the file, but every run after the engine's first refresh rolls the login back, and the next refresh presents a used token.
+
+### The attempt start lease outlasts the whole start instead of being renewed during it
+
+Decided 25 Sep 2026 after the audit before the merge of the end-to-end branch (FX3a). An attempt's start can run a Codex check for up to `CHECK_TIMEOUT_MS` and then wait for its Verify environment for up to `ENVIRONMENT_START_DEADLINE_MS`, and it renews its lease only after both. The old default lease, 300 s, was shorter than the default start deadline alone, 600 s, so the reaper could release a start that was still running. Now `services/engine/main.ts` refuses to start unless `ATTEMPT_START_LEASE_MS` is more than `ENVIRONMENT_START_DEADLINE_MS` plus `CHECK_TIMEOUT_MS` plus 60 s, and the default lease is 900 s. `npm run verify -- engine-checks` proves the refusal. The cost is recovery time: a start lost to a crashed engine waits up to 15 minutes before the reaper releases it, not 5.
+
+Rejected options:
+
+- **Renew the lease while `provider.start` runs.** Recovery would stay fast, but a heartbeat beside the start changes the task protocol, so `features/tasks/Tasks.tla` would have to model it first (C5), and `tasks-sim` would need matching moves.
+
 ## Open
 
 Each open question names the current lean or default. A lean is not a decision.
