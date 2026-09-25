@@ -1,0 +1,8 @@
+{
+  "why": "The budget2 unit skips binary files, measures longest-line only in code and SQL, adds a fixtures role, and proves each with a guardrail case.",
+  "raise": {
+    "characters/docs": 282,
+    "characters/tools": 1880,
+    "lines/tools": 57
+  }
+}
