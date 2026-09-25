@@ -534,7 +534,7 @@ Until Actions is enabled again, `node tools/ci-local/main.ts` runs CI on the mac
 What the local run doesn't give:
 
 - **A clean machine per run.** Every step shares this machine's Docker, its image cache, and the `node_modules` volume of the worktree's compose project. A step can pass here and fail on a fresh runner.
-- **Separate machines per job and time limits.** The jobs run at the same time on one machine, so a slow job slows the others, and `timeout-minutes` is not enforced.
+- **Separate machines per job and time limits.** The jobs run at the same time on one machine, so a slow job slows the others, and `timeout-minutes` is not enforced. The time ceilings in `budget/budget.json` stop a runaway job instead.
 - **A record anyone else can see.** The summary stays on this machine, and GitHub shows no check on the pull request.
 - **The nightly workflow.** It has no local runner, so its larger model bounds and long simulator runs don't run until Actions returns.
 
@@ -600,6 +600,22 @@ Rejected options:
 - **Keep `skipLibCheck` on in the sandbox.** It hides every error in every package's declarations, and the Package types path forbids it.
 - **Add the DOM library to the sandbox's `lib`.** It declares every missing name at once, but it types browser globals such as `document` in code that runs on Node, and the sandbox would typecheck under other globals than the root typecheck gives the same files.
 - **Keep a second copy under `features/e2e/sandbox/types/` and exclude it from the root tsconfig.** The repository would hold two copies that can drift, and the root tsconfig would gain an exclusion that only this folder needs.
+
+### The codebase grows only by a raise commit against a checked-in budget
+
+Decided 25 Sep 2026 by the owner, from a colleague's practice. `budget/budget.json` gives each area a ceiling and a written why, and `npm run budget` fails a change that passes one. A ceiling goes down in any commit and goes up only in a commit that changes nothing outside `budget/`, so a reviewer sees every growth decision on its own (B6). The budget is the one place the codebase's aggregate size shows up at merge time. It was seeded at e371a50 with 36,949 non-blank lines across seven roles, 186 named constraints, indexes, and triggers, and 55 scenario declarations. The owner changed the practice in four ways:
+
+- **A ceiling per role.** Product, feature verification, the e2e harness, tools, TLA+ models, migrations, and docs each have their own ceilings, declared as globs in the budget file so a fork can change them. On 24 Sep two units deleted six schema constraints to pass a catalog check, so the shortest path to a passing check is real, and one shared ceiling would make deleting verification the shortest path to room for product code.
+- **Structure first, then lines.** Structural counts, such as tables, named guards, dependencies, verify scenarios, CI steps, and each model's distinct states, say more about cost than lines do. Each role also has a non-whitespace character ceiling, which joining lines cannot shrink, and a longest-line ceiling that only goes down, seeded at today's widest line so no file needs reformatting. A longest-line ceiling alone would still let a change join short lines up to it.
+- **Generous time ceilings.** Each CI job's ceiling is about twice its longest recent local run: check 3,500 s, models 4,700 s, sims 2,700 s, and simulation 2,000 s. Local CI stops a job that passes its ceiling. Time ceilings never lower themselves.
+- **Lowered at landing, never in units.** Each unit raises in its own file under `budget/raises/`, so parallel raises merge without a conflict, and the coordinator's `npm run budget -- --lower` folds them in and sets each count to what landed. `docs/decisions.md` and `docs/feature-map.md` conflicted in almost every candidate on 25 Sep, and a budget file that every unit edits would do the same.
+
+Rejected options:
+
+- **One total line budget.** It is the simplest to read, but it lets a change pay for product code by deleting tests or simulations, which is the failure the per-role ceilings exist to stop.
+- **Units lower the ceilings.** Every unit would edit the same numbers, so the budget file would conflict in almost every integration.
+- **Tight time budgets.** Local times swing with machine load, so a tight ceiling fails healthy runs and teaches agents to raise it without looking. The distinct state count is the ratchet for model cost, because it does not depend on load.
+- **A raise that states the new ceiling.** Two parallel raises of the same area would each count the same room, so a raise states the amount it adds.
 
 ## Open
 
