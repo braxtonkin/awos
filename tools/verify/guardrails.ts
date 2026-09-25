@@ -134,7 +134,7 @@ const violations: readonly Violation[] = [
     name: 'tsc rejects a review step that owes pr.merge, which would bypass the ready rule and the gates',
     file: 'features/planted/merges.ts',
     source:
-      "import { actionKinds } from '../../shared/actions.ts';\nimport { reviewOwes, type ReviewStep } from '../code-change/land.ts';\n\nexport const merging: ReviewStep = pull => ({ actions: [reviewOwes(actionKinds.prMerge, { repository: pull.repository, head: pull.branch, commit: 'a'.repeat(40) })], note: 'The planted step merged.' });\n",
+      "import { actionKinds } from '../../shared/actions.ts';\nimport { reviewOwes, type ReviewStep } from '../code-change/land.ts';\n\nexport const merging: ReviewStep = pull => ({ actions: [reviewOwes(actionKinds.prMerge, { repository: pull.repository, number: pull.number ?? 1, commit: 'a'.repeat(40) })], note: 'The planted step merged.' });\n",
     tool: 'tsc',
     expect: ['TS2345'],
   },
@@ -150,7 +150,7 @@ const violations: readonly Violation[] = [
     name: 'tsc rejects a GitHub performer map without pr.merge',
     file: 'features/github/planted.ts',
     source:
-      "import type { Performers } from '../../shared/actions.ts';\nimport { githubPerformers, type GithubKind } from './performers.ts';\n\nconst { 'pr.merge': merge, ...others } = githubPerformers({ clientFor: () => Promise.resolve({ failed: 'planted' }), owedAt: () => Promise.resolve(undefined) });\n\nexport const withoutMerge: Performers<GithubKind> = others;\n\nexport const planted = merge;\n",
+      "import type { Performers } from '../../shared/actions.ts';\nimport { githubPerformers, type GithubKind } from './performers.ts';\n\nconst { 'pr.merge': merge, ...others } = githubPerformers({ clientFor: () => Promise.resolve({ failed: 'planted' }), mergeRowOf: () => Promise.resolve(undefined) });\n\nexport const withoutMerge: Performers<GithubKind> = others;\n\nexport const planted = merge;\n",
     tool: 'tsc',
     expect: ['TS2741'],
   },

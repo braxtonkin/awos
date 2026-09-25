@@ -90,7 +90,7 @@ const factsData = z.object({
 
 export type CheckResult = 'pending' | 'green' | 'red';
 
-export type Ran = { readonly name: string; readonly result: CheckResult; readonly at: string };
+export type Ran = { readonly name: string; readonly result: CheckResult; readonly at: string | null };
 
 export type ReviewFacts = {
   readonly id: string;
@@ -210,7 +210,7 @@ const statusResult = (state: string): CheckResult => {
 
 const ranOf = (node: z.infer<typeof context>): Ran =>
   node.__typename === 'CheckRun'
-    ? { name: node.name, result: resultOf(node.conclusion, node.status), at: node.startedAt ?? '' }
+    ? { name: node.name, result: resultOf(node.conclusion, node.status), at: node.startedAt }
     : { name: node.context, result: statusResult(node.state), at: node.createdAt };
 
 const refPath = (branch: string): string => branch.split('/').map(encodeURIComponent).join('/');

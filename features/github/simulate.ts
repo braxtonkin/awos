@@ -2,18 +2,18 @@ import { z } from 'zod';
 import { marker, type Outcome, type Owed, type Performer } from '../../shared/actions.ts';
 import type { Answered, MergeValue } from '../../shared/merge-state.ts';
 import { githubClient, type GithubClient } from './client.ts';
-import { base, checkNames, checksAt, commitOn, eject, fakeFetch, headOf, mergeNow, moveBranch, newWorld, repository, type Faults, type FakePull, type World } from './fake-github.ts';
+import { base, checkNames, checksAt, commitOn, eject, fakeFetch, headOf, mergeNow, moveBranch, newWorld, openPullRequest, repository, rerun, reviewDecision, type Faults, type FakePull, type World } from './fake-github.ts';
 import { judge, type Broken, type Observation, type PropertyName, type Truth } from './invariants.ts';
 import { ranking, readWith, type Rank, type Rules } from './merge-state.ts';
-import { githubPerformers, type GithubKind } from './performers.ts';
+import { githubPerformers, mergeGuarded, type GithubKind, type MergeGuards, type OwedMerge } from './performers.ts';
 
-export const mutantName = z.enum(['ActionCarriesHead', 'ReadyWaitsForGreen', 'RedCheckSendsBack', 'ConflictSendsBack', 'EjectionEndsAttempt', 'LandWaitsWhileQueued']);
+export const mutantName = z.enum(['ActionCarriesHead', 'ReadyWaitsForGreen', 'RedCheckSendsBack', 'ConflictSendsBack', 'EjectionEndsAttempt', 'LandWaitsWhileQueued', 'MergeRereadsFacts']);
 
 export type MutantName = z.infer<typeof mutantName>;
 
 type Rewrite = Faults['rewrite'];
 
-type Mutant = { readonly breaks: PropertyName; readonly ranks: readonly Rank[]; readonly rewrite: Rewrite };
+type Mutant = { readonly breaks: PropertyName; readonly ranks: readonly Rank[]; readonly rewrite: Rewrite; readonly merge: MergeGuards };
 
 const keep: Rewrite = (_method, _path, body) => body;
 
@@ -35,16 +35,18 @@ const headless: Rewrite = (method, path, body) => {
 };
 
 export const mutants: Readonly<Record<MutantName, Mutant>> = {
-  ActionCarriesHead: { breaks: 'MergedHeadWasMergeable', ranks: ranking, rewrite: headless },
+  ActionCarriesHead: { breaks: 'MergedHeadWasMergeable', ranks: ranking, rewrite: headless, merge: mergeGuarded },
   ReadyWaitsForGreen: {
     breaks: 'ReadyOnlyWhenChecksGreen',
     ranks: ranking.map(rank => (rank.name === 'green-draft' ? { name: rank.name, value: view => (view.draft ? { kind: 'green-draft' } : undefined) } : rank)),
     rewrite: keep,
+    merge: mergeGuarded,
   },
-  RedCheckSendsBack: { breaks: 'RedCheckReturnsToImplement', ranks: without('red'), rewrite: keep },
-  ConflictSendsBack: { breaks: 'ConflictReturnsToImplement', ranks: without('conflicting'), rewrite: keep },
-  EjectionEndsAttempt: { breaks: 'EjectionFailsLand', ranks: without('ejected'), rewrite: keep },
-  LandWaitsWhileQueued: { breaks: 'PerformedMergeWasAllowed', ranks: [...without('queued'), rankNamed('queued')], rewrite: keep },
+  RedCheckSendsBack: { breaks: 'RedCheckReturnsToImplement', ranks: without('red'), rewrite: keep, merge: mergeGuarded },
+  ConflictSendsBack: { breaks: 'ConflictReturnsToImplement', ranks: without('conflicting'), rewrite: keep, merge: mergeGuarded },
+  EjectionEndsAttempt: { breaks: 'EjectionFailsLand', ranks: without('ejected'), rewrite: keep, merge: mergeGuarded },
+  LandWaitsWhileQueued: { breaks: 'PerformedMergeWasAllowed', ranks: [...without('queued'), rankNamed('queued')], rewrite: keep, merge: mergeGuarded },
+  MergeRereadsFacts: { breaks: 'MergedHeadWasMergeable', ranks: ranking, rewrite: keep, merge: { MergeRereadsFacts: false } },
 };
 
 export type Plan = { readonly seeds: readonly number[]; readonly steps: number; readonly mutant?: MutantName };
@@ -74,6 +76,7 @@ type Task = {
   pull: number | null;
   answered: Answered;
   landFails: number;
+  rounds: number;
   readonly opened: number[];
 };
 
@@ -115,6 +118,8 @@ const active = (sim: Sim): Task | undefined => sim.tasks.find(task => !settledSt
 
 const pullOf = (sim: Sim, task: Task): FakePull | undefined => sim.world.pulls.find(pull => pull.number === task.pull);
 
+const owedMerge = (row: Row | undefined): OwedMerge | undefined => (row === undefined ? undefined : { owedAt: row.owedAt, rules: row.task.rules });
+
 const oweRow = (sim: Sim, task: Task, kind: GithubKind, payload: unknown): void => {
   sim.rows.push({ id: String(sim.rows.length + 1), task, kind, payload, owedAt: now(sim.world), settled: false });
 };
@@ -131,6 +136,7 @@ function startTask(sim: Sim): void {
     pull: null,
     answered: { ejection: null, review: null },
     landFails: 0,
+    rounds: 0,
     opened: [],
   };
   sim.tasks.push(task);
@@ -155,18 +161,21 @@ function truthOf(sim: Sim, task: Task, pull: FakePull): Truth {
     leavesDraftAtOnce: task.rules.draftLeaves === 'at-once',
     countedRed: counted.filter(name => checks.get(name) === 'red'),
     countedAllGreen: counted.every(name => checks.get(name) === 'green'),
+    approved: reviewDecision(sim.world, pull) === 'APPROVED',
   };
 }
 
 const landRetries = 3;
+
+const landRounds = 3;
 
 function failAttempt(task: Task): void {
   task.landFails += 1;
   if (task.landFails > landRetries) task.step = 'waiting';
 }
 
-function decide(sim: Sim, task: Task, head: string, value: MergeValue): void {
-  const payload = { repository, head: task.branch, commit: head };
+function decide(sim: Sim, task: Task, number: number, head: string, value: MergeValue): void {
+  const updated = { repository, head: task.branch, commit: head };
   switch (value.kind) {
     case 'merged':
       oweRow(sim, task, 'branch.delete', { repository, branch: task.branch });
@@ -177,22 +186,23 @@ function decide(sim: Sim, task: Task, head: string, value: MergeValue): void {
       failAttempt(task);
       return;
     case 'changes-requested':
+      task.step = task.answered.review === null ? 'implement' : 'waiting';
       task.answered = { ...task.answered, review: value.review.id };
-      task.step = 'implement';
       return;
     case 'conflicting':
     case 'red':
-      task.step = 'implement';
+      task.rounds += 1;
+      task.step = task.rounds > landRounds ? 'waiting' : 'implement';
       return;
     case 'green-draft':
       oweRow(sim, task, 'pr.mark-ready', { repository, head: task.branch, evidence: `Evidence for ${head}.` });
       return;
     case 'behind':
-      oweRow(sim, task, 'pr.update-branch', payload);
+      oweRow(sim, task, 'pr.update-branch', updated);
       return;
     case 'ready':
       sim.judged.add(head);
-      oweRow(sim, task, 'pr.merge', payload);
+      oweRow(sim, task, 'pr.merge', { repository, number, commit: head });
       return;
     case 'queued':
     case 'waiting-for-checks':
@@ -213,7 +223,7 @@ async function land(sim: Sim): Promise<readonly Observation[]> {
   if ('failed' in read) return [{ kind: 'performed', action: 'merge-state read', outcome: 'failed', faulted: false, detail: read.failed }];
   const truth = truthOf(sim, task, pull);
   sim.values.add(read.state.value.kind);
-  decide(sim, task, read.state.head, read.state.value);
+  decide(sim, task, task.pull, read.state.head, read.state.value);
   return [{ kind: 'read', head: read.state.head, value: read.state.value, truth }];
 }
 
@@ -268,6 +278,14 @@ const outside =
     return [];
   };
 
+function rerunOne(sim: Sim, pull: FakePull): void {
+  const head = headOf(sim.world, pull);
+  const name = pick(sim.random, [...checksAt(sim.world, head)].filter(([, result]) => result !== 'pending').map(([check]) => check));
+  if (name !== undefined) rerun(sim.world, head, name);
+}
+
+const mergeOwed = (sim: Sim, pull: FakePull): boolean => sim.rows.some(row => !row.settled && row.kind === 'pr.merge' && row.task.pull === pull.number);
+
 const moves: readonly Move[] = [
   { name: 'land reads the merge state', weight: 3, run: land },
   { name: 'the outbox performs a row', weight: 3, run: perform },
@@ -308,10 +326,13 @@ const moves: readonly Move[] = [
   {
     name: 'a check reruns',
     weight: 0.3,
+    run: outside(rerunOne),
+  },
+  {
+    name: 'a counted check that GitHub does not require reruns while the merge is owed',
+    weight: 3,
     run: outside((sim, pull) => {
-      const checks = checksAt(sim.world, headOf(sim.world, pull));
-      const name = pick(sim.random, [...checks].filter(([, result]) => result !== 'pending').map(([check]) => check));
-      if (name !== undefined) checks.set(name, 'pending');
+      if (mergeOwed(sim, pull)) rerun(sim.world, headOf(sim.world, pull), checkNames.counted);
     }),
   },
   {
@@ -323,6 +344,27 @@ const moves: readonly Move[] = [
       const reviewer = pick(sim.random, ['ada', 'bot', 'grace']) ?? 'ada';
       const state = chance(sim.random, 0.85) ? 'APPROVED' : 'CHANGES_REQUESTED';
       pull.reviews.push({ id: `PRR_${String(sim.world.serial)}`, reviewer, state, at: sim.world.time, body: `${reviewer} says ${state}.` });
+    }),
+  },
+  {
+    name: 'a ruleset blocks the merge',
+    weight: 0.3,
+    run: outside((_sim, pull) => {
+      pull.ruleBlocks = true;
+    }),
+  },
+  {
+    name: 'the ruleset stops blocking the merge',
+    weight: 1.5,
+    run: outside((_sim, pull) => {
+      pull.ruleBlocks = false;
+    }),
+  },
+  {
+    name: 'someone opens another pull request from the head branch while the merge is owed',
+    weight: 0.3,
+    run: outside((sim, pull) => {
+      if (mergeOwed(sim, pull)) openPullRequest(sim.world, pull.branch, 'release', 'Opened by someone else.', false);
     }),
   },
   {
@@ -383,7 +425,9 @@ function effects(sim: Sim): readonly Observation[] {
   const found: Observation[] = [];
   for (const merge of world.merges.slice(sim.seenMerges)) {
     const task = sim.tasks.find(entry => entry.pull === merge.number);
-    found.push({ kind: 'merged', head: merge.head, judged: sim.judged.has(merge.head), taskStep: task?.step ?? 'none', how: merge.how });
+    const checks = checksAt(world, merge.head);
+    const countedGreen = [checkNames.required, checkNames.counted].every(name => checks.get(name) === 'green');
+    found.push({ kind: 'merged', head: merge.head, judged: sim.judged.has(merge.head), countedGreen, taskStep: task?.step ?? 'none', how: merge.how });
   }
   for (const enqueue of world.enqueues.slice(sim.seenEnqueues)) {
     const task = sim.tasks.find(entry => entry.pull === enqueue.number);
@@ -408,13 +452,14 @@ function simOf(seed: number, mutant: Mutant): Sim {
       return true;
     },
     rewrite: mutant.rewrite,
+    racePush: () => chance(random, 0.1),
   };
   const client = githubClient({ token: 'simulated', baseUrl: 'https://github.invalid', pageSize: 2, fetch: fakeFetch(world, faults) });
   return {
     world,
     random,
     client,
-    performers: githubPerformers({ clientFor: () => Promise.resolve(client), owedAt: row => Promise.resolve(rows.find(entry => entry.id === row)?.owedAt) }),
+    performers: githubPerformers({ clientFor: () => Promise.resolve(client), mergeRowOf: row => Promise.resolve(owedMerge(rows.find(entry => entry.id === row))) }, mutant.merge),
     ranks: mutant.ranks,
     tasks: [],
     rows,
@@ -427,7 +472,7 @@ function simOf(seed: number, mutant: Mutant): Sim {
   };
 }
 
-const unmutated: Mutant = { breaks: 'LandSettles', ranks: ranking, rewrite: keep };
+const unmutated: Mutant = { breaks: 'LandSettles', ranks: ranking, rewrite: keep, merge: mergeGuarded };
 
 async function runSeed(seed: number, plan: Plan): Promise<Run> {
   const sim = simOf(seed, plan.mutant === undefined ? unmutated : mutants[plan.mutant]);

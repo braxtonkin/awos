@@ -9,11 +9,12 @@ export type Truth = {
   readonly leavesDraftAtOnce: boolean;
   readonly countedRed: readonly string[];
   readonly countedAllGreen: boolean;
+  readonly approved: boolean;
 };
 
 export type Observation =
   | { readonly kind: 'read'; readonly head: string; readonly value: MergeValue; readonly truth: Truth }
-  | { readonly kind: 'merged'; readonly head: string; readonly judged: boolean; readonly taskStep: string; readonly how: 'direct' | 'queue' }
+  | { readonly kind: 'merged'; readonly head: string; readonly judged: boolean; readonly countedGreen: boolean; readonly taskStep: string; readonly how: 'direct' | 'queue' }
   | { readonly kind: 'enqueued'; readonly head: string; readonly unansweredEjection: string | null }
   | { readonly kind: 'performed'; readonly action: string; readonly outcome: 'done' | 'refused' | 'failed'; readonly faulted: boolean; readonly detail: string }
   | { readonly kind: 'opened'; readonly numbers: readonly number[] };
@@ -27,8 +28,11 @@ const landDecides = (truth: Truth): boolean => truth.open && !truth.queued && tr
 export const properties = {
   TypeOK: observation =>
     observation.kind === 'read' && !mergeState.safeParse({ head: observation.head, value: observation.value }).success ? `the state read at ${observation.head} does not fit the merge-state type` : undefined,
-  MergedHeadWasMergeable: observation =>
-    observation.kind === 'merged' && !observation.judged ? `GitHub merged ${observation.head} by ${observation.how}, a head no merge-state read judged ready` : undefined,
+  MergedHeadWasMergeable: observation => {
+    if (observation.kind !== 'merged') return undefined;
+    if (!observation.judged) return `GitHub merged ${observation.head} by ${observation.how}, a head no merge-state read judged ready`;
+    return observation.how === 'direct' && !observation.countedGreen ? `GitHub merged ${observation.head} directly while a counted check on it was not green` : undefined;
+  },
   PerformedMergeWasAllowed: observation => {
     if (observation.kind === 'merged' && observation.taskStep !== 'land') return `GitHub merged ${observation.head} by ${observation.how} while the task stood in ${observation.taskStep}`;
     if (observation.kind === 'read' && observation.truth.queued && observation.value.kind !== 'queued') return `a queued pull request read as ${observation.value.kind}`;
@@ -54,6 +58,8 @@ export const properties = {
     const { value } = observation;
     return value.kind === 'ejected' && value.ejection === observation.truth.unansweredEjection ? undefined : `ejection ${observation.truth.unansweredEjection} was unanswered, and the state read as ${value.kind}`;
   },
+  AwaitsOnlyMissingApproval: observation =>
+    observation.kind === 'read' && observation.value.kind === 'review-required' && observation.truth.approved ? `the pull request read as review-required at ${observation.head} while GitHub reported it approved` : undefined,
   LandSettles: observation => {
     if (observation.kind === 'performed' && observation.outcome === 'failed' && !observation.faulted) return `${observation.action} failed on a definite answer, so its row would be tried again: ${observation.detail}`;
     if (observation.kind === 'opened' && new Set(observation.numbers).size > 1) return `opening one head twice made pull requests ${observation.numbers.join(' and ')}`;

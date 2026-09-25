@@ -139,6 +139,8 @@ async function probeBranch(octokit: Octokit, repository: string, base: string, n
   return { branch, head: made.sha };
 }
 
+const readyNumber = z.object({ done: z.object({ number: z.int() }) });
+
 async function writeLanes(given: Options, token: string): Promise<readonly Check[]> {
   if (!given.writes || given.base === undefined) {
     return writeLaneNames.map(name => fail(name, 'PARKED: gate 1. The sandbox token is read-only. After the regrant, rerun with --writes --base <run branch from npm run verify -- e2e-branch>.'));
@@ -146,7 +148,8 @@ async function writeLanes(given: Options, token: string): Promise<readonly Check
   const base = given.base;
   const octokit = new Octokit({ auth: token, baseUrl: api });
   const client = githubClient({ token, baseUrl: api, pageSize: 100 });
-  const performers = githubPerformers({ clientFor: () => Promise.resolve(client), owedAt: () => Promise.resolve(new Date()) });
+  const probeRules = { ignorableChecks: new Set<string>(), ignoredReviewers: new Set<string>(), draftLeaves: 'when-green' } as const;
+  const performers = githubPerformers({ clientFor: () => Promise.resolve(client), mergeRowOf: () => Promise.resolve({ owedAt: new Date(), rules: probeRules }) });
   let rows = 0;
   const perform = async (kind: GithubKind, payload: unknown): Promise<string> => {
     rows += 1;
@@ -161,7 +164,7 @@ async function writeLanes(given: Options, token: string): Promise<readonly Check
   checks.push(openedTwice[0] === openedTwice[1] && openedTwice[0]?.includes('"done"') === true ? pass(writeLaneNames[1], openedTwice.join(' then ')) : fail(writeLaneNames[1], openedTwice.join(' then ')));
   checks.push(openedTwice[1]?.includes('"done"') === true ? pass(writeLaneNames[3], `the repeated open found ${openedTwice[1]}`) : fail(writeLaneNames[3], openedTwice.join(' then ')));
   const ready = await perform('pr.mark-ready', { repository: given.repository, head: first.branch, evidence: 'Probe evidence from github-live.' });
-  const number = z.object({ done: z.object({ number: z.int() }) }).safeParse(JSON.parse(ready)).data?.done.number ?? 0;
+  const number = readyNumber.safeParse(JSON.parse(ready)).data?.done.number ?? 0;
   const deadline = Date.now() + given.wait * 1000;
   let status = 'UNKNOWN';
   while (!['CLEAN', 'UNSTABLE', 'HAS_HOOKS'].includes(status) && Date.now() < deadline) {
@@ -173,15 +176,16 @@ async function writeLanes(given: Options, token: string): Promise<readonly Check
     created,
     ready,
     `GitHub reported ${status}`,
-    await perform('pr.merge', { repository: given.repository, head: first.branch, commit: first.head }),
+    await perform('pr.merge', { repository: given.repository, number, commit: first.head }),
     await perform('branch.delete', { repository: given.repository, branch: first.branch }),
   ];
   checks.push(steps.every(step => step.includes('"done"') || step.startsWith('GitHub reported')) ? pass(writeLaneNames[0], steps.join(' | ')) : fail(writeLaneNames[0], steps.join(' | ')));
   const moved = await probeBranch(octokit, given.repository, base, 'moved');
   await perform('branch.advance', { repository: given.repository, branch: moved.branch, from: null, to: moved.head });
   await perform('pr.open-draft', { ...opening, head: moved.branch });
-  await perform('pr.mark-ready', { repository: given.repository, head: moved.branch, evidence: 'Probe evidence from github-live.' });
-  const stale = await perform('pr.merge', { repository: given.repository, head: moved.branch, commit: 'f'.repeat(40) });
+  const movedReady = await perform('pr.mark-ready', { repository: given.repository, head: moved.branch, evidence: 'Probe evidence from github-live.' });
+  const movedNumber = readyNumber.safeParse(JSON.parse(movedReady)).data?.done.number ?? 0;
+  const stale = await perform('pr.merge', { repository: given.repository, number: movedNumber, commit: 'f'.repeat(40) });
   checks.push(stale.includes('"refused"') && stale.includes('f'.repeat(40)) ? pass(writeLaneNames[2], stale) : fail(writeLaneNames[2], stale));
   await perform('branch.delete', { repository: given.repository, branch: moved.branch });
   return checks;

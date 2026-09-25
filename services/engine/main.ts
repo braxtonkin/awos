@@ -17,7 +17,7 @@ import { providerProblems, reconcile } from '../../features/environments/lifecyc
 import { providersByName } from '../../features/environments/provider.ts';
 import { clientsFrom, type OpenToken } from '../../features/github/client.ts';
 import { mergeStateReader } from '../../features/github/merge-state.ts';
-import { githubPerformers, outboxOwedAt } from '../../features/github/performers.ts';
+import { githubPerformers, outboxMergeRow } from '../../features/github/performers.ts';
 import type { JiraAccess } from '../../features/jira/client.ts';
 import { jiraPerformers } from '../../features/jira/performers.ts';
 import { currentAssignee, jiraSearch, ticketDescription } from '../../features/jira/source.ts';
@@ -134,7 +134,7 @@ const loopsFor = (given: Settings, key: SealingKey | undefined, db: Database): r
   const clientFor = clientsFrom(githubToken(db, key), given.GITHUB_API_URL);
   const performers = {
     ...jiraPerformers(jira, db),
-    ...githubPerformers({ clientFor, owedAt: outboxOwedAt(db) }),
+    ...githubPerformers({ clientFor, mergeRowOf: outboxMergeRow(db) }),
   } satisfies Performers<ActionKind>;
   const actions = registryOf(performers);
   const runAs = coreRunAs(given.JIRA_SITE === undefined ? null : currentAssignee(jira));

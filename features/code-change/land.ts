@@ -10,7 +10,7 @@ export type DraftSetting = 'when-green' | 'at-once';
 
 export type PullRequest = { readonly repository: string; readonly repositoryId: string; readonly branch: string; readonly number: number | null; readonly actsAs: string | null };
 
-export type Reading = { readonly state: MergeState; readonly draft: DraftSetting };
+export type Reading = { readonly number: number; readonly state: MergeState; readonly draft: DraftSetting };
 
 export type Answer = { readonly kind: 'ejection' | 'review' | 'refusal'; readonly id: string };
 
@@ -226,12 +226,12 @@ function owedFor(action: Owing, task: AtLand, reading: Reading): Owe {
     case 'update-branch':
       return owe(actionKinds.prUpdateBranch, { repository, head: branch, commit: reading.state.head });
     case 'merge':
-      return owe(actionKinds.prMerge, { repository, head: branch, commit: reading.state.head });
+      return owe(actionKinds.prMerge, { repository, number: reading.number, commit: reading.state.head });
   }
 }
 
 function afterMerge(task: AtLand, reading: Reading): readonly Owe[] {
-  const pull = task.pull.number === null ? 'the pull request' : `pull request #${String(task.pull.number)}`;
+  const pull = `pull request #${String(reading.number)}`;
   const isTicket = ticket.safeParse(task.key).success;
   const comment = isTicket ? [owe(actionKinds.ticketComment, { ticket: task.key, text: `AutoWorker merged ${pull} at ${reading.state.head}.`, linkPullRequest: true })] : [];
   const ended = isTicket && task.statuses.end !== null ? [owe(actionKinds.ticketTransition, { ticket: task.key, status: task.statuses.end, from: task.statuses.start })] : [];
@@ -281,7 +281,7 @@ async function readState(land: Land, pull: PullRequest, record: LandRecord): Pro
     const read = await land.read({ repositoryId: pull.repositoryId, number: pull.number, actsAs: pull.actsAs }, latestAnswered(record), AbortSignal.timeout(land.readTimeoutMs));
     if ('failed' in read) return `reading the pull request failed: ${read.failed}`;
     const parsed = mergeState.safeParse(read.state);
-    return parsed.success ? { state: parsed.data, draft: record.draftLeaves } : `the merge state did not parse: ${parsed.error.message}`;
+    return parsed.success ? { number: pull.number, state: parsed.data, draft: record.draftLeaves } : `the merge state did not parse: ${parsed.error.message}`;
   } catch (error) {
     return `reading the pull request failed: ${error instanceof Error ? error.message : String(error)}`;
   }
