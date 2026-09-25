@@ -14,7 +14,8 @@ CONSTANTS
     JobCopyIsAccessOnly,
     DeathKeepsRefreshClaim,
     ClaimNeedsDueLogin,
-    FinishNeedsClaim
+    FinishNeedsClaim,
+    ReapplyNeedsNewerLogin
 
 ASSUME
     /\ Checkers # {}
@@ -23,7 +24,7 @@ ASSUME
     /\ MaxChecks \in Nat
     /\ MaxCrashes \in Nat
     /\ MaxJobs \in Nat
-    /\ {ClaimIsExclusive, RefreshIsClaimedOnce, WriteBackNeedsOpenedLogin, JobCopyIsAccessOnly, DeathKeepsRefreshClaim, ClaimNeedsDueLogin, FinishNeedsClaim} \subseteq BOOLEAN
+    /\ {ClaimIsExclusive, RefreshIsClaimedOnce, WriteBackNeedsOpenedLogin, JobCopyIsAccessOnly, DeathKeepsRefreshClaim, ClaimNeedsDueLogin, FinishNeedsClaim, ReapplyNeedsNewerLogin} \subseteq BOOLEAN
 
 VARIABLES issued, logins, loginOf, stored, presented, refreshers, checks, pc, held, row, fresh, crashes, jobs, jobCopy, jobCanRefresh, invalid
 
@@ -61,6 +62,8 @@ Claimable(c) == ClaimIsOpen /\ stored = held[c] /\ Due(held[c])
 
 Refreshed == issued - logins
 
+FileLogin(p) == p \in 1..issued /\ \A q \in 1..(p - 1) : loginOf[q] # loginOf[p]
+
 Init ==
     /\ issued = 0
     /\ logins = 0
@@ -86,6 +89,14 @@ PersonLogsIn ==
     /\ loginOf' = [loginOf EXCEPT ![issued + 1] = logins + 1]
     /\ stored' = issued + 1
     /\ UNCHANGED <<presented, refreshers, checks, pc, held, row, fresh, crashes, jobs, jobCopy, jobCanRefresh, invalid>>
+
+PersonReapplies ==
+    /\ \E p \in 1..issued :
+          /\ FileLogin(p)
+          /\ p # stored
+          /\ ~ReapplyNeedsNewerLogin \/ p > stored
+          /\ stored' = p
+    /\ UNCHANGED <<issued, logins, loginOf, presented, refreshers, checks, pc, held, row, fresh, crashes, jobs, jobCopy, jobCanRefresh, invalid>>
 
 Open(c) ==
     /\ pc[c] = "idle"
@@ -214,6 +225,7 @@ Terminated == (\A c \in Checkers : pc[c] = "idle") /\ Live = {} /\ jobCopy = NoP
 
 Next ==
     \/ PersonLogsIn
+    \/ PersonReapplies
     \/ \E c \in Checkers :
           \/ Open(c) \/ Claim(c) \/ RefuseSpentLogin(c) \/ Skip(c)
           \/ Refresh(c) \/ PresentThenDie(c)

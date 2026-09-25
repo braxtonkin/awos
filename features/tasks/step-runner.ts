@@ -130,7 +130,7 @@ async function notesFor(db: Database, step: Step): Promise<readonly string[]> {
     .select('attempt.started_at')
     .where('attempt.task_id', '=', step.task)
     .where('attempt.id', '<', step.attempt)
-    .where('attempt.verdict', '<>', 'lost')
+    .where('attempt.verdict', 'not in', ['lost', 'not_launched'])
     .orderBy('attempt.id', 'desc')
     .limit(1)
     .executeTakeFirst();
@@ -154,7 +154,7 @@ async function answersFor(db: Database, step: Step): Promise<readonly string[]> 
     .where('attempt.task_id', '=', step.task)
     .where('attempt.step', '=', step.kind.name)
     .where('attempt.id', '<', step.attempt)
-    .where('attempt.verdict', '<>', 'lost')
+    .where('attempt.verdict', 'not in', ['lost', 'not_launched'])
     .orderBy('attempt.id', 'desc')
     .limit(1)
     .executeTakeFirst();
@@ -176,6 +176,7 @@ async function lostSummary(db: Database, step: Step): Promise<readonly string[]>
     .where('attempt.task_id', '=', step.task)
     .where('attempt.step', '=', step.kind.name)
     .where('attempt.id', '<', step.attempt)
+    .where('attempt.verdict', '<>', 'not_launched')
     .orderBy('attempt.id', 'desc')
     .limit(1)
     .executeTakeFirst();

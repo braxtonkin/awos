@@ -145,9 +145,10 @@ export async function abandon(db: Database, attempt: string, reason: Instruction
   return inTransaction(db, async tx => {
     const finished = await tx
       .updateTable('attempt')
-      .set({ finished_at: now, verdict: 'lost' })
+      .set({ finished_at: now, verdict: 'not_launched' })
       .where('attempt.id', '=', attempt)
       .where('attempt.finished_at', 'is', null)
+      .where('attempt.job_created_at', 'is', null)
       .returning('attempt.task_id')
       .executeTakeFirst();
     if (finished === undefined) return false;

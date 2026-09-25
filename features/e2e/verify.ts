@@ -13,6 +13,7 @@ import { laneLines, lanes, laneTen } from './lanes.ts';
 import { parsePayload, PayloadRejected } from './payload.ts';
 import { parkedScenario } from './parked.ts';
 import { seconds } from './report.ts';
+import { launchFaultsScenario } from './launch-faults.ts';
 import { roundTripScenario } from './round-trip.ts';
 import { kindAddress } from '../../tools/verify/cluster.ts';
 import { kind } from '../../tools/verify/kind.ts';
@@ -294,4 +295,4 @@ const e2ePayload: Scenario = {
   },
 };
 
-export const scenarios: readonly Scenario[] = [e2e, p7Lane, worldScenario, e2eBranch, e2ePayload, ...cleanScenarios, roundTripScenario, parkedScenario, standInSolutionsScenario];
+export const scenarios: readonly Scenario[] = [e2e, p7Lane, worldScenario, e2eBranch, e2ePayload, ...cleanScenarios, roundTripScenario, launchFaultsScenario, parkedScenario, standInSolutionsScenario];

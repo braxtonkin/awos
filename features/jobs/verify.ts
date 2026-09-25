@@ -5,12 +5,17 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
+import { BatchV1Api, CoreV1Api, KubeConfig } from '@kubernetes/client-node';
 import ts from 'typescript';
 import { connect, refusal } from '../../shared/db/client.ts';
 import { fail, pass, type Check, type Scenario } from '../../tools/verify/check.ts';
+import { startFakeCluster } from '../../tools/verify/fake-cluster.ts';
 import { withPostgres } from '../../tools/verify/postgres.ts';
+import { labels } from '../../shared/cluster.ts';
 import { liveScenario } from './live.ts';
+import { jobName } from './launch.ts';
 import { imageReference } from './settings.ts';
+import { sweepOnce } from './sweep.ts';
 
 const run = promisify(execFile);
 const root = fileURLToPath(new URL('../../', import.meta.url));
@@ -37,7 +42,7 @@ const launchWith = (login: string, guard = 'true'): string =>
     "const image = imageReference.parse('example.com/job@sha256:' + '0'.repeat(64));",
     "const settings = { image, namespace: 'default', serviceAccount: 'autoworker-job', deadlineSeconds: 60 };",
     "const copy = accessOnly('{}');",
-    `export const planted = ${guard} ? manifests({ attempt: '1', taskKey: 'K-1', number: 1, step: 'specify', image, repositoryUrl: 'https://example.com/r.git', startCommit: '', afterTurn: { kind: 'push' }, attemptToken: '', engineUrl: '', runAs: { name: 'n', email: 'e@example.com', githubToken: 't', codexLogin: ${login} } }, settings) : copy;`,
+    `export const planted = ${guard} ? manifests({ attempt: '1', taskKey: 'K-1', branch: 'autoworker/K-1-attempt-1', step: 'specify', image, repositoryUrl: 'https://example.com/r.git', startCommit: '', afterTurn: { kind: 'push' }, attemptToken: '', engineUrl: '', runAs: { name: 'n', email: 'e@example.com', githubToken: 't', codexLogin: ${login} } }, settings) : copy;`,
   ].join('\n');
 
 const typePlants = [
@@ -178,11 +183,46 @@ async function pins(): Promise<Check> {
   return same ? pass(name, `${base(job) ?? ''}, @openai/codex@${codex(job) ?? ''}`) : fail(name, `job ${base(job) ?? 'none'} ${codex(job) ?? 'none'}, verify ${base(tools) ?? 'none'} ${codex(tools) ?? 'none'}`);
 }
 
+async function sweepPastAFailure(): Promise<Check> {
+  const fake = await startFakeCluster();
+  try {
+    return await withPostgres(async postgres => {
+      const scratch = await postgres.scratch();
+      const db = connect(scratch.stableUrl, 1);
+      try {
+        const attempts = ['901', '902', '903'];
+        for (const attempt of attempts) {
+          const metadata = { name: jobName(attempt), labels: { [labels.attempt]: attempt } };
+          fake.put('jobs', { metadata });
+          fake.put('secrets', { metadata });
+        }
+        fake.failOnce({ verb: 'delete', kind: 'jobs', name: jobName('902'), status: 500 });
+        const config = new KubeConfig();
+        config.loadFromFile(fake.kubeconfig);
+        const cluster = { batch: config.makeApiClient(BatchV1Api), core: config.makeApiClient(CoreV1Api), namespace: fake.namespace };
+        const said = await sweepOnce(db, cluster).then(
+          lines => lines.join(' | '),
+          (error: unknown) => `threw ${error instanceof Error ? error.message : String(error)}`,
+        );
+        const left = [...fake.objects('jobs'), ...fake.objects('secrets')].map(object => object.metadata.name).toSorted();
+        const name = 'one sweep deletes every Job and Secret it can, names the Job whose delete failed, and leaves only that Job';
+        const failed = jobName('902');
+        return left.length === 1 && left[0] === failed && said.includes(`did not delete Job ${failed}`) ? pass(name, `left ${failed}; ${said}`) : fail(name, `left ${left.join(', ') || 'nothing'}; ${said}`);
+      } finally {
+        await db.destroy();
+        await scratch.drop();
+      }
+    });
+  } finally {
+    await fake.stop();
+  }
+}
+
 export const scenarios: readonly Scenario[] = [
   {
     name: 'jobs',
     summary: "proves the launcher's invariants without a cluster: the AccessOnlyLogin input, the digest-only image column, the boundaries of services/job, and the pins",
-    run: async () => [typeGuards(), ...(await boundaryPlants()), await imageColumn(), refreshTokenRefused(), await pins()],
+    run: async () => [typeGuards(), ...(await boundaryPlants()), await imageColumn(), refreshTokenRefused(), await pins(), await sweepPastAFailure()],
   },
   liveScenario,
 ];

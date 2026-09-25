@@ -125,7 +125,9 @@ function routineProblems(planned: Routine, workflows: Workflows, people: readonl
   ];
 }
 
-function problemsIn<L>(file: SetupFile<L>, workflows: Workflows): readonly Problem[] {
+export type Engine = { readonly workflows: Workflows; readonly providers: readonly string[] };
+
+function problemsIn<L>(file: SetupFile<L>, { workflows, providers }: Engine): readonly Problem[] {
   const people = file.people.map(person => person.email);
   const accounts = [...people, ...file.teamAccounts.map(account => account.email)];
   const accountPath = (index: number): Problem['path'] => (index < people.length ? ['people', index, 'email'] : ['teamAccounts', index - people.length, 'email']);
@@ -135,6 +137,11 @@ function problemsIn<L>(file: SetupFile<L>, workflows: Workflows): readonly Probl
     ...(people.includes(file.admin) ? [] : [{ path: ['admin'], message: `names ${file.admin}, whom people does not list. Name the person who runs setup` }]),
     ...duplicates(accounts).map(index => ({ path: accountPath(index), message: `lists ${accounts[index] ?? ''} a second time` })),
     ...duplicates(repositories).map(index => ({ path: ['repositories', index], message: `lists ${repositories[index] ?? ''} a second time` })),
+    ...file.repositories.flatMap(({ verifyProvider }, index) =>
+      providers.includes(verifyProvider)
+        ? []
+        : [{ path: ['repositories', index, 'verifyProvider'], message: `names the Verify provider ${verifyProvider}, which this engine was not given. Use one of: ${providers.join(', ')}` }],
+    ),
     ...duplicates(routineKeys).map(index => ({ path: ['routines', index, 'goal'], message: 'repeats the workflow, repository, and goal of an earlier routine, which is how setup tells routines apart' })),
     ...file.routines.flatMap((planned, index) =>
       routineProblems(planned, workflows, people, accounts, repositories).map(problem => ({ path: ['routines', index, ...problem.path], message: problem.message })),
@@ -152,10 +159,10 @@ const json = z.string().transform((text, context): unknown => {
   }
 });
 
-export async function readSetupFile<L>(path: string, loginsIn: (folder: string) => z.ZodType<L>, workflows: Workflows): Promise<SetupFile<L>> {
+export async function readSetupFile<L>(path: string, loginsIn: (folder: string) => z.ZodType<L>, engine: Engine): Promise<SetupFile<L>> {
   const schema = json.pipe(
     fileSchema(loginsIn(dirname(path))).superRefine((file, context) => {
-      for (const { path: at, message } of problemsIn(file, workflows)) context.issues.push({ code: 'custom', path: [...at], message, input: undefined });
+      for (const { path: at, message } of problemsIn(file, engine)) context.issues.push({ code: 'custom', path: [...at], message, input: undefined });
     }),
   );
   const parsed = await schema.safeParseAsync(await readFile(path, 'utf8'));

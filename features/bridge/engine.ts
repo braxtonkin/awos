@@ -1,7 +1,7 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { IncomingMessage, RequestListener, ServerResponse } from 'node:http';
 import { setTimeout as wait } from 'node:timers/promises';
-import { sql, type Transaction } from 'kysely';
+import { sql, type RawBuilder, type Transaction } from 'kysely';
 import { z } from 'zod';
 import type { Database } from '../../shared/db/client.ts';
 import { inTransaction, type Transacting } from '../../shared/transaction.ts';
@@ -40,9 +40,11 @@ export type Rules = {
   readonly fenced: (finishedAt: Date | null) => boolean;
   readonly finishesOn: (line: Line) => boolean;
   readonly beforeCommit: (answer: EventsAnswer) => Promise<void>;
+  readonly renewedLease: (now: Date, leaseMs: number) => RawBuilder<Date>;
 };
 
 export const rules: Rules = {
+  renewedLease: (now, leaseMs) => sql<Date>`case when lease_until >= ${now} then greatest(lease_until, ${new Date(now.getTime() + leaseMs)}) else lease_until end`,
   decide: (highest, seq) => (seq <= highest ? 'skip' : seq === highest + 1 ? 'store' : 'stop'),
   highWater: (_writer, _attempt, column) => Promise.resolve(column),
   fenced: finishedAt => finishedAt !== null,
@@ -71,7 +73,8 @@ export async function issueToken(db: Database, attempt: AttemptId): Promise<stri
     .set({ bridge_token_hash: hashOf(token) })
     .where('id', '=', attempt)
     .where('finished_at', 'is', null)
-    .where('bridge_token_hash', 'is', null)
+    .where('job_created_at', 'is', null)
+    .where('bridge_pid', 'is', null)
     .executeTakeFirst();
   return numUpdatedRows === 1n ? token : undefined;
 }
@@ -103,7 +106,7 @@ async function admit(writer: Writer, engine: BridgeEngine, from: Caller, now: Da
     .updateTable('attempt')
     .set({
       bridge_pid: from.pid,
-      lease_until: sql<Date>`greatest(lease_until, ${new Date(now.getTime() + engine.leaseMs)})`,
+      lease_until: engine.rules.renewedLease(now, engine.leaseMs),
       commands_received: sql<string>`greatest(commands_received, ${received})`,
     })
     .where('id', '=', from.attempt)

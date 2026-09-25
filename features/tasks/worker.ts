@@ -2,7 +2,7 @@ import type { Database } from '../../shared/db/client.ts';
 import type { Loop } from '../../shared/loop.ts';
 import type { Instruction, JobAfterTurn } from '../../shared/workflow.ts';
 import { abandon, advance } from './advance.ts';
-import { claim, claimable, park, renew, unlaunched, type Start } from './claim.ts';
+import { claim, claimable, holdingLaunch, jobCreated, park, renew, unlaunched, type Start } from './claim.ts';
 import { continuation } from './continuation.ts';
 import type { RunAsRule } from './run-as.ts';
 import { baseOf, promptFor, stepOf, type Prompt, type StepRunner } from './step-runner.ts';
@@ -44,6 +44,9 @@ const noRepository: Instruction = 'This task has no repository, and its step run
 
 const reason = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
+const turnStarted = async (db: Database, attempt: string): Promise<boolean> =>
+  (await db.selectFrom('attempt_command').select('attempt_command.seq').where('attempt_command.attempt_id', '=', attempt).where('attempt_command.kind', '=', 'turn.start').executeTakeFirst()) !== undefined;
+
 export async function startOf(db: Database, branchHead: WorkerSettings['branchHead'], task: string, runAs: string): Promise<Start | { readonly refused: Instruction } | null> {
   const found = await continuation(db, task);
   switch (found.from) {
@@ -60,7 +63,7 @@ export async function startOf(db: Database, branchHead: WorkerSettings['branchHe
   }
 }
 
-async function launchAttempt(db: Database, settings: WorkerSettings, attempt: string, now: Date): Promise<string> {
+async function launchHeld(db: Database, settings: WorkerSettings, attempt: string, now: Date): Promise<string> {
   const step = await stepOf(db, settings.runner, attempt);
   if (step.repository === null || step.branch === null || step.start === null) {
     await abandon(db, attempt, noRepository, now);
@@ -85,8 +88,8 @@ async function launchAttempt(db: Database, settings: WorkerSettings, attempt: st
   if (environment !== null && (await renew(db, attempt, new Date(), settings.startLeaseMs)) === 'lost') return `attempt ${attempt} of task ${step.key} ended while its environment started`;
   const prompt = await promptFor(db, step, environment?.started ?? null, await settings.describeTicket(step.key, step.runAs.id));
   const token = await settings.issueToken(db, attempt);
-  if (token === undefined) return `attempt ${attempt} of task ${step.key} ended before its Job launched, so this pass launched nothing`;
-  await settings.startTurn(db, attempt, prompt, now);
+  if (token === undefined) return `attempt ${attempt} of task ${step.key} ended or heard from its bridge before this pass launched it, so this pass launched nothing`;
+  if (!(await turnStarted(db, attempt))) await settings.startTurn(db, attempt, prompt, now);
   const launched = await settings.launch(db, {
     attempt,
     taskKey: step.key,
@@ -103,8 +106,12 @@ async function launchAttempt(db: Database, settings: WorkerSettings, attempt: st
     await abandon(db, attempt, launched.refused, now);
     return `parked task ${step.key}: ${launched.refused}`;
   }
+  if (!(await jobCreated(db, attempt, new Date()))) return `attempt ${attempt} of task ${step.key} ended while its Job ${launched.launched} was created`;
   return `launched ${launched.launched} for attempt ${attempt} of task ${step.key} at ${step.kind.name} on ${step.branch} from ${step.start} as ${step.runAs.email}`;
 }
+
+const launchAttempt = async (db: Database, settings: WorkerSettings, attempt: string, now: Date): Promise<string> =>
+  (await holdingLaunch(db, attempt, () => launchHeld(db, settings, attempt, now))) ?? `attempt ${attempt} is launching in another pass, so this pass left it`;
 
 async function take(db: Database, settings: WorkerSettings, task: string, now: Date): Promise<string> {
   const runAs = await settings.runAs(db, task);
@@ -115,7 +122,7 @@ async function take(db: Database, settings: WorkerSettings, task: string, now: D
   try {
     return await launchAttempt(db, settings, claimed.attempt, now);
   } catch (error) {
-    return `did not launch attempt ${claimed.attempt} of task ${task}, so its lease lapses and the reaper releases it: ${reason(error)}`;
+    return `did not launch attempt ${claimed.attempt} of task ${task}, so the next pass launches it again: ${reason(error)}`;
   }
 }
 
@@ -126,7 +133,7 @@ export function worker(settings: WorkerSettings): Loop {
     pass: async (db, { now }) => {
       const lines: string[] = [];
       for (const attempt of await unlaunched(db, settings.runner.workflows)) {
-        lines.push(await launchAttempt(db, settings, attempt, now).catch((error: unknown) => `did not launch attempt ${attempt}: ${reason(error)}`));
+        lines.push(await launchAttempt(db, settings, attempt, now).catch((error: unknown) => `did not launch attempt ${attempt}, so the next pass launches it again: ${reason(error)}`));
       }
       for (const task of await claimable(db, settings.runner.workflows, ['agent'])) {
         lines.push(await take(db, settings, task, now).catch((error: unknown) => `did not claim task ${task}: ${reason(error)}`));
