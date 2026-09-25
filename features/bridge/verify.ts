@@ -75,6 +75,7 @@ export const scenarios: readonly Scenario[] = [
       'RestartGraceForLeases',
       'FinishWaitsForLastLine',
       'EngineIsFair',
+      'LapsedLeaseStaysLapsed',
     ],
     properties: {
       NoEventStoredTwice: 'INVARIANTS',
@@ -87,6 +88,7 @@ export const scenarios: readonly Scenario[] = [
       FinishedStepKeepsItsText: 'INVARIANTS',
       LostAttemptChangesNothing: 'PROPERTIES',
       ReconnectedBridgeKeepsItsAttempt: 'INVARIANTS',
+      LapsedLeaseNeverRenews: 'PROPERTIES',
     },
     liveness: ['EveryEventStored', 'EveryCommandApplied'],
     mutants: [
@@ -105,6 +107,7 @@ export const scenarios: readonly Scenario[] = [
       { guard: 'FinishWaitsForLastLine', property: 'EveryEventStored' },
       { guard: 'EngineIsFair', property: 'EveryEventStored' },
       { guard: 'EngineIsFair', property: 'EveryCommandApplied' },
+      { guard: 'LapsedLeaseStaysLapsed', property: 'LapsedLeaseNeverRenews' },
     ],
   }),
   ...simScenarios,

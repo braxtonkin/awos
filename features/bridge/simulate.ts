@@ -64,6 +64,7 @@ export const mutantName = z.enum([
   'RestartGraceForLeases',
   'FinishWaitsForLastLine',
   'EngineIsFair',
+  'LapsedLeaseStaysLapsed',
   'one_event_per_number',
 ]);
 
@@ -85,6 +86,8 @@ const parsedJson = (text: string): unknown => {
 };
 
 const isTurnCompleted = (line: Line): boolean => line.kind === 'app' && turnCompleted.safeParse(parsedJson(line.text)).success;
+
+const renewsAnyLease: Rules['renewedLease'] = (now, leaseMs) => sql<Date>`greatest(lease_until, ${new Date(now.getTime() + leaseMs)})`;
 
 const liveFence: readonly Drop[] = [
   { kind: 'trigger', table: 'attempt_event', name: 'event_needs_live_attempt' },
@@ -109,6 +112,7 @@ export const mutants: Readonly<Record<MutantName, Mutant>> = {
   RestartGraceForLeases: { breaks: ['ReconnectedBridgeKeepsItsAttempt'], sim: 'no-lease-grace', weights: { 'engine-crash': 2 }, shape: { label: 'by a reap after an engine restart', holds: failure => failure.move === 'reap' } },
   FinishWaitsForLastLine: { breaks: ['EveryEventStored'], rules: { finishesOn: isTurnCompleted } },
   EngineIsFair: { breaks: ['EveryEventStored', 'EveryCommandApplied'], sim: 'engine-stays-down', weights: { 'engine-crash': 3, restart: 0 } },
+  LapsedLeaseStaysLapsed: { breaks: ['LapsedLeaseNeverRenews'], rules: { renewedLease: renewsAnyLease }, weights: { hang: 3, reap: 0.3 } },
   one_event_per_number: { breaks: ['NoEventStoredTwice'], rules: { decide: storesEveryNumber }, drops: [{ kind: 'constraint', table: 'attempt_event', name: 'one_event_per_number' }] },
 };
 
