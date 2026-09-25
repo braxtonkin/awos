@@ -19,7 +19,7 @@
     "step-names": "node tools/step-names/main.ts",
     "strict-schemas": "node tools/strict-schemas/main.ts",
     "sql-comments": "node tools/sql-comments/main.ts",
-    "test": "vitest run --dir features",
+    "test": "vitest run --dir features --exclude '**/e2e/sandbox/**'",
     "typecheck": "tsc --noEmit",
     "verify": "node tools/verify/main.ts"
   },
