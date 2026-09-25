@@ -30,15 +30,30 @@ const settings = ['fsync=off', 'synchronous_commit=off', 'full_page_writes=off',
 export const migrationsFolder = fileURLToPath(new URL('../../db/migrations', import.meta.url));
 const outsideVerifyContainer = 'Postgres for verification starts beside the verify container. Run the command inside it: docker compose run --rm verify <command>';
 
-const inspected = z.object({ Id: z.string(), NetworkSettings: z.object({ Networks: z.record(z.string(), z.unknown()) }) });
+const cores = z.object({ HostConfig: z.object({ CpusetCpus: z.string().regex(/^(?:\d+(?:-\d+)?(?:,\d+(?:-\d+)?)*)?$/u) }) });
+const inspected = cores.extend({ Id: z.string(), NetworkSettings: z.object({ Networks: z.record(z.string(), z.unknown()) }) });
 const labeled = z.array(z.object({ Id: z.string(), Labels: z.record(z.string(), z.string()) }));
 
-async function verifyContainer(): Promise<{ readonly id: string; readonly network: string }> {
+async function verifyContainer(): Promise<{ readonly id: string; readonly network: string; readonly cpus: string }> {
   const reply = await docker('GET', `/containers/${hostname()}/json`).catch(() => undefined);
   const parsed = inspected.safeParse(reply?.body);
   const network = parsed.success ? Object.keys(parsed.data.NetworkSettings.Networks)[0] : undefined;
   if (reply?.status !== 200 || !parsed.success || network === undefined) throw new Error(outsideVerifyContainer);
-  return { id: parsed.data.Id, network };
+  return { id: parsed.data.Id, network, cpus: parsed.data.HostConfig.CpusetCpus };
+}
+
+class PostgresOnCpus extends PostgreSqlContainer {
+  withCpus(cpus: string): this {
+    this.hostConfig.CpusetCpus = cpus;
+    return this;
+  }
+}
+
+async function requireCpus(id: string, cpus: string): Promise<void> {
+  const actual = cores.parse((await docker('GET', `/containers/${id}/json`)).body).HostConfig.CpusetCpus;
+  if (actual !== cpus) {
+    throw new Error(`The Postgres container runs on cores "${actual}", but the verify container that started it runs on cores "${cpus}". Postgres for verification must run on the verify container's cores.`);
+  }
 }
 
 async function removeOrphans(): Promise<void> {
@@ -82,13 +97,20 @@ export async function startPostgres(): Promise<Postgres> {
   const self = await verifyContainer();
   await removeOrphans();
   const alias = `postgres-${randomUUID()}`;
-  const container = await new PostgreSqlContainer(image)
+  const container = await new PostgresOnCpus(image)
+    .withCpus(self.cpus)
     .withPassword(randomUUID())
     .withNetworkMode(self.network)
     .withNetworkAliases(alias)
     .withLabels({ [ownerLabel]: self.id })
     .withCommand(['postgres', ...settings.flatMap(setting => ['-c', setting])])
     .start();
+  try {
+    await requireCpus(container.getId(), self.cpus);
+  } catch (error) {
+    await container.stop();
+    throw error;
+  }
   const at = (host: string, database: string): string => `postgres://${container.getUsername()}:${container.getPassword()}@${host}:5432/${database}?sslmode=disable`;
   const address = container.getIpAddress(self.network);
   return {
