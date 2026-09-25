@@ -22,7 +22,7 @@ const given = (providers: Providers): string => [...providers.keys()].join(', ')
 const reason = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
 const unknownProvider = (github: string, provider: string, providers: Providers): Instruction =>
-  `The repository ${github} names the Verify provider ${provider}, which this engine was not given. Add the provider to the map in services/engine/main.ts, or set the repository's provider to one of ${given(providers)}, then press Retry.`;
+  `The repository ${github} names the Verify provider ${provider}, which this engine was not given. Add the provider to the map in services/engine/providers.ts, or set the repository's provider to one of ${given(providers)}, then press Retry.`;
 
 export async function providerProblems(db: Database, providers: Providers): Promise<readonly string[]> {
   const names = [...providers.keys()];
@@ -45,11 +45,11 @@ export async function providerProblems(db: Database, providers: Providers): Prom
   return [
     ...repositories.map(
       row =>
-        `The repository ${row.github} on ${row.branch} names the Verify provider ${row.verify_provider}, which this engine was not given. Add the provider to the map in services/engine/main.ts, or set the repository's verify_provider to one of ${given(providers)}.`,
+        `The repository ${row.github} on ${row.branch} names the Verify provider ${row.verify_provider}, which this engine was not given. Add the provider to the map in services/engine/providers.ts, or set the repository's verify_provider to one of ${given(providers)}.`,
     ),
     ...environments.map(
       row =>
-        `The environment of attempt ${row.attempt_id} in the repository ${row.github ?? 'that no longer exists'} on ${row.branch ?? 'no branch'} came from the Verify provider ${row.provider}, which this engine was not given, and nobody has stopped it. Add the provider to the map in services/engine/main.ts, so the engine can stop it.`,
+        `The environment of attempt ${row.attempt_id} in the repository ${row.github ?? 'that no longer exists'} on ${row.branch ?? 'no branch'} came from the Verify provider ${row.provider}, which this engine was not given, and nobody has stopped it. Add the provider to the map in services/engine/providers.ts, so the engine can stop it.`,
     ),
   ];
 }

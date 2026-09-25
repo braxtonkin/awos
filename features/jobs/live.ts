@@ -415,7 +415,7 @@ const engineMain = fileURLToPath(new URL('../../services/engine/main.ts', import
 function engine(world: World, everyMs: number): { readonly child: ChildProcess; readonly said: () => string } {
   let said = '';
   const child = spawn(process.execPath, [engineMain], {
-    env: { PATH: process.env['PATH'] ?? '', HOME: process.env['HOME'] ?? '/root', DATABASE_URL: world.url, JOB_IMAGE: world.image, SWEEP_EVERY_MS: String(everyMs), JOB_NAMESPACE: world.cluster.namespace },
+    env: { PATH: process.env['PATH'] ?? '', HOME: process.env['HOME'] ?? '/root', DATABASE_URL: world.url, JOB_IMAGE: world.image, SWEEP_EVERY_MS: String(everyMs), JOB_NAMESPACE: world.cluster.namespace, JOB_ENGINE_URL: 'http://127.0.0.1:1/', CREDENTIAL_KEY: randomBytes(32).toString('base64'), CREDENTIAL_KEY_VERSION: '1' },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   child.stdout.setEncoding('utf8').on('data', (chunk: string) => (said += chunk));

@@ -1,6 +1,7 @@
 import { once } from 'node:events';
 import { createServer } from 'node:http';
 import { hostname } from 'node:os';
+import { sql } from 'kysely';
 import { z } from 'zod';
 import { agentSteps } from '../../features/code-change/stage-output.ts';
 import { workflow as codeChange } from '../../features/code-change/workflow.ts';
@@ -14,7 +15,6 @@ import { openJiraLogin } from '../../features/credentials/jira-login.ts';
 import { sealingKey, type SealingKey } from '../../features/credentials/seal.ts';
 import { open, writeBack } from '../../features/credentials/store.ts';
 import { providerProblems, reconcile } from '../../features/environments/lifecycle.ts';
-import { providersByName } from '../../features/environments/provider.ts';
 import { clientsFrom, type OpenToken } from '../../features/github/client.ts';
 import { mergeStateReader } from '../../features/github/merge-state.ts';
 import { githubPerformers, outboxMergeRow } from '../../features/github/performers.ts';
@@ -39,9 +39,12 @@ import { connectCluster } from '../../shared/cluster.ts';
 import { connect, type Database } from '../../shared/db/client.ts';
 import { realClock, runLoop, type Loop } from '../../shared/loop.ts';
 import { attempts } from './attempts.ts';
+import { providers } from './providers.ts';
 import { workflows, type ActionKind } from './workflows.ts';
 
 const milliseconds = z.coerce.number().int().positive();
+
+const present = z.string().transform(() => true);
 
 const settings = z.object({
   DATABASE_URL: z.url({ protocol: /^postgres(ql)?$/ }),
@@ -69,20 +72,33 @@ const settings = z.object({
   JOB_ENGINE_URL: z.url({ protocol: /^https?$/ }).optional(),
   GIT_BASE_URL: z.url({ protocol: /^(https|git)$/ }).default('https://github.com/'),
   WORKER_EVERY_MS: milliseconds.default(5_000),
-  ATTEMPT_START_LEASE_MS: milliseconds.default(300_000),
+  ATTEMPT_START_LEASE_MS: milliseconds.default(900_000),
   BRIDGE_PORT: z.coerce.number().int().min(0).max(65_535).default(4520),
   BRIDGE_POLL_MS: milliseconds.default(250),
   BRIDGE_KEEPALIVE_MS: milliseconds.default(5_000),
   BRIDGE_BODY_LIMIT_BYTES: z.coerce.number().int().positive().default(64 * 1024 * 1024),
-}).refine(given => given.CHECK_LEASE_MS > given.CHECK_TIMEOUT_MS + checkLeaseMarginMs, {
-  path: ['CHECK_LEASE_MS'],
-  message: `must be more than CHECK_TIMEOUT_MS plus ${String(checkLeaseMarginMs)} ms, so a check that runs until its timeout still holds its lease when it finishes`,
+  CREDENTIAL_KEY: present.optional(),
+  CREDENTIAL_KEY_VERSION: present.optional(),
+}).superRefine((given, context) => {
+  const rules = [
+    {
+      broken: given.CHECK_LEASE_MS <= given.CHECK_TIMEOUT_MS + checkLeaseMarginMs,
+      path: 'CHECK_LEASE_MS',
+      message: `must be more than CHECK_TIMEOUT_MS plus ${String(checkLeaseMarginMs)} ms, so a check that runs until its timeout still holds its lease when it finishes`,
+    },
+    {
+      broken: given.ATTEMPT_START_LEASE_MS <= given.ENVIRONMENT_START_DEADLINE_MS + given.CHECK_TIMEOUT_MS + checkLeaseMarginMs,
+      path: 'ATTEMPT_START_LEASE_MS',
+      message: `must be more than ENVIRONMENT_START_DEADLINE_MS plus CHECK_TIMEOUT_MS plus ${String(checkLeaseMarginMs)} ms, so an attempt whose Codex check and environment start both run to their limits still holds its lease when it launches`,
+    },
+    { broken: given.JOB_IMAGE !== undefined && given.CREDENTIAL_KEY === undefined, path: 'CREDENTIAL_KEY', message: 'must be set when JOB_IMAGE is, because each Job gets logins the engine opens with it' },
+    { broken: given.JOB_IMAGE !== undefined && given.JOB_ENGINE_URL === undefined, path: 'JOB_ENGINE_URL', message: 'must be set when JOB_IMAGE is, because each Job reaches the bridge at it' },
+    { broken: given.CREDENTIAL_KEY_VERSION !== undefined && given.CREDENTIAL_KEY === undefined, path: 'CREDENTIAL_KEY', message: 'must be set when CREDENTIAL_KEY_VERSION is, or the engine would open and check no credentials' },
+  ];
+  for (const rule of rules) if (rule.broken) context.issues.push({ code: 'custom', path: [rule.path], message: rule.message, input: undefined });
 });
 
 type Settings = z.infer<typeof settings>;
-
-const providers = providersByName([]);
-
 
 const runner: StepRunner = { workflows, agents: new Map([[codeChange.name, agentSteps]]), enqueue };
 
@@ -172,6 +188,16 @@ async function run(given: Settings, key: SealingKey | undefined): Promise<void> 
   process.on('SIGTERM', stopping).on('SIGINT', stopping);
   const db = connect(given.DATABASE_URL, given.DATABASE_POOL_SIZE, given.DATABASE_CONNECT_TIMEOUT_MS);
   try {
+    const unreachable = await sql`select 1`.execute(db).then(
+      () => undefined,
+      (error: unknown) => (error instanceof Error ? error.message : String(error)),
+    );
+    if (unreachable !== undefined) {
+      process.stderr.write(`The engine did not start, because it could not reach Postgres at ${new URL(given.DATABASE_URL).host}, the host in DATABASE_URL. ${unreachable}
+`);
+      process.exitCode = 1;
+      return;
+    }
     const problems = await startProblems(db, workflows);
     if (problems.length > 0) {
       process.stderr.write(`The engine did not start, because its routines and tasks do not fit the workflows it was given.\n${problems.join('\n')}\n`);
@@ -202,7 +228,6 @@ async function run(given: Settings, key: SealingKey | undefined): Promise<void> 
     const loops = loopsFor(given, key, db);
     if (key === undefined) say('The engine has no CREDENTIAL_KEY, so it opens and checks no credentials.');
     if (given.JOB_IMAGE === undefined) say('The engine has no JOB_IMAGE, so it launches no Jobs and sweeps none.');
-    else if (given.JOB_ENGINE_URL === undefined) say('The engine has no JOB_ENGINE_URL, so its Jobs could not reach the bridge, and it launches none.');
     say(`The engine runs the workflows ${[...workflows.keys()].join(', ')}, the Verify providers ${[...providers.keys()].join(', ')}, and the loops ${loops.map(loop => `${loop.name} every ${String(loop.everyMs)} ms`).join(', ')}.`);
     await Promise.all(loops.map(loop => runLoop(loop, db, realClock, stop.signal, say)));
     bridge.closeAllConnections();

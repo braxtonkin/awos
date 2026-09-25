@@ -3,6 +3,7 @@ import { refusal, type Database } from '../../shared/db/client.ts';
 import type { ConnectorKind, DB } from '../../shared/db/types.ts';
 import type { Loop } from '../../shared/loop.ts';
 import type { Checks } from './checks.ts';
+import { clearLeftoverHomes } from './codex-check.ts';
 import { accessOnly, type AccessOnlyLogin } from '../../shared/codex-login.ts';
 import type { Check, Checked } from './kinds.ts';
 import type { SealingKey } from './seal.ts';
@@ -234,9 +235,11 @@ async function checkOne(db: Database, settings: CheckLoopSettings, row: Stored, 
 }
 
 export function checkLoop(settings: CheckLoopSettings): Loop {
+  const started = new Date();
   return {
     name: 'checks',
     everyMs: settings.everyMs,
+    resume: async () => (await clearLeftoverHomes(started)).map(path => `removed ${path}, a Codex home that a check left behind when an earlier engine stopped mid-check`),
     pass: async (db, { now, stop }) => {
       const released = await reapChecks(db, now);
       const due = await dueCredentials(db, now);
