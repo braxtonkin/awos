@@ -37,6 +37,7 @@ const mutants: readonly Mutant[] = [
   invariant('DeathKeepsRefreshClaim', 'a check that presented the refresh token and then died releases its refresh claim', 'NoRefreshTokenReused'),
   invariant('ClaimNeedsDueLogin', 'a checker claims a login it read before another check finished it or someone replaced it', 'OneCheckPerLogin'),
   action('FinishNeedsClaim', 'a checker finishes a check after its claim was reaped', 'FinishedCheckIsFinal'),
+  action('ReapplyNeedsNewerLogin', 'a person re-applies a setup file whose login is older than the stored one', 'StoredLoginIsNewest'),
 ];
 
 const readConfig = (file: string): string => readFileSync(new URL(file, import.meta.url), 'utf8');
