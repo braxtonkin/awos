@@ -50,8 +50,8 @@
         "{features,services,shared}/**/*-model.ts",
         "{features,services,shared}/**/*.test.ts"
       ],
-      "lines": 19599,
-      "characters": 942429,
+      "lines": 19897,
+      "characters": 956973,
       "longest-line": 504
     },
     {
@@ -60,8 +60,8 @@
       "files": [
         "db/migrations/**"
       ],
-      "lines": 1357,
-      "characters": 59665,
+      "lines": 1434,
+      "characters": 62796,
       "longest-line": 220
     },
     {
@@ -72,7 +72,7 @@
         "eslint.config.ts"
       ],
       "lines": 7094,
-      "characters": 322969,
+      "characters": 323098,
       "longest-line": 547
     },
     {
@@ -82,8 +82,8 @@
         "docs/**",
         "*.md"
       ],
-      "lines": 707,
-      "characters": 190524
+      "lines": 708,
+      "characters": 192386
     },
     {
       "name": "product",
@@ -93,15 +93,15 @@
         "services/**",
         "shared/**"
       ],
-      "lines": 12673,
-      "characters": 582298,
+      "lines": 13235,
+      "characters": 607342,
       "longest-line": 374
     }
   ],
   "structure": {
     "features": {
       "why": "Each feature folder is a unit a fork must understand and keep (A4). A new one is an architecture decision.",
-      "ceiling": 16
+      "ceiling": 17
     },
     "services": {
       "why": "Each service deploys on its own and holds no logic. A new one is a new process to run, watch, and secure.",
@@ -109,7 +109,7 @@
     },
     "migrations": {
       "why": "Every migration runs forward and back in the migrations scenario and in every simulation's database.",
-      "ceiling": 40
+      "ceiling": 42
     },
     "tables": {
       "why": "Each table is state that every later migration, query, and simulator predicate must keep consistent.",
@@ -117,7 +117,7 @@
     },
     "named-constraints-indexes-triggers": {
       "why": "Named guards are the invariants the store enforces. Each should come with a mutant or a reason it has none, so growth is catalog work too.",
-      "ceiling": 207
+      "ceiling": 208
     },
     "tla-models": {
       "why": "Each model runs in the models job with every mutant on every change.",
@@ -133,7 +133,7 @@
     },
     "verify-scenarios": {
       "why": "Scenarios are the verification tool's surface (C2). Each one is a command an agent must know about and CI time to run.",
-      "ceiling": 69
+      "ceiling": 70
     },
     "ci-jobs": {
       "why": "Each CI job is a parallel lane of machine time and a result to read on every change.",
