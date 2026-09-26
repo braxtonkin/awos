@@ -10,6 +10,7 @@ export type Link = { readonly href: string; readonly label: string; readonly als
 export const links: readonly Link[] = [
   { href: '/', label: 'Needs you' },
   { href: '/tasks', label: 'Tasks', also: ['/board'] },
+  { href: '/people', label: 'People' },
 ];
 
 const isCurrent = (link: Link, path: string): boolean => [link.href, ...(link.also ?? [])].some(href => path === href || (href !== '/' && path.startsWith(`${href}/`)));
@@ -19,7 +20,7 @@ const linkStyle = (current: boolean) =>
 
 type TopBarProps = { readonly people: readonly Person[]; readonly acting: Person | undefined; readonly pick: (form: FormData) => Promise<void> };
 
-function Avatar({ name }: { readonly name: string }) {
+export function Avatar({ name }: { readonly name: string }) {
   const box = { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: 20, height: 20, borderRadius: '50%', flex: 'none' } as const;
   return <span aria-hidden="true" style={{ ...box, background: color('surface-2'), border: `1px solid ${color('rule')}`, color: color('muted'), fontSize: 11, fontWeight: 600 }}>{initials(name)}</span>;
 }

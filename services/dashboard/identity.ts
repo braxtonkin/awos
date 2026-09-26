@@ -1,4 +1,6 @@
 import { cookies, headers } from 'next/headers';
+import { actor } from '../../shared/people.ts';
+import { database } from './database.ts';
 
 export type Asking = {
   readonly cookies: { get(name: string): { readonly value: string } | undefined };
@@ -21,4 +23,7 @@ export const identity: Identity = {
   },
 };
 
-export const acting = async (): Promise<string | undefined> => identity.who({ cookies: await cookies(), headers: await headers() });
+export const acting = async (): Promise<string | undefined> => {
+  const named = identity.who({ cookies: await cookies(), headers: await headers() });
+  return named === undefined ? undefined : (await actor(database(), named))?.id;
+};
