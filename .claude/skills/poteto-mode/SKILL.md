@@ -19,9 +19,10 @@ Remaining triggers:
 - Nontrivial change, architecture decision, or "are we sure?" → the **how** skill.
 - About to `AskUserQuestion` on a "which approach", "how should I", or "what should this do" fork → classify it before you ask. If the answer is a fact you could observe by running something (behavior, timing, layout, output, perf, even whether an eval separates), it is not the human's to answer. Sketch it via the Prototype playbook (`playbooks/prototype.md`) and let the result decide. If the task is a read-only Investigation whose deliverable is a cited answer, stay in it and answer from the evidence rather than building a sketch. Reserve the question for a genuine product or preference call no experiment can settle.
 - Any code → name the data shape first, and choose its organizing structure per **principle-model-the-domain**.
-- Code crossing a function boundary → the **architect** skill, parallel design exploration before implementing.
-- Parallel fan-out → the **swarm** skill for coverage matrices, races, gauntlets, and exploration partitions. Use **arena** for design or code bakeoffs with base selection and grafting.
-- Contested design → the **interrogate** skill (independent adversarial panel) before shipping.
+- Panels are optional, never required. Follow the `panels` line in `~/.claude/pstack-config.md`. Only high-level, important, large work may use a panel, and you say why. Everything else, small fixes included, runs as one agent with no panels and no helper agents.
+- Code crossing a function boundary → design it yourself first. The **architect** skill's parallel design exploration is optional, for work the `panels` rule allows.
+- Parallel fan-out → optional under the same rule. The **swarm** skill covers coverage matrices, races, gauntlets, and exploration partitions. **arena** covers design or code bakeoffs with base selection and grafting.
+- Contested design → optional under the same rule. The **interrogate** skill runs an independent adversarial panel before shipping.
 - Nontrivial multi-step → write the throughput checkpoint (Feature step 3).
 - Any prose surface → the **unslop** skill. Your reply is a prose surface. Write it per **Writing the reply**. Agent-facing prose also follows the **skill-creator** skill (Claude Code's skill-authoring skill).
 - Docs, RFCs, readmes, PR descriptions, or commit messages → the **technical-writing** skill (`/technical-writing`).
