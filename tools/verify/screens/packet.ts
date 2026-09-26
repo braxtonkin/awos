@@ -1,11 +1,11 @@
 import { copyFile, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { z } from 'zod';
 import { open, shoot, withBrowser } from '../browser.ts';
 import { fail, info, pass, type Line, type Scenario } from '../check.ts';
 import { judge, readLimits, verdict } from './gates.ts';
-import { capture, captureDeclared, fixtures, fixtureTarget, groups, renders, shotsOf, type Capture, type Group, type Screen } from './screens.ts';
+import { actingPerson, capture, captureDeclared, fixtures, fixtureTarget, groups, renders, shotsOf, type Capture, type Group, type Screen } from './screens.ts';
 
 const scored = ['clutter', 'hierarchy', 'findability', 'state', 'actionability', 'language', 'spacing', 'agent'] as const;
 
@@ -45,9 +45,10 @@ const reviewSchema = z
           box,
           problem: z.string().min(1).max(200).describe('What is wrong, in one sentence.'),
           fix: z.string().min(1).max(200).describe('The fix, in one sentence.'),
+          later: z.string().nullable().describe("The id of the scope note's later item that adds what the fix asks for, or null when the group should already get it right. A problem with a later id lowers no score."),
         }),
       )
-      .describe('One entry per problem. Every score below 5, including the consistency score, needs at least one.'),
+      .describe('One entry per problem. Every score below 5, including the consistency score, needs at least one whose later is null.'),
     consistency: score.describe('The same thing looks and behaves the same across the group’s screens.'),
     coverage: z
       .array(
@@ -81,7 +82,31 @@ type Review = z.infer<typeof reviewSchema>;
 
 const questionsFile = z.strictObject({ ownerSays: z.string(), groups: z.record(z.string(), z.array(z.strictObject({ id: z.string(), question: z.string() }))) });
 
-const packetFile = z.strictObject({ group: z.enum(groups), reviewers: z.number().int().positive(), screens: z.record(z.string(), z.strictObject({ w: z.number(), h: z.number() })) });
+const scope = z.strictObject({
+  shows: z.array(z.string().min(1)),
+  later: z.array(z.strictObject({ id: z.string().regex(/^[a-z][a-z0-9-]*$/), unit: z.string().regex(/^Ud+[a-z]?$/), adds: z.string().min(1) })),
+});
+
+type Scope = z.infer<typeof scope>;
+
+const unscoped: Scope = { shows: [], later: [] };
+
+const scopeFile = z.partialRecord(z.enum(groups), scope);
+
+const packetFile = z.strictObject({ group: z.enum(groups), reviewers: z.number().int().positive(), screens: z.record(z.string(), z.strictObject({ w: z.number(), h: z.number() })), scope });
+
+const packetQuestions = z.strictObject({ ownerSays: z.string(), questions: z.array(z.strictObject({ id: z.string(), question: z.string() })) });
+
+const personSlot = '{person}';
+
+function askedOf(questions: readonly { readonly id: string; readonly question: string }[], people: readonly string[]): readonly { readonly id: string; readonly question: string }[] {
+  const other = people.toSorted((a, b) => a.localeCompare(b)).find(name => name !== actingPerson);
+  return questions.map(each => {
+    if (!each.question.includes(personSlot)) return each;
+    if (other === undefined) throw new Error(`${each.id} asks about ${personSlot}, but the captured world holds nobody besides ${actingPerson}`);
+    return { id: each.id, question: each.question.replaceAll(personSlot, other) };
+  });
+}
 
 type Packet = z.infer<typeof packetFile>;
 
@@ -104,17 +129,19 @@ function crossCheck(review: Review, file: string, packet: Packet, questions: rea
     if (!inGroup(name)) out.push(`${name} is not in the packet`);
     if (named.filter(each => each === name).length > 1) out.push(`${name} is scored more than once`);
   }
-  const hasProblem = (screen: string | null, dimension: string): boolean => review.problems.some(p => p.dimension === dimension && (dimension === 'consistency' || p.screen === screen));
+  const waiting = packet.scope.later.map(each => each.id);
+  const hasProblem = (screen: string | null, dimension: string): boolean => review.problems.some(p => p.later === null && p.dimension === dimension && (dimension === 'consistency' || p.screen === screen));
   for (const each of review.screens) {
     for (const dimension of scored) {
       const given = each.scores[dimension];
-      if (given !== null && given < 5 && !hasProblem(each.screen, dimension)) out.push(`${each.screen} ${dimension} scored ${String(given)} with no problem`);
+      if (given !== null && given < 5 && !hasProblem(each.screen, dimension)) out.push(`${each.screen} ${dimension} scored ${String(given)} with no problem the group should already fix`);
     }
   }
-  if (review.consistency < 5 && !hasProblem(null, 'consistency')) out.push(`consistency scored ${String(review.consistency)} with no problem`);
+  if (review.consistency < 5 && !hasProblem(null, 'consistency')) out.push(`consistency scored ${String(review.consistency)} with no problem the group should already fix`);
   review.problems.forEach((p, index) => {
     if (inGroup(p.screen)) fits(p.screen, p.box, `problems[${String(index)}]`);
     else out.push(`problems[${String(index)}] is on ${p.screen}, which is not in the packet`);
+    if (p.later !== null && !waiting.includes(p.later)) out.push(`problems[${String(index)}] waits for ${p.later}, which the scope note does not list`);
   });
   for (const state of states) if (review.coverage.filter(c => c.state === state).length !== 1) out.push(`coverage must list ${state} exactly once`);
   for (const c of review.coverage) if (c.screen !== null && !inGroup(c.screen)) out.push(`coverage ${c.state} names ${c.screen}, which is not in the packet`);
@@ -130,7 +157,15 @@ function crossCheck(review: Review, file: string, packet: Packet, questions: rea
 
 const escape = (text: string): string => text.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;');
 
-function indexPage(group: Group, reviewers: number, captures: readonly Capture[], lines: readonly string[], questions: readonly { readonly id: string; readonly question: string }[]): string {
+function scopeHtml(scoped: Scope): string {
+  if (scoped.shows.length === 0 && scoped.later.length === 0) return '<p>The group is complete, so everything the rubric asks for is in scope.</p>';
+  return `<p>Score the group only on what it is meant to show now. It shows:</p>
+<ul>${scoped.shows.map(line => `<li>${escape(line)}</li>`).join('')}</ul>
+<p>Later units add the items below. When a screen lacks one of them, still name the problem, set its <code>later</code> to the item's id, and lower no score for it. Anything else that is missing or wrong lowers the score as the rubric says, and its <code>later</code> is null.</p>
+<ul>${scoped.later.map(each => `<li><code>${escape(each.id)}</code> ${escape(each.unit)}: ${escape(each.adds)}</li>`).join('')}</ul>`;
+}
+
+function indexPage(group: Group, reviewers: number, captures: readonly Capture[], lines: readonly string[], questions: readonly { readonly id: string; readonly question: string }[], scoped: Scope): string {
   const names = Array.from({ length: reviewers }, (_, index) => `${group}.r${String(index + 1)}.json`);
   const screensHtml = captures
     .map(
@@ -158,11 +193,13 @@ img { width: 100%; border: 1px solid #dddde1; }
 <p>You are one of ${String(reviewers)} reviewers who never see each other. Read rubric.md, look at every screenshot below, and read metrics.json for the objective gates.</p>
 <ol>
 <li>Score every screen on every scored dimension, from 1 to 5.</li>
-<li>For every score below 5, name the problem, give its box on the screenshot in pixels, and propose a fix in one sentence.</li>
+<li>For every score below 5, name the problem, give its box on the screenshot in pixels, and propose a fix in one sentence. The scope below says which problems wait for a later unit.</li>
 <li>Answer each find question from the screenshots alone.</li>
 <li>Fill the coverage checklist for the empty, busy, waiting, and error states.</li>
 <li>Save your review as one of ${names.map(name => `<code>${escape(name)}</code>`).join(', ')}, matching review.schema.json.</li>
 </ol>
+<h2>Scope</h2>
+${scopeHtml(scoped)}
 <h2>Find questions</h2>
 <ul>${questions.map(q => `<li><code>${escape(q.id)}</code> ${escape(q.question)}</li>`).join('')}</ul>
 <h2>Gates</h2>
@@ -177,7 +214,7 @@ async function write(group: Group, useFixtures: boolean, declared: readonly Scre
   const limits = await readLimits();
   const folder = join(shotsOf('screen-review'), group);
   const questions = questionsFile.parse(JSON.parse(await readFile(here('find-questions.json'), 'utf8')));
-  const asked = questions.groups[group] ?? [];
+  const scoped = scopeFile.parse(JSON.parse(await readFile(here('scope.json'), 'utf8')))[group] ?? unscoped;
   const chosen = fixtures.filter(each => each.group === group);
   const screens = declared.filter(each => each.group === group);
   if ((useFixtures ? chosen : screens).length === 0) throw new Error(`no ${useFixtures ? 'fixture' : 'declared screen'} is in the ${group} group`);
@@ -185,33 +222,40 @@ async function write(group: Group, useFixtures: boolean, declared: readonly Scre
   await mkdir(folder, { recursive: true });
   return withBrowser(async browser => {
     const captures: Capture[] = [];
-    if (useFixtures) for (const fixture of chosen) captures.push(await capture(browser, fixtureTarget(fixture), limits, folder));
-    else captures.push(...(await captureDeclared(browser, screens, limits, folder)));
+    const people: string[] = [];
+    if (useFixtures) {
+      for (const fixture of chosen) captures.push(await capture(browser, fixtureTarget(fixture), limits, folder));
+      people.push(...chosen.flatMap(fixture => fixture.names));
+    } else {
+      const taken = await captureDeclared(browser, screens, limits, folder);
+      captures.push(...taken.captures);
+      people.push(...taken.people);
+    }
+    const asked = askedOf(questions.groups[group] ?? [], [...new Set(people)]);
     const gateText = captures.flatMap(each => judge(each.captured, limits).map(judged => `${judged.passed ? 'PASS' : 'FAIL'}  ${each.name} ${judged.id}  ${verdict(judged)}`));
-    const packet: Packet = { group, reviewers: limits.reviewers, screens: Object.fromEntries(captures.map(each => [each.name, each.size])) };
+    const packet: Packet = { group, reviewers: limits.reviewers, screens: Object.fromEntries(captures.map(each => [each.name, each.size])), scope: scoped };
     await writeFile(join(folder, 'packet.json'), `${JSON.stringify(packet, null, 2)}\n`);
     await writeFile(join(folder, 'metrics.json'), `${JSON.stringify(Object.fromEntries(captures.map(each => [each.name, { size: each.size, gates: judge(each.captured, limits), light: each.captured.light, dark: each.captured.dark }])), null, 2)}\n`);
     await writeFile(join(folder, 'find-questions.json'), `${JSON.stringify({ ownerSays: questions.ownerSays, questions: asked }, null, 2)}\n`);
     await writeFile(join(folder, 'review.schema.json'), `${JSON.stringify(z.toJSONSchema(reviewSchema), null, 2)}\n`);
     await copyFile(here('rubric.md'), join(folder, 'rubric.md'));
-    await writeFile(join(folder, 'index.html'), indexPage(group, limits.reviewers, captures, gateText, asked));
+    await writeFile(join(folder, 'index.html'), indexPage(group, limits.reviewers, captures, gateText, asked, scoped));
     const indexShot = join(folder, 'index.png');
     await open(browser, { url: 'http://packet.test/index.html', width: 1440, height: 900, theme: 'light', steps: [], served: { origin: 'http://packet.test', read: path => readFile(join(folder, path)).catch(() => undefined) } }, async ({ page }) => {
       await shoot(page, indexShot);
     });
     return [
       ...captures.map(renders),
-      pass(`the packet for ${group} holds the rubric, ${String(asked.length)} find questions, the review schema, the metrics, and screenshots of ${captures.map(each => each.name).join(', ')}`, folder),
+      pass(`the packet for ${group} holds the rubric, the scope note, ${String(asked.length)} find questions, the review schema, the metrics, and screenshots of ${captures.map(each => each.name).join(', ')}`, folder),
       pass(`the packet's index page renders`, indexShot),
       info(`the packet waits for ${String(limits.reviewers)} reviews`, 'n/a', `save them in ${folder}, then run screen-review ${group} --judge`),
     ];
   });
 }
 
-async function judgeReviews(group: Group): Promise<readonly Line[]> {
-  const folder = join(shotsOf('screen-review'), group);
+async function judgeReviews(group: Group, folder: string): Promise<readonly Line[]> {
   const packet = packetFile.parse(JSON.parse(await readFile(join(folder, 'packet.json'), 'utf8')));
-  const questions = questionsFile.parse(JSON.parse(await readFile(here('find-questions.json'), 'utf8'))).groups[group] ?? [];
+  const questions = packetQuestions.parse(JSON.parse(await readFile(join(folder, 'find-questions.json'), 'utf8'))).questions;
   const expected = Array.from({ length: packet.reviewers }, (_, index) => `${group}.r${String(index + 1)}.json`);
   const present = new Set((await readdir(folder)).filter(file => /^[a-z]+\.r[1-9]\.json$/.test(file)));
   const lines: Line[] = [];
@@ -250,11 +294,12 @@ async function judgeReviews(group: Group): Promise<readonly Line[]> {
 
 export const screenReview = (declared: readonly Screen[]): Scenario => ({
   name: 'screen-review',
-  summary: 'writes a review packet for a group of declared screens, or of the fixtures with --fixtures, or judges the returned reviews with --judge, against the screen and group rules in rubric.md',
+  summary: 'writes a review packet for a group of declared screens with its scope note, or of the fixtures with --fixtures, or judges the returned reviews with --judge, against the screen and group rules in rubric.md; --packet <folder> judges the packet in that folder',
   run: async args => {
-    const { values, positionals } = parseArgs({ args: [...args], options: { fixtures: { type: 'boolean' }, judge: { type: 'boolean' } }, strict: true, allowPositionals: true });
+    const { values, positionals } = parseArgs({ args: [...args], options: { fixtures: { type: 'boolean' }, judge: { type: 'boolean' }, packet: { type: 'string' } }, strict: true, allowPositionals: true });
     const group = groups.find(each => each === positionals[0]);
     if (group === undefined || positionals.length !== 1) throw new Error(`screen-review takes one group: ${groups.join(', ')}`);
-    return values.judge === true ? judgeReviews(group) : write(group, values.fixtures === true, declared);
+    if (values.packet !== undefined && values.judge !== true) throw new Error('--packet names a packet to judge, so it needs --judge');
+    return values.judge === true ? judgeReviews(group, values.packet === undefined ? join(shotsOf('screen-review'), group) : resolve(values.packet)) : write(group, values.fixtures === true, declared);
   },
 });

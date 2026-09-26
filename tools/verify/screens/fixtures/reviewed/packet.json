@@ -1,0 +1,1 @@
+{"group":"task","reviewers":2,"screens":{"task-a-revised":{"w":1440,"h":900}},"scope":{"shows":["The task page with its status card, its steps, and Stop."],"later":[{"id":"message-box","unit":"U7","adds":"The message box under the agent conversation, with sent, received, and acted-on states."}]}}
