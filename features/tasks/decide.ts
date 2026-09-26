@@ -18,7 +18,8 @@ type Task = {
 };
 
 type Standing =
-  | { readonly state: 'ready' | 'done' | 'stopped' }
+  | { readonly state: 'ready' | 'done' }
+  | { readonly state: 'stopped'; readonly review: string | null }
   | { readonly state: 'waiting'; readonly on: 'retry' | 'outside_approval'; readonly reason: Instruction }
   | { readonly state: 'waiting'; readonly on: 'approval' | 'answer'; readonly reason: Instruction; readonly review: string };
 
@@ -26,17 +27,19 @@ export type Next = Omit<Task, 'key' | 'gates' | 'end' | 'ignoreLaterReviews' | '
 
 type Charged = Extract<Failure, { readonly counter: string }>;
 
+const titled = (step: string): string => `${step.charAt(0).toUpperCase()}${step.slice(1)}`;
+
 const failedTooOften = (step: string): Instruction =>
-  `The ${step} step failed ${String(caps.stageRetries + 1)} times in a row. Read its attempts on this page, fix what stopped them, then press Retry to run it again.`;
+  `The ${titled(step)} step failed ${String(caps.stageRetries + 1)} times in a row. Read its attempts on this page, fix what stopped them, then press Retry to run it again.`;
 
 const gatesFirst = (step: string): Instruction =>
-  `The ${step} step owes an action that cannot be undone, and a gate before it was never approved, so AutoWorker holds it. Stop this task and report it, because only a fault lets a task pass a gate without Approve.`;
+  `The ${titled(step)} step owes an action that cannot be undone, and a gate before it was never approved, so AutoWorker holds it. Stop this task and report it, because only a fault lets a task pass a gate without Approve.`;
 
-const approveOrSendBack = (step: string, key: string, next: string): Instruction =>
-  `Approve ${step} for task ${key} to go on to ${next}, or send it back with a note to run ${step} again. AutoWorker starts the next step once you approve.`;
+const approveOrSendBack = (step: string, next: string): Instruction =>
+  `Approve ${titled(step)} to go on to ${titled(next)}, or send it back with a note to run ${titled(step)} again.`;
 
-const answerAndApprove = (step: string, key: string): Instruction =>
-  `Answer the review ${step} left for task ${key}, then press Approve to run ${step} again with your answers, or send it back with a note.`;
+const answerAndApprove = (step: string): Instruction =>
+  `Answer the question ${titled(step)} asked, then press Approve to run it again, or send it back with a note.`;
 
 const after = (workflow: Workflow, name: string): string | undefined => workflow.steps[workflow.steps.findIndex(kind => kind.name === name) + 1]?.name;
 
@@ -55,13 +58,13 @@ const kept = (task: Task): Next => ({ step: task.step, retries: task.retries, in
 
 const park = (next: Next, reason: Instruction): Next => ({ ...next, standing: { state: 'waiting', on: 'retry', reason } });
 
+const gateWait = (task: Task, next: string, review: string): Standing => ({ state: 'waiting', on: 'approval', reason: approveOrSendBack(task.step, next), review });
+
 function passed(workflow: Workflow, task: Task, kind: StepKind, attempt: string): Next {
   const base: Next = { ...kept(task), counts: without(task.counts, [...charges(kind, 'return'), ...charges(kind, 'rerun')]), retries: 0, inputWaits: 0 };
   const next = after(workflow, kind.name);
   if (next === undefined || kind.name === task.end) return { ...base, standing: { state: 'done' } };
-  if (task.gates.includes(kind.name) && !task.approved.includes(kind.name)) {
-    return { ...base, standing: { state: 'waiting', on: 'approval', reason: approveOrSendBack(kind.name, task.key, next), review: attempt } };
-  }
+  if (task.gates.includes(kind.name) && !task.approved.includes(kind.name)) return { ...base, standing: gateWait(task, next, attempt) };
   return { ...base, step: next };
 }
 
@@ -87,7 +90,7 @@ function judged(workflow: Workflow, task: Task, kind: StepKind, failure: Failure
     case 'ask':
       return task.inputWaits >= caps.inputWaits
         ? failed(task, kind)
-        : { ...kept(task), inputWaits: task.inputWaits + 1, standing: { state: 'waiting', on: 'answer', reason: answerAndApprove(kind.name, task.key), review: attempt } };
+        : { ...kept(task), inputWaits: task.inputWaits + 1, standing: { state: 'waiting', on: 'answer', reason: answerAndApprove(kind.name), review: attempt } };
     case 'return': {
       const rounds = countOf(task.counts, failure.counter) + 1;
       return rounds >= failure.cap
@@ -114,9 +117,9 @@ function judged(workflow: Workflow, task: Task, kind: StepKind, failure: Failure
 function versionProblem(workflow: Workflow, task: Task): Instruction | undefined {
   const names = workflow.steps.map(kind => kind.name);
   const end = workflow.steps.find(kind => kind.name === task.end);
-  if (end?.canEnd !== true) return `The routine that found task ${task.key} ends at ${task.end}, where ${workflow.name} cannot end. Stop this task, because it keeps that version, then fix the routine so new tasks can run.`;
+  if (end?.canEnd !== true) return `The routine that found task ${task.key} ends at ${titled(task.end)}, where ${workflow.name} cannot end. Stop this task, because it keeps that version, then fix the routine so new tasks can run.`;
   const gate = task.gates.find(named => !names.includes(named) || names.indexOf(named) >= names.indexOf(task.end));
-  if (gate !== undefined) return `The routine that found task ${task.key} gates ${gate}, which is not a step of ${workflow.name} before its end. Stop this task, because it keeps that version, then fix the routine so new tasks can run.`;
+  if (gate !== undefined) return `The routine that found task ${task.key} gates ${titled(gate)}, which is not a step of ${workflow.name} before its end. Stop this task, because it keeps that version, then fix the routine so new tasks can run.`;
   if (workflow.steps.some(kind => kind.needsRepository) && !task.hasRepository) {
     return `Task ${task.key} has no repository, and ${workflow.name} needs one. Stop this task, then save the routine with a repository so new tasks can run.`;
   }
@@ -125,7 +128,7 @@ function versionProblem(workflow: Workflow, task: Task): Instruction | undefined
 
 export function decide(workflow: Workflow, task: Task, verdict: StepVerdict, attempt: string): Next {
   const kind = workflow.steps.find(candidate => candidate.name === task.step);
-  if (kind === undefined) return park(kept(task), `Task ${task.key} is at ${task.step}, which ${workflow.name} no longer has. Stop the task, because AutoWorker cannot run a step its code lacks.`);
+  if (kind === undefined) return park(kept(task), `Task ${task.key} is at ${titled(task.step)}, which ${workflow.name} no longer has. Stop the task, because AutoWorker cannot run a step its code lacks.`);
   const problem = versionProblem(workflow, task);
   if (problem !== undefined) return park(kept(task), problem);
   if (verdict === 'pass') {
@@ -137,7 +140,10 @@ export function decide(workflow: Workflow, task: Task, verdict: StepVerdict, att
   return judged(workflow, task, kind, failure, attempt);
 }
 
-export const waitingOn = (standing: Standing): WaitingOn | null => (standing.state === 'waiting' ? standing.on : null);
+export function waitingOn(standing: Standing): WaitingOn | null {
+  if (standing.state === 'waiting') return standing.on;
+  return standing.state === 'stopped' && standing.review !== null ? 'approval' : null;
+}
 
 export type Held = Task & {
   readonly state: 'ready' | 'waiting' | 'stopped' | 'done';
@@ -168,18 +174,30 @@ export function allows(task: Held, offer: Offer): Decision | Refused {
   }
 }
 
-export function retried(task: Held, workflow: Workflow): Next {
-  const reviewCounters = workflow.steps.flatMap(kind => charges(kind, 'review'));
-  return { ...kept(task), counts: Object.fromEntries(Object.entries(task.counts).filter(([counter]) => reviewCounters.includes(counter))), retries: 0, inputWaits: 0 };
+function afterGate(task: Held, workflow: Workflow): string {
+  const next = after(workflow, task.step);
+  if (next === undefined) throw new Error(`Task ${task.key} waits at a gate on ${task.step}, the last step of ${workflow.name}, which no gate can follow.`);
+  return next;
 }
 
-export const stopped = (task: Held): Next => ({ ...kept(task), standing: { state: 'stopped' } });
+function restarted(workflow: Workflow, task: Task): Next {
+  const kind = workflow.steps.find(candidate => candidate.name === task.step);
+  if (kind === undefined) return kept(task);
+  const [to] = Object.values(kind.failures).flatMap(failure => (failure.kind === 'return' && countOf(task.counts, failure.counter) >= failure.cap ? [failure.to] : []));
+  return to === undefined ? kept(task) : sentBack(workflow, task, kind, to);
+}
+
+export function retried(task: Held, workflow: Workflow): Next {
+  if (task.state === 'stopped' && task.waitingOn === 'approval' && task.review !== null) return { ...kept(task), standing: gateWait(task, afterGate(task, workflow), task.review) };
+  const reviewCounters = workflow.steps.flatMap(kind => charges(kind, 'review'));
+  return { ...restarted(workflow, task), counts: Object.fromEntries(Object.entries(task.counts).filter(([counter]) => reviewCounters.includes(counter))), retries: 0, inputWaits: 0 };
+}
+
+export const stopped = (task: Held): Next => ({ ...kept(task), standing: { state: 'stopped', review: task.state === 'waiting' && task.waitingOn === 'approval' ? task.review : null } });
 
 export const lastStepOf = (workflow: Workflow): string => workflow.steps.at(-1)?.name ?? workflow.steps[0].name;
 
 export function approved(task: Held, workflow: Workflow): Next {
   if (task.waitingOn !== 'approval') return { ...kept(task), retries: 0 };
-  const next = after(workflow, task.step);
-  if (next === undefined) throw new Error(`Task ${task.key} waits at a gate on ${task.step}, the last step of ${workflow.name}, which no gate can follow.`);
-  return { ...kept(task), step: next, approved: [...task.approved, task.step] };
+  return { ...kept(task), step: afterGate(task, workflow), approved: [...task.approved, task.step] };
 }

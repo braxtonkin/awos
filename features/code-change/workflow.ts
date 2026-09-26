@@ -1,6 +1,12 @@
+import { readFileSync } from 'node:fs';
 import { z } from 'zod';
+import { actionKinds } from '../../shared/actions.ts';
 import { review } from '../../shared/review.ts';
 import { step, type Workflow } from '../../shared/workflow.ts';
+
+const corePrompt = (name: string): string => readFileSync(new URL(`prompts/${name}.md`, import.meta.url), 'utf8');
+
+const may = <K extends string>({ kind }: { readonly kind: K }): { readonly kind: K; readonly irreversible: false } => ({ kind, irreversible: false });
 
 const verified = review.extend({ behavior: z.enum(['fixed', 'still_wrong']).nullable() });
 
@@ -10,10 +16,13 @@ export const workflow = {
     step({
       name: 'specify',
       reads: [],
-      prompt: 'Read the ticket and the repository, and write a plan for the change: what changes where, and how Verify will show that it works. Put the plan in a text block.',
+      runBy: 'agent',
+      prompt: corePrompt('specify'),
+      startsEnvironment: false,
+      afterTurn: 'push',
       needsRepository: true,
       canEnd: false,
-      owes: [],
+      owes: [may(actionKinds.ticketComment), may(actionKinds.ticketTransition), may(actionKinds.branchDelete)],
       output: review,
       requires: ['text'],
       failures: { fail: { kind: 'fail' }, needs_input: { kind: 'ask' } },
@@ -23,10 +32,13 @@ export const workflow = {
     step({
       name: 'implement',
       reads: ['specify'],
-      prompt: "Make the change the plan describes, with the repository's own checks passing, and push it to a draft pull request. Summarize what changed in a text block.",
+      runBy: 'agent',
+      prompt: corePrompt('implement'),
+      startsEnvironment: false,
+      afterTurn: 'push',
       needsRepository: true,
       canEnd: true,
-      owes: [],
+      owes: [may(actionKinds.branchAdvance), may(actionKinds.prOpenDraft), may(actionKinds.ticketComment), may(actionKinds.branchDelete)],
       output: review,
       requires: ['text'],
       failures: { fail: { kind: 'fail' }, needs_input: { kind: 'ask' } },
@@ -36,11 +48,13 @@ export const workflow = {
     step({
       name: 'verify',
       reads: ['specify', 'implement'],
-      prompt:
-        'Write one reproduction of the ticket, and run it on the starting commit, where it must show the problem, and on the change, where it must pass. Report both runs in a text block. Set behavior to fixed when the change passes, to still_wrong when the change still shows the problem, and to null when the environment kept you from running both.',
+      runBy: 'agent',
+      prompt: corePrompt('verify'),
+      startsEnvironment: true,
+      afterTurn: 'reproduce',
       needsRepository: true,
       canEnd: false,
-      owes: [],
+      owes: [may(actionKinds.ticketComment), may(actionKinds.prEvidence), may(actionKinds.branchDelete)],
       output: verified,
       requires: ['text'],
       failures: {
@@ -50,7 +64,7 @@ export const workflow = {
           to: 'implement',
           counter: 'rounds',
           cap: 3,
-          parks: 'Verify found the behavior still wrong in 3 rounds. Read its evidence on this page, then press Retry with a note that says what to change, and AutoWorker runs Verify again.',
+          parks: 'Retry starts again at Implement, because Verify found the behavior still wrong three times. Read its evidence on this page, then press Retry with a note that says what to change, and Implement gets your note.',
         },
         environment_fail: {
           kind: 'rerun',
@@ -65,10 +79,10 @@ export const workflow = {
     step({
       name: 'land',
       reads: ['implement', 'verify'],
-      prompt: "Bring the pull request to a state GitHub reports mergeable under the repository's own rules. Summarize its checks and reviews in a text block.",
+      runBy: 'engine',
       needsRepository: true,
       canEnd: true,
-      owes: [{ kind: 'merge', irreversible: true }],
+      owes: [{ kind: actionKinds.prMerge.kind, irreversible: true }],
       output: review,
       requires: ['text'],
       failures: {
@@ -79,7 +93,7 @@ export const workflow = {
           to: 'implement',
           counter: 'landRounds',
           cap: 3,
-          parks: 'Checks on the pull request failed in 3 rounds. Read the failing checks on the pull request, then press Retry to run Land again.',
+          parks: 'Retry starts again at Implement, because checks on the pull request failed three times. Read the failing checks on the pull request, then press Retry with a note that says what to change, and Implement gets your note.',
         },
         changes_requested: {
           kind: 'review',

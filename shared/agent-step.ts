@@ -1,0 +1,47 @@
+import type { Owe } from './actions.ts';
+import type { Verdict } from './db/types.ts';
+import type { Reproduction } from './reproduction.ts';
+import type { Unasked } from './workflow.ts';
+
+export type Evidence = Readonly<Record<string, unknown>>;
+
+export type Earlier = { readonly step: string; readonly verdict: Verdict; readonly output: unknown; readonly evidence: Evidence | null };
+
+export type Ticket = { readonly key: string; readonly title: string; readonly description: string | null };
+
+export type StepInput = {
+  readonly step: string;
+  readonly ticket: Ticket;
+  readonly earlier: readonly Earlier[];
+};
+
+export type Change = { readonly pushed: string | null; readonly carried: string | null };
+
+export type Reply = { readonly step: string; readonly output: unknown; readonly change: Change; readonly reproduction: Reproduction | null };
+
+export type Settled = { readonly output: unknown; readonly evidence: Evidence | null; readonly observed: Unasked | null };
+
+export type PullRequestFact = { readonly kind: 'none' } | { readonly kind: 'owed' } | { readonly kind: 'opened'; readonly number: number };
+
+export type Verdicted = {
+  readonly step: string;
+  readonly verdict: Verdict;
+  readonly ticket: Ticket;
+  readonly repository: { readonly github: string; readonly branch: string };
+  readonly taskBranch: { readonly name: string; readonly head: string | null };
+  readonly attempt: { readonly branch: string; readonly start: string; readonly lastPushed: string | null };
+  readonly branches: readonly string[];
+  readonly pullRequest: PullRequestFact;
+  readonly firstPass: boolean;
+  readonly startStatus: string | null;
+  readonly endStatus: string | null;
+  readonly ends: boolean;
+  readonly output: unknown;
+  readonly evidence: Evidence | null;
+};
+
+export type AgentSteps<K extends string = string> = {
+  readonly input: (given: StepInput) => string;
+  readonly settle: (reply: Reply) => Settled;
+  readonly owes: (verdicted: Verdicted) => readonly Owe<K>[];
+};

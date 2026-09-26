@@ -9,6 +9,7 @@ dist/
 build/
 out/
 .next/
+next-env.d.ts
 
 # Environment and secrets
 .env
@@ -26,3 +27,9 @@ Thumbs.db
 desktop.ini
 .vscode/
 .idea/
+
+# Local CI results
+/ci-local/
+
+# Screenshots, videos, and review packets from the verify tool
+.shots/

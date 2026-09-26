@@ -3,7 +3,11 @@ name: ci
 on:
   pull_request:
   push:
-    branches: [main, 'build/**', 'feat/**']
+    branches: [main, build/e2e]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -11,20 +15,22 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
+          fetch-depth: 0
       - run: docker compose build verify
       - run: docker compose run --rm verify npm ci
       - run: docker compose run --rm verify npm run check
       - run: docker compose run --rm verify npm run verify -- guardrails
       - run: docker compose run --rm verify npm run verify -- doctor
+      - run: docker compose run --rm verify npm run budget -- --since-pr-base
 
   models:
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -33,9 +39,26 @@ jobs:
       - run: docker compose run --rm verify npm ci
       - run: docker compose run --rm verify npm run verify -- models
 
+  sims:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - run: docker compose build verify
+      - run: docker compose run --rm verify npm ci
+      - run: docker compose run --rm verify npm run verify -- sims --mutant all
+      - run: docker compose run --rm verify npm run verify -- environments-sim --mutant all --profile crashes
+      - run: docker compose run --rm verify npm run verify -- environments-sim --profile all
+      - run: docker compose run --rm verify npm run verify -- outbox-sim --profile all
+      - run: docker compose run --rm verify npm run verify -- routines-sim --profile all
+      - run: docker compose run --rm verify npm run verify -- requests-sim --profile all
+      - run: docker compose run --rm verify npm run verify -- bridge-sim
+
   simulation:
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -44,7 +67,12 @@ jobs:
       - run: docker compose run --rm verify npm ci
       - run: docker compose run --rm verify npm run verify -- migrations
       - run: docker compose run --rm verify npm test
-      - run: docker compose run --rm verify npm run verify -- tasks-sim --mutant all
-      - run: docker compose run --rm verify npm run verify -- credentials-sim --mutant all
+      - run: docker compose run --rm verify npm run verify -- engine-checks
       - run: docker compose run --rm verify npm run verify -- engine-start
+      - run: docker compose run --rm verify npm run verify -- setup
       - run: docker compose run --rm verify npm run verify -- code-change
+      - run: docker compose run --rm verify npm run verify -- jira
+      - run: docker compose run --rm verify npm run verify -- e2e-report
+      - run: docker compose run --rm verify npm run verify -- launch-faults
+      - run: docker compose run --rm verify npm run verify -- e2e-payload
+      - run: docker compose run --rm verify npm run verify -- stand-in-solutions

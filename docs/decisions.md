@@ -28,6 +28,74 @@ Rejected options:
 - **A session advisory lock.** A hung worker held its task forever, and its late write was accepted. Both break the spec.
 - **A cap of 2 or 5 lost attempts.** Two parks a task after one crash and one node restart. Five lets a task that always crashes run five times. Three matches the other caps.
 
+### Outbox rows are claimed with a lease
+
+Decided 23 Sep 2026. An engine copy claims an outbox row before it performs the row's action. The claim is one statement that Postgres refuses while another claim's lease on the row is live, and an expired lease frees the row. These rules go with the claim:
+
+- The rows that a state change owes commit in the same transaction as that change.
+- A row can be claimed only when every earlier row of its task is done, so a row that failed for good holds the rows behind it until a person acts. A task's next stage cannot be claimed while any of its rows is owed.
+- When the target cannot catch a duplicate, as with a Jira comment, the performer first looks on the target for the row's marker. If the marker is there, it marks the row done without calling.
+- The performer checks its lease right before the call that performs the action. The call's deadline is the lease's end less a margin, so the call cannot outlast the lease.
+- A row is marked done only after its action took effect.
+- A call that fails only records its error on the row. The claim stays until its lease runs out, and a lease that runs out without a done mark counts as a failed try, whether the call failed, the performer crashed, or it stalled. At the cap, the row fails and its task waits for a person in the same transaction, with the row's last error as the note. A lapse can also come after the action took effect, so a row can fail although its action landed.
+- A person's Retry on a waiting task owes its failed rows again with their tries reset. The first try then finds the marker, or the duplicate, of an action that did land, and marks the row done.
+
+The TLA+ model in `features/outbox/` settled this. It runs two engine copies over two tasks with two rows each. One target catches a duplicate by key, as GitHub refuses a second pull request from one branch, and the other cannot. A failed call's request may land later or never. A performer can crash between any two of its steps, twice in all, and can stall once, after its marker check. A person can press Retry once. Each night the model also runs with three rows per task, three crashes, and two stalls. The crash budgets only keep the model small. Every lapsed claim costs a try, so the model also holds with crashes unbounded. With every rule in place, TLC finds no action that takes effect twice, no row done before its effect, no effect of a state change that rolled back, no row performed out of order, no next stage claimed before every row of its task is done, no row with two live claims, and no owed row that is never done or handed to a person. The model removes each rule in turn, and each removal breaks one of these. Three of the removals settle the question:
+
+- Without the claim, two copies both look for the marker, find none, and both post the same comment.
+- Without the marker check, a copy that crashes after posting and before marking the row done leaves the row owed, and the next copy posts it again.
+- Without the lease check right before the call, a copy that stalls after its marker check wakes and posts after another copy already did.
+
+The model rests on two assumptions that the outbox's code and its connectors must make true:
+
+- A request reaches its target, or is lost, before the lease it was sent under ends by the database's clock. The model names this `TargetSettlesWithinMargin`, and its mutant posts a comment twice when a failed call's request lands after the lease. The call's deadline is the lease's end less the margin, and `performer()` stops waiting for a call or a lookup at that deadline even when the connector ignores its signal. So the margin (`OUTBOX_MARGIN_MS`) must exceed the longest time any target can take to settle a request after its sender gave up on it. A pause between the lease check and the send, or a retry inside the client, breaks this.
+- Every lease is written and judged by the database's clock. The outbox reads the time from Postgres, never from the engine's host, so clock skew between engine copies cannot free a live claim. The model names this `LeasesOnOneClock`, and the simulator's `skewed` profile runs one engine 6 s ahead to prove it: with each engine's own clock, the fast engine expires a live claim and the same comment is posted twice.
+- Each action kind's target either catches a duplicate or lets the performer look for the marker. Catching a duplicate means that a repeat is refused or changes nothing, whatever happened since, and the performer reads the refusal as its own earlier success and fetches the result. An action that sets state, such as moving a ticket or a branch, qualifies only when it names the state it expects to replace. A marker qualifies only when the action's own request writes it, nothing removes it, it cannot be guessed, it counts only when the row's own identity wrote it, and the lookup reads every page and every earlier write. A lookup that fails counts as a failed call. A kind whose target meets neither condition, such as a message that cannot be looked up afterwards, cannot be performed at most once across a crash, so it needs its own rule before it is added.
+
+Rejected options:
+
+- **No claim, as the data model draft had it.** Two engine copies post the same comment twice, because a Jira comment or a chat post does not catch a duplicate.
+- **A claim without the marker check.** A crash between the post and the done mark makes the next performer post again.
+- **Release a row as soon as its call fails, and retry after a backoff.** A request still in flight can land after the retry posted, so the comment appears twice. Counting only failed calls also never caps a row whose every try crashes its performer.
+
+### An outbox row can end refused, and the store holds a task that owes an action
+
+Decided 24 Sep 2026 while building the outbox (P4), for the Land model, now in `features/code-change/` (M4). It amends the rule above that a row is marked done only after its action took effect.
+
+- A performer can end a row as refused when the target declines the action for a reason a retry cannot change, such as a merge refused because the head moved. The row records the refusal and the head it named as its result, so Land reads why. A refused row settles without an effect, and the rows its task owed after it are dropped in the same statement, because they assumed its effect.
+- A merge that finds the pull request already merged, already queued, or ejected in a way Land has not answered reports that as the row's result. It is never a reason to act again.
+- The claim statement re-checks that the row's task still stands. A stopped task, or a kind's own predicate, drops its unclaimed rows in the statement that claims, together with the rows its task owed after them.
+- A row that fails at the cap parks its task when the task is ready or waits on anything but a person's review, and a parked task waits on Retry. A task that waits on a review keeps it, as the next entry says. A done task cannot wait for a person, so the rows it owed after the failed row are dropped instead.
+- Each task counts its unsettled rows, and its generated `ready` column is true only when that count is zero. The foreign key that ties a live attempt to a ready task then refuses a claim while the task owes an action, and the row lock on the task serializes that claim with the transaction that owes the rows. `owesAction` in `shared/actions.ts` reads the same count, for Land.
+- A failed row is claimable again whenever its task is ready, and the claim resets its tries. A person's Retry makes the task ready, so the Retry owes the failed rows again in its own transaction.
+
+Rejected options:
+
+- **Refuse the claim and re-owe on Retry in the task feature's statements.** Each claim path and each Retry would need the same edit, and a fork's claim could miss it. The count on the task puts the rule in the store, where every claim meets it.
+
+### A failed outbox row keeps a person's open review
+
+Decided 25 Sep 2026 (FX3e). A step can pass, owe an action such as a ticket comment, and wait for a person to approve it in one transaction. When that action fails at the cap while the review is open, the task keeps waiting on the same review, and the review's note gains a sentence that names the failed action and its last error. Approve or Send back then makes the task ready, and a ready task owes its failed rows again, so the action is tried again with its tries reset. If it fails again, the task parks on Retry at its new step.
+
+The earlier trigger parked the task on Retry over the review. The review was lost, Retry was the only way on, and Retry ran the step that had already passed. The outbox model now has a review state that only Approve ends, and its invariant `ReviewKeptUntilDecided` fails when the guard `FailureKeepsReview` is off. The simulator checks the same invariant after every step, and its `park-over-review` mutant restores the old trigger and breaks it. The outbox-sim check of a Jira comment that fails while specify waits for approval shows that the review and its note outlive the failure, that Retry changes nothing, and that Approve posts the comment once without running specify again.
+
+Rejected options:
+
+- **Keep the review, and record the retry need in a column beside it.** Approve already makes the task ready, and a ready task already owes its failed rows again, so the column would hold state that the store derives. Every decision path would also need to read and clear it.
+- **Park only ready tasks.** A task that waits on something outside, such as an approval on GitHub, may wait for the very action that failed, so it still needs a person to press Retry.
+
+### A lapsed lease cannot be renewed
+
+Decided 24 Sep 2026. A renewal succeeds only while the attempt's lease has not yet lapsed, and one that comes later reports the attempt as lost. The reaper releases every lease that lapsed, so once a lease lapses the attempt stays releasable until the reaper takes it. A worker that keeps stalling therefore loses its task at its first lapse, and the reaper needs only to run on its schedule. The task model states this as weak fairness for the reaper, and its property `LapsedLeaseNeverRenews` fails when a guard lets a worker renew after a lapse. The simulation checks the same property after each step. The condition sits in the renew statement, because a store constraint would need the engine's clock, not the database's. When the engine starts, it gives every live attempt a fresh lease, lapsed or not, so attempts that could not renew while the engine or Postgres was away are not released at once. That grace runs once per start, so it cannot keep a lease alive forever, and the simulation's check skips the step where an engine starts. This closes AUTO-10.
+
+The bridge follows the same rule since 25 Sep 2026. Until then its `admit` renewed a lease on every post, lapsed or not, and `Bridge.tla`'s `Commit` did the same, so the two models disagreed. The audit asked which was right. The task model is, for the reason above: a bridge that stalls and posts again just before each reaper pass would keep its attempt forever. So `admit` renews only a lease that has not lapsed, through the `renewedLease` rule, and a lapsed attempt stays releasable while its bridge may still post. `Bridge.tla`'s guard `LapsedLeaseStaysLapsed` states this for `Commit` and `OpenStream`, and its property `LapsedLeaseNeverRenews` fails without the guard. bridge-sim checks a property of the same name after each step, and its mutant `LapsedLeaseStaysLapsed` renews every lease.
+
+Rejected options:
+
+- **Strong fairness for the reaper.** The model assumed that a lease that lapses again and again is reaped at one of its lapses. Nothing in the code guaranteed it, because a renewal could land between two reaper passes every time.
+- **A count of lapses on the attempt.** It adds a column and a cap to bound a case that refusing the late renewal removes.
+- **A store constraint.** Postgres would compare the lease with its own clock, while the engine and the simulation run on the engine's clock.
+
 ### Each attempt runs in its own Kubernetes Job
 
 Decided 23 Sep 2026. The engine starts one Kubernetes Job per attempt, in the engine's own namespace. The Job clones the repo and runs Codex. It gets only its owner's credentials for that run, and no database or Kubernetes API access. The engine watches the Job, saves what it did as evidence, and records the verdict. This matches how the current AutoWorker runs delivery attempts.
@@ -99,7 +167,7 @@ Rejected options:
 
 ### Routines are goals that anyone on the team edits in the dashboard
 
-Decided 23 Sep 2026. A routine is a goal in plain words and a schedule. The goal states what to do and where to stop, so a routine has no settings for what it may touch or how far it may go. Definitions live in Postgres. Anyone on the team may add or change a routine with no approval step, because AutoWorker is an internal service. A person can pause a routine, change its schedule, or run it now.
+Decided 23 Sep 2026. A routine is a goal in plain words and a schedule. The goal states what to do and where to stop, so a routine has no settings for what it may touch or how far it may go. Definitions live in Postgres. Anyone on the team may add or change a routine with no approval step, because AutoWorker is an internal service. A person can pause a routine, change its schedule, or run it now. On 24 Sep the coordinator replaced the five-field cron schedule with an interval, `routine_version.every`, which defaults to 15 minutes, and calendar schedules wait for the Daily update workflow.
 
 Rejected options:
 
@@ -203,6 +271,25 @@ Rejected options:
 - **Record the change working, after only.** It takes one run instead of two, but it can't prove the bug existed or that the script would have caught it.
 - **A test in CI only, with no live run.** It repeats for free, but bugs that show only in a live environment slip past it.
 
+Reopened and refined 25 Sep 2026. The rule stays: the script fails on the base commit, passes on the change, and the verdict comes from trusted records. What changed is who runs the script. The agent only writes it, at `/tmp/autoworker-reproduce.sh`. After the turn, the Job's own code checks out the base commit and the change, each fresh, runs the repository's setup command and then the script in each, and posts both exit codes to the engine as one `reproduced` event. The engine settles the behavior from that event alone. Fixed means the base run failed and the change run passed, still wrong means the change run failed, and anything else, such as a base run that passes, a failed checkout or setup, or a run out of time, means Verify could not check it. A Verify Job pushes nothing.
+
+The script is the agent's code, so it runs as a third user, `reproduce`, not as `codex` and never as the bridge. It gets a scrubbed environment with its own home and temporary folder, a time limit per run, and a limit on kept output. It can read neither the bridge's environment nor its git folder, nor the Codex login in the `codex` home. The Job kills every `codex` and `reproduce` process before and between the runs, and each run gets a new folder that only `reproduce` can write, so nothing the agent left behind and nothing the first run did reaches the second.
+
+The evidence came from the old mechanism failing and a prototype of the new one, both on the local world with Codex on gpt-6-luna:
+
+- **Before, at 2445052.** The engine matched the agent's own shell commands word for word. 2 of 4 entries reached clean. On clamp, Verify ran the change in its workspace, where the dependencies weren't installed, and the run exited 127. On slugify, Verify ended `environment_fail` 4 times in a row, at 94k to 174k input tokens each, while every reply said the script failed on the base and passed on the change. The matcher failed, not the agent.
+- **An audit of the same mechanism** found that a missing base worktree read as a reproduction, because `cd` failed with a non-zero exit (F1), that the script and the workspace could change between the two runs, and Verify's edits were pushed to the attempt branch (F2), that an Implement push with no net change passed (F3), and that the pull request body held the agent's prose instead of the recorded evidence, and a later Verify never refreshed it (F4).
+- **After, with the Job running the script.** Verify passed on all 4 entries on its first attempt, with the script failing on the base commit and passing on the change each time. titleCase, slugify, and clamp reached clean. chunk merged, and missed clean only because its Verify transcript held a reasoning item that Codex started and never completed, which the replay check refuses, outside Verify's evidence. Verify took 60k to 94k input tokens where it had taken up to 174k.
+
+With the same change, Implement's no-change rule compares trees instead of commit ids (F3), and each passing Verify owes the pull request the engine's rendered evidence, which replaces any earlier evidence in its body (F4). A repository's new `setupCommand` installs what a fresh checkout needs, such as `npm ci`.
+
+What it doesn't close: the script is the agent's code, so it can still decide its result by something other than the behavior, such as a file it leaves in the shared `/tmp` during the base run. The evidence shows the whole script beside both runs so a reviewer can see that.
+
+Rejected options for the refinement:
+
+- **Keep matching the agent's commands, with a looser matcher.** Every fix to the matcher still trusts what the agent says it ran and where, and slugify failed 4 times on the matcher alone.
+- **Run the script as `codex`, the agent's own user.** It is one user fewer, but the script can then read the Codex login and write into folders the agent's leftover processes can reach.
+
 ### The core ships one public Job image
 
 Decided 23 Sep 2026. Every attempt's Job runs from one public image that the core ships, with the pinned Codex CLI. A repository may name its own image and a test command. Registries that need credentials, and images that aren't public, belong to a company's fork. Nothing more is built into the core until a second repository needs it.
@@ -224,6 +311,8 @@ Rejected options:
 ### A routine sets where it ends, its gates, and its stage instructions
 
 Decided 23 Sep 2026. A person should step in before an action that can't be undone, where a judgment belongs to the team, and where a team doesn't trust AutoWorker yet for that kind of work. The last of these changes over time, routine by routine, so it lives in each routine's settings rather than in the core. A routine picks its last stage, so done can be an open pull request that people take from there. After any stage, a routine can add a gate that waits for a person's Approve action. Each stage has a default prompt in the core, and a routine adds its own instructions to any stage. A task keeps the stages and gates of the routine version that found it, and its instructions follow the newest version at each attempt. The engine performs irreversible actions itself, through the outbox, and only when their conditions hold. It merges, or joins the merge queue, only when GitHub reports the pull request mergeable under the repository's own rules and every gate is approved, and no prompt can override that.
+
+If a fault loses a task's approvals at Land, the task keeps its place without them. A later return to Implement does not restore them, so the task cannot merge until a person approves each missing gate again. A gate at or after the return point comes back through Approve on the way to Land. A gate before it never comes back, since no action lets a person approve it again. Land parks the task on the instruction to stop it, Retry keeps the empty approvals so Land parks it again, and Stop is the way out. The fault has no known cause in the code, and the check at Land is defense in depth, so a stuck but safe task is acceptable. The task model records each lost approval as missing. Its invariant `ApprovalsMatchGatesPassed` then says a task's approvals are exactly the gates it has passed, minus those missing, and a gate stays missing until a return sends the task back to or before it.
 
 Rejected options:
 
@@ -254,10 +343,13 @@ Rejected options:
 
 Decided 23 Sep 2026. An agent often needs to show a person something and get an answer, such as a plan, a draft chat message, or a list of branches to delete. So every agent step ends its turn with a review in one fixed format, which Codex receives as the turn's output schema. A review has an outcome, which is done, needs input, or blocked, and a list of blocks. The block kinds are text, list, choice, checklist, and draft. A person answers a choice by picking an option, a checklist by unticking items, and a draft by editing it. Approve or Send back covers the whole review. A step kind names the blocks it requires and what happens to the answers, and the answers go into the next prompt. The dashboard draws every review with one component. When an agent returns needs input, the task waits for a person even without a gate, up to a cap. A routine's instructions say what to show, and a new kind of control becomes a new block kind in the core. On 23 Sep, three real turns returned a plan, a draft, and a checklist that all matched this format. A schema with an optional field failed its turn at once, so every field is required and "none" is null.
 
+On 24 Sep, real runs on gpt-6-luna failed every Specify and Implement turn. Codex put the plan in a `list` block. Once a step offered only `text` and `choice`, Codex returned an empty `choice` block instead. The engine stored the output schema in a `jsonb` column, and `jsonb` sorts object keys. So every `text` block reached Codex starting with `body`, and every other block kind started with `kind`. Codex starts a block with `kind`, so it could not reach `text`. A probe of 5 replies per step on Specify, Implement, and Verify measured the effect. With the keys in the declared order, 15 of 15 reviews parsed with the step's required text. With the keys in `jsonb` order, 2 of 15 did. So the column is `json`, which keeps the schema's text as sent, and `strict-schemas` fails a block kind whose first field is not `kind`. The steps offer all five block kinds again. With the keys in order, the full union parsed 15 of 15, so narrowing a step to `text` and `choice` was a workaround and was reverted.
+
 Rejected options:
 
 - **Fields each routine defines.** Anyone can edit a routine, one wrong field fails every attempt, and the engine can't act on fields it doesn't know.
 - **A view per step kind.** Every new step kind would need its own page code and its own answer handling.
+- **Typed top-level fields per step, such as a `plan` string, with a nullable `questions` list for the blocks.** Measured on 24 Sep, it parsed 15 of 15 in both key orders. The blocks review also parsed 15 of 15 once the keys kept their order. So it fixes nothing that keeping the order does not fix, and it would change every reader of a review.
 
 ### Review feedback comes back once, as a whole review
 
@@ -276,6 +368,26 @@ Rejected option:
 
 - **One rule for every repository.** Review customs differ between repositories, and a generic core can't know them.
 
+### Land runs in the engine, and hands each action it owes to the outbox
+
+Decided 24 Sep 2026 while building Land (L1), to fit `features/code-change/Land.tla` (M4) to the outbox and the task store.
+
+- Land is an engine loop with no Job and no agent. Each pass claims a Land attempt for every ready task at Land through the task claim, renews its lease, reads the pull request's merge state, and acts by one table of rules, `rules` in `features/code-change/land.ts`, in the order `Land.tla` decides. A task that owes an action is skipped before GitHub is read.
+- An attempt that owes `pr.mark-ready`, `pr.update-branch`, or `pr.merge` ends with the verdict `handed_off` in the transaction that owes the action, and its task stays at Land. The store refuses to owe an action while its task has a live attempt, and refuses to claim a task that owes one, so the attempt has to end first. The next pass claims a fresh attempt once the row settles.
+- Land keeps its memory in the store it already has. An attempt that answered a review or a queue ejection records the id in its output as `answers`, and the head of a refused merge is the refused row's result.
+- Merged ends the attempt with a pass, and the same transaction owes a comment on the ticket and `branch.delete`. A required approval ends it with `review_required`, and the same transaction writes the review step's note and owes what the step returns. The core's step returns nothing, because approval comes from the repository's rules and a fork's plug-in (G).
+- A conflict returns the task to Implement with the verdict `red_check`, counted in `landRounds`, because Code change declares no other route back from Land.
+- Land reads its record again after the claim, because a second engine can finish an attempt between the pass's list and the claim. While the attempt is live the store holds no owed row for the task, so that record stays true until the decision commits.
+- Land renews an attempt only after a good read. A read that keeps failing lets the lease lapse, and the reaper's cap on lost attempts parks the task, so a closed pull request or a revoked token reaches a person.
+- Land answers each refused merge once, as `Land.tla` clears `refusedAt` when an attempt fails, so a refusal a second try can clear costs one retry. A draft that stays a draft after AutoWorker marked it ready, and a branch still behind after an update at the same head, fail the attempt, so neither action is owed without end.
+- Land passes the reader the last ejection and review it answered, and the reader reports what lies beneath them, so an answered ejection never hides a red check. The draft setting comes from the repository row, `repository.draft_leaves`.
+- The model moved from `features/github/` to `features/code-change/`, beside the loop it covers (A4). The folder's `invariants.ts` names its seven properties, and `land-sim` checks each one by name.
+
+Rejected options:
+
+- **Keep the attempt live and owe from it.** The store refuses the row while the attempt is live.
+- **End the attempt with `pass` or `lost`.** A pass ends the task at Land, and a lost attempt counts toward parking it.
+
 ### A request for help says exactly what to do
 
 Decided 23 Sep 2026. When AutoWorker needs a person, it says exactly what the person must do and what AutoWorker does once they have done it. This holds for parked tasks, the list of work that needs someone, and chat posts.
@@ -292,6 +404,8 @@ Rejected option:
 
 Decided 23 Sep 2026. The dashboard is neutral grey, and color marks only state: amber for work that needs a person, blue for running, green for landed, and red for failed. The build checks every color pair against contrast floors in light and dark mode.
 
+The palettes live in `shared/ui/tokens.ts`, one for light and one for dark, with the values the revised task page used in the prototype. `npm run contrast` checks every pair the pages draw: ink, muted, and faint text and the state colors on the page, surface, and raised surface, each state color on its soft fill, and surface text on ink, against 4.5 to 1, and the landed green as an icon against 3 to 1. Borders are not text, so the strong border color, which measures about 2 to 1, is never the only thing that marks a control. A task that failed and waits for a person shows a red Failed mark beside the amber Needs you mark, each with its own word, as the owner picked for Q3.
+
 Rejected options:
 
 - **Cobalt.** Running work and clickable controls would share one blue.
@@ -300,7 +414,7 @@ Rejected options:
 
 ### Concurrent protocols are model-checked with TLA+
 
-Decided 23 Sep 2026. Claims and leases, the stage machine with its Verify loop, the outbox, the bridge's event delivery, and the routine schedule each get a TLA+ model, checked with TLC. A model is written before the code it covers, so it checks the design while the design is still cheap to change. It runs in CI whenever the model or that code changes. The repository's verification skill, generated with `/create-verification-skill` once the engine runs, includes the models and the command that checks them. Each night, TLC also checks the task model at 2 tasks and 2 workers at the real caps. On 23 Sep the owner added a second nightly size of 3 tasks and 2 workers, at caps of 2 with 1 person action, for the safety properties only, so that tasks compete for workers.
+Decided 23 Sep 2026. Claims and leases, the stage machine with its Verify loop, the outbox, the bridge's event delivery, and the routine schedule each get a TLA+ model, checked with TLC. A model is written before the code it covers, so it checks the design while the design is still cheap to change. It runs in CI whenever the model or that code changes. The repository's verification skill, generated with `/create-verification-skill` once the engine runs, includes the models and the command that checks them. The nightly workflow, which runs only when started by hand (see [the decision on the nightly workflow](#the-nightly-workflow-runs-only-when-started-by-hand)), also checks the task model at 2 tasks and 2 workers at the real caps. On 23 Sep the owner added a second nightly size of 3 tasks and 2 workers, at caps of 2 with 1 person action, for the safety properties only, so that tasks compete for workers.
 
 Rejected options:
 
@@ -369,13 +483,247 @@ Rejected options:
 - **A separate private sandbox repository.** Where AutoWorker runs later may not reach a private repository under the owner's account.
 - **Merge sandbox changes into main.** Every run would add commits to main and run main's CI, and runs would stop starting from the same code.
 
+### Stop does not recall a pull request from the merge queue
+
+Decided 24 Sep 2026. Once Land has put a pull request in GitHub's merge queue, GitHub owns the merge. Stop ends AutoWorker's own work on the task, and the pull request may still merge. The task page says so. `main` in this repository has no merge queue, so the case can't arise here yet.
+
+When the queue ejects a pull request, the `pr.merge` row records the ejection and its reason, and Land fails that attempt once. Land's next pass reads the pull request past that ejection. Red checks or a conflict send the task back to Implement with the reason, and a ready pull request joins the queue again. These failures count toward the stage's retries, and after them the task waits for a person.
+
+Rejected options:
+
+- **Stop owes a `pr.dequeue` action.** It needs a change to the Land model and one more GitHub performer, for a case no repository here has yet.
+
+### Retry after a Stop at a gate resumes waiting at the gate
+
+Decided 24 Sep 2026. Take a task that a person stops while it waits at a gate. Retry returns it to waiting for Approve on the same review. The gated step already passed, so its work stays. A person who wants the step done again uses Send back, which takes a note. The rule holds in the task model, where `GateStopResumesAtGate` checks it, and in the code: a stopped task keeps the gate's review, and Retry makes it wait on that review again.
+
+Rejected options:
+
+- **Rerun the gated step.** It repeats work that passed, and Send back already covers a redo with a note.
+
+### Retry after a return cap starts again where the failure returns
+
+Decided 25 Sep 2026 by the owner. When Verify finds the behavior still wrong, the task goes back to Implement on its own, up to 3 rounds, and after the third it waits at Verify for a person. Retry used to run Verify again on the same code, so the verdict repeated, and only then did the task go back to Implement. The person's note reached only that wasted Verify run, because an attempt's prompt carries the notes made after the previous attempt started. Implement never saw what the person asked to change.
+
+Now Retry starts again at the step that the failure returns to. That is the `to` of the `return` failure whose counter reached its cap, and the counts the task saved when it parked record which counter that was. For Code change, Retry starts at Implement after Verify's 3 rounds and after Land's 3 rounds of red checks, and the person's note reaches Implement. Each waiting message says so. Every other stop keeps its meaning. A task stopped at a gate returns to waiting for Approve, a `rerun` failure such as Verify's environment runs the same step again, and a step that failed its own retries runs again. Send back is unchanged. The task model checks the rule as `RetryStartsWhereTheFailureRoutes`, and the simulator checks the same property after every step.
+
+Rejected options:
+
+- **Keep today's Retry.** Verify runs again on unchanged code and repeats its verdict, and the note never reaches Implement.
+- **Ask each time where Retry starts.** Every Retry card gains a choice, and after a return cap the answer is nearly always the step the failure returns to.
+
+### Run branches keep the harness's sandbox status
+
+Decided 24 Sep 2026. Ruleset 23901469 requires the `sandbox` check on `e2e/run-*` branches. It accepts that check from any source, and it applies the rule when a branch is created. So the end-to-end harness posts a `sandbox` success on each seed commit, which lets it create a run branch. The check stays open to other posters, such as a future Verify environment.
+
+Rejected options:
+
+- **Accept `sandbox` only from GitHub Actions.** Only CI could mark the check passed, and the token would need no commit-status write, but nothing else could post `sandbox`.
+
+### Database grants keep stored credentials write-only for the dashboard
+
+Decided 24 Sep 2026. The dashboard seals new credentials with the same AES-256-GCM key the engine uses to open them. Write-only rests on the database grants, because the dashboard's role can't read the `ciphertext` column. This is the simpler design, both for people adding credentials and for the people who maintain it. Revisit it before the first real deployment.
+
+Rejected options:
+
+- **Seal with a public key.** Only the engine could open a credential. It changes the Stack line, the sealing code, and key rotation, and it means re-sealing every stored credential.
+
+### The nightly workflow runs only when started by hand
+
+Decided 24 Sep 2026. The `nightly` workflow has no schedule. It runs when someone starts it from the repository's Actions tab, or with `gh workflow run nightly.yml`. What it checks is unchanged: every model at its nightly bounds, and each simulator at its long setting. Start it before merging a batch into `main`, and after changing a model's nightly config.
+
+On 23 and 24 Sep, CI and nightly runs came to $24.53 of Actions time at list price. It was free for this public repository, and no minutes were charged. The Tasks model's nightly config also runs out of Java heap during its liveness check, so a scheduled run would fail every night until that is fixed.
+
+Rejected options:
+
+- **Keep the daily schedule.** Each run holds the models job and every simulator shard for up to 4 hours, and it would fail every night on the Tasks model's heap.
+
+### CI runs locally while GitHub Actions is disabled
+
+Decided 25 Sep 2026. GitHub marked the owner's account as spam, and a request to reinstate it is pending. The owner disabled GitHub Actions for the repository on 25 Sep 2026, so no pull request or push gets a CI run on GitHub.
+
+Until Actions is enabled again, `node tools/ci-local/main.ts` runs CI on the machine that integrates. It reads every `run:` step of `.github/workflows/ci.yml`, so the local run and the GitHub run can't drift: a new CI step goes in `ci.yml` alone. It builds the verify image and installs packages once. Then it runs the jobs in parallel, as GitHub does, and each job's steps in order inside the verify container, and it runs every step even after one fails. It prints results in `ci.yml` order and gives the run's wall time. The jobs ran one after another until 25 Sep, when a run took about 3,000 s and each new job would have added its full length. It refuses a worktree with uncommitted changes and names the head SHA first, then writes one log per step and a summary to `ci-local/<sha>/`. A head is integrated only when that summary says `PASS`. Each run records itself in its worktree's `ci-local/run.json` and labels its step containers with its run id. A second run in the same worktree is refused while the recorded one lives, and a run that finds a dead one's record first removes that run's leftover containers. The only way to stop a run is `node tools/ci-local/main.ts --stop` in its worktree, which asks that run to remove its own containers and exit. This came from 25 Sep, when one agent stopping its own run killed the coordinator's by pid twice: every run has the same command line, and each killed run left its step containers running. `npm run ci-plan`, part of `npm run check`, fails on any step that the local run can't perform, such as a `uses:` action other than checkout, so `ci.yml` can't gain a step that CI on GitHub runs and the local run skips.
+
+What the local run doesn't give:
+
+- **A clean machine per run.** Every step shares this machine's Docker, its image cache, and the `node_modules` volume of the worktree's compose project. A step can pass here and fail on a fresh runner.
+- **Separate machines per job and time limits.** The jobs run at the same time on one machine, so a slow job slows the others, and `timeout-minutes` is not enforced. The time ceilings in `budget/budget.json` stop a runaway job instead.
+- **A record anyone else can see.** The summary stays on this machine, and GitHub shows no check on the pull request.
+- **The nightly workflow.** It has no local runner, so its larger model bounds and long simulator runs don't run until Actions returns.
+
+When the account is reinstated, the owner enables Actions again, and `ci.yml` runs on GitHub with the same steps. Then CI on GitHub gates integration again. The local runner can stay as a way to reproduce CI before pushing.
+
+Rejected options:
+
+- **A second list of local steps.** It is quicker to write, but it drifts from `ci.yml` the first time someone adds a step to one and not the other.
+- **Let `--stop` kill the recorded pid.** It stops even a run that stopped reading, but Windows reuses pids, so a stale record could kill an unrelated process. Asking the run to stop itself can only reach the run that wrote the record.
+- **Run the workflow with a GitHub Actions emulator.** It would run the `uses:` steps too, but it adds a tool the Stack doesn't list and a second way to run CI, and `ci.yml` needs only its `run:` steps.
+
+### Land's rules for a lagging branch or draft sit outside Land.tla
+
+Decided 25 Sep 2026 after the audit before the merge of the end-to-end branch (FX4, finding F9). Three rows of `rules` in `features/code-change/land.ts` have no counterpart in `features/code-change/Land.tla`:
+
+- **Behind.** A pull request whose branch is behind its base owes `pr.update-branch` at the head Land read.
+- **Still behind.** A branch still behind after AutoWorker updated it at the same head fails the attempt.
+- **Still a draft.** A draft that is still a draft after AutoWorker marked it ready fails the attempt.
+
+The model has no base branch that moves ahead, and its `MarkReady` clears the draft in the same step, so none of these states exist in it. They stay outside the model, for these reasons:
+
+- **They guard progress, not safety.** None of them owes a merge. An update moves the head, so a merge still needs a later ready read at the new head, and the merge performer reads the pull request again and refuses unless that read is ready (F5). The two "still" rows only fail an attempt, which `FailAttempt` already models with its retry cap. So `MergedHeadWasMergeable`, `PerformedMergeWasAllowed`, and `ReadyOnlyWhenChecksGreen` hold with or without them.
+- **They answer GitHub's lag, which the model can't bound.** Each row exists so that an update or a ready call that GitHub accepted but did not apply costs one retry instead of an owed action without end. Modeling that needs a base branch, an update row, and a lag between the call and GitHub's state. That multiplies the states TLC explores, and it was more work than this unit's timebox allowed.
+
+What checks them now: `github-sim` reads `behind` and performs `pr.update-branch` through the real client against the fake GitHub, whose update is refused when the head moved and answers "no new commits" when the branch is current. `land-sim` never reads `behind`, and its record's `updatedAt` is always null, so no simulation runs the "still behind" or "still a draft" rows through `decideLand`. That gap stays open.
+
+Rejected options:
+
+- **Model them now.** It is the stronger check, and the next change to these rows should add it. It needs a guard per row, a mutant per guard in `verify.ts`, and matching moves in `land-sim`.
+
+### The engine stores a NUL character from the bridge as U+FFFD
+
+Decided 25 Sep 2026. Postgres can't hold the NUL character (`\u0000`) in `jsonb` or `text`, and the app server can write one, for example in a command's output. Before this decision, one NUL in one line made the engine refuse the whole batch. The bridge resent it until the lease ran out, and the reaper marked the attempt lost. The engine now replaces every NUL with U+FFFD, the Unicode replacement character, where it parses a line and before it stores it. The replacement covers every string and every object key in an app-server line, the text of a line that isn't JSON, a reproduced line, and a pushed line's branch. The stored line then differs from what the app server wrote only where a NUL was, and it shows a visible mark there. `bridge-sim` checks this directly, and its fake app server writes NUL into every step it streams.
+
+Rejected options:
+
+- **Refuse a line that carries NUL.** The attempt would still die, only with a clearer reason.
+- **Drop the NUL character.** It hides that anything was there, and it can join two words.
+- **Store the escaped text `\u0000` as six characters.** A reader can't tell it from an app server that wrote those six characters.
+
+### Setup keeps a stored login that expires later than the file's
+
+Decided 25 Sep 2026 after the audit before the merge of the end-to-end branch (FX3a). The engine refreshes a Codex login and writes the new one back, and a refresh token works only once. Before this decision, running setup again with the same file sealed the file's older login over the refreshed one, so the engine's next refresh presented a used token and lost the login. Now `applyLogins` in `features/credentials/setup.ts` locks the credential row and seals the file's login only when it expires later than the stored one, and setup prints how many logins it kept. `node services/engine/setup.ts --replace-logins <file>` seals the file's logins anyway. A login with no expiry, such as a GitHub token or a Jira login, is replaced whenever it differs. `ReapplyNeedsNewerLogin` in `features/credentials/Checks.tla` models the rule, and the `setup` scenario refreshes a login and then applies the same file again.
+
+Rejected options:
+
+- **The file always wins.** Setup stays a plain copy of the file, but every run after the engine's first refresh rolls the login back, and the next refresh presents a used token.
+
+### The attempt start lease outlasts the whole start instead of being renewed during it
+
+Decided 25 Sep 2026 after the audit before the merge of the end-to-end branch (FX3a). An attempt's start can run a Codex check for up to `CHECK_TIMEOUT_MS` and then wait for its Verify environment for up to `ENVIRONMENT_START_DEADLINE_MS`, and it renews its lease only after both. The old default lease, 300 s, was shorter than the default start deadline alone, 600 s, so the reaper could release a start that was still running. Now `services/engine/main.ts` refuses to start unless `ATTEMPT_START_LEASE_MS` is more than `ENVIRONMENT_START_DEADLINE_MS` plus `CHECK_TIMEOUT_MS` plus 60 s, and the default lease is 900 s. `npm run verify -- engine-checks` proves the refusal. The cost is recovery time: a start lost to a crashed engine waits up to 15 minutes before the reaper releases it, not 5.
+
+Rejected options:
+
+- **Renew the lease while `provider.start` runs.** Recovery would stay fast, but a heartbeat beside the start changes the task protocol, so `features/tasks/Tasks.tla` would have to model it first (C5), and `tasks-sim` would need matching moves.
+
+### The seed gives the sandbox the product's package types
+
+Decided 25 Sep 2026. The sandbox repository typechecks in its own CI with the same settings as the product and without `skipLibCheck`. Vitest's declarations name `EventTarget`, `AbortSignal`, and `WebSocket`, which `@types/node` declares, and tinybench's name `DOMHighResTimeStamp`, which no package declares. So the sandbox pins the product's `@types/node` and sets `types: ["node"]` as the root tsconfig does. `sandboxSeed` in `features/e2e/sandbox-seed.ts` copies `shared/types/tinybench.d.ts` into the seed as `types/tinybench.d.ts`, and the sandbox's tsconfig includes `types/`. Both the run branch and the stand-in's local copy come from `sandboxSeed`. The repository holds one copy of the declaration, so the root typecheck, which also covers the sandbox's code, never sees two. A copy of the sandbox with `skipLibCheck` removed failed with 21 errors before this change. `npm run shape` now rejects `skipLibCheck` in any config outside `.claude/`.
+
+Rejected options:
+
+- **Keep `skipLibCheck` on in the sandbox.** It hides every error in every package's declarations, and the Package types path forbids it.
+- **Add the DOM library to the sandbox's `lib`.** It declares every missing name at once, but it types browser globals such as `document` in code that runs on Node, and the sandbox would typecheck under other globals than the root typecheck gives the same files.
+- **Keep a second copy under `features/e2e/sandbox/types/` and exclude it from the root tsconfig.** The repository would hold two copies that can drift, and the root tsconfig would gain an exclusion that only this folder needs.
+
+### A person's action reaches the engine as a request row
+
+Decided 25 Sep 2026 by the coordinator, as Q8 of the dashboard plan. A button on the dashboard, like `act.ts` on the command line, writes one `person_request` row. The engine's `requests` loop applies it with the same task and routine code the command line used, then records the answer on the row. Only the engine changes a task, so a dashboard deployed at another version cannot apply older rules, and the dashboard's role can insert and read requests and nothing more. `features/requests/Requests.tla` models the loop, and the AGENTS.md paved path "Person requests" says how it is built. A request's place in its target's line follows commit order, one transaction applies and answers each request, and a handler that throws gets a refusal written in a new transaction.
+
+Rejected options:
+
+- **The dashboard runs the task code itself.** It needs a second list of workflows and grants to write tasks, attempts, and the outbox, and two versions of the rules can then act on one task.
+- **The dashboard calls a new engine endpoint over HTTP.** A request then dies with the engine that took it, and the engine gains an HTTP surface that needs its own auth.
+- **Order requests by the time the dashboard stamps on them, or by a sequence.** Either can put a request that commits later ahead of one already applied, which `KeyFollowsCommitOrder` in the model rules out.
+- **Apply every request of a pass in one transaction.** One failing handler would then roll back or hold every target's requests.
+
+### The board shows one row per workflow
+
+Decided 25 Sep 2026 by the owner, as Q1 of the dashboard plan. Each workflow that has tasks gets a board row, with its columns taken from that workflow's own published steps. A fork's workflow gets its row with no page code, and approvals of every workflow also stay in Needs you.
+
+Rejected options:
+
+- **One approval lane for all.** One "Waiting for approval" lane across every workflow, beside Code change's columns.
+- **The board shows Code change only.** Other workflows appear only in Needs you and the task list.
+
+### A failed task that needs a person shows red Failed beside amber Needs you
+
+Decided 25 Sep 2026 by the owner, as Q3 of the dashboard plan. Each label carries its own word, so color never carries the meaning alone. Failed means the task waits for a Retry after a failing verdict.
+
+Rejected options:
+
+- **Amber only.** The failure is stated only in the one-sentence reason.
+- **Red only.** The failure is the reason a person is needed.
+
+### The screen word limit counts one view
+
+Decided 25 Sep 2026 by the owner, as Q4 of the dashboard plan. The 244-word limit counts the page as the person sees it, with its open tab, above the fold. Each tab is its own screen in the checks.
+
+Rejected options:
+
+- **Per page, every tab counted.** All tabs' words count at once, which pushes content off the page.
+- **Per screen, with a higher limit for pages with tabs.** A page with tabs gets a larger budget.
+
+### Two full-effort reviewers judge each page group
+
+Decided 25 Sep 2026 by the owner, as Q5 of the dashboard plan. A screen passes only when every automatic check passes and two independent full-effort reviewers each score it 4 or better. The prototype's six groups get their 12 reviewer runs once, and each page unit ends with two reviewers on its own group.
+
+Rejected options:
+
+- **One full-effort reviewer per group.** Half the cost, with no second opinion.
+- **Real pages only.** Skip the prototype's groups, and review only the real pages as they are built.
+
+### The dashboard ships a person picker with no guard
+
+Decided 25 Sep 2026 by the owner, as Q6 of the dashboard plan. A person picks who they are from a list, anyone can act as anyone, and every action is recorded under the person picked. The dashboard does not refuse to start on a public address. Picking a person runs an agent with that person's GitHub token and ChatGPT account, so whoever can reach the page can act as anyone listed.
+
+Rejected options:
+
+- **A guarded picker now, and a sign-in plan later.** The picker would sit behind an identity plug-in point, and the dashboard would refuse to start with the picker unless its address is a loopback address.
+- **Company sign-in in this batch.** OpenID Connect sign-in as an extra unit before the batch ships.
+
+### The dashboard runs on the local kind cluster, in its own pod
+
+Decided 25 Sep 2026 by the owner, as Q7 of the dashboard plan. The dashboard and the engine run in separate pods on the local kind cluster, with manifests for both services. This is closer to production than a service on the owner's machine, and it is more work now.
+
+Rejected options:
+
+- **The owner's machine, local only.** A `dashboard` service in `compose.yaml` published only on `127.0.0.1:4850`.
+- **A shared cluster.** Others could use it, but that needs real sign-in first.
+
+### The Overview shows what needs you first
+
+Decided 25 Sep 2026 by the owner, as Q9 of the dashboard plan. The Overview opens on the tasks waiting on the person picked, with their notes, then gates to approve, then logins near expiry, and running work after that. The board and the full task list are one click away.
+
+Rejected options:
+
+- **The board first.** Every task by step, at a glance.
+- **Every task first.** The full list, sortable.
+
+### A task waits on its assignee, or else on its routine's creator
+
+Decided 25 Sep 2026 in U6. Needs you and the task list's person filter need one person per task. A task belongs to the person whose Jira account is the ticket's assignee, and to the routine's creator when no person has that account. `one_person_per_jira_account` makes the assignee match at most one person, so every task has exactly one, and `npm run verify -- overview-read` plants a second person on one account to prove the check would catch two. Running work shows for everyone, because anyone may need to watch or stop it.
+
+Rejected options:
+
+- **The person an attempt runs as.** A routine that runs as a teammate, or as a team account, would send every waiting task to that account instead of to the person who owns the ticket, and a task that never ran has no such person.
+- **Everyone sees every waiting task.** Needs you would then not say who has to act.
+
+### A person gives AutoWorker a Codex login by pasting an auth.json
+
+Decided 25 Sep 2026 by the owner, as Q10 of the dashboard plan. A person pastes a Codex login file and marks it as made for AutoWorker. A copied login can sign out the person's own Codex when AutoWorker refreshes it. The owner would prefer the Connect button if company policy allows the device login, and notes that the agent layer may need to support other coding agents, such as Cursor, later.
+
+Rejected options:
+
+- **A Connect button with the device login.** No file handling, and the login is AutoWorker's own from the start, but company policy may not allow it.
+- **The setup file only.** Logins arrive only through the setup file, and the dashboard shows them read-only.
+
+### The codebase grows only by a raise commit against a checked-in budget
+
+Decided 25 Sep 2026 by the owner, from a colleague's practice. `budget/budget.json` gives each area a ceiling and a written why, and `npm run budget` fails a change that passes one. A ceiling goes down in any commit and goes up only in a commit that changes nothing outside `budget/`, so a reviewer sees every growth decision on its own (B6). The budget is the one place the codebase's aggregate size shows up at merge time. It was seeded at e371a50 with 36,949 non-blank lines across seven roles, 186 named constraints, indexes, and triggers, and 55 scenario declarations. The owner changed the practice in four ways:
+
+- **A ceiling per role.** Product, feature verification, the e2e harness, tools, TLA+ models, migrations, and docs each have their own ceilings, declared as globs in the budget file so a fork can change them. On 24 Sep two units deleted six schema constraints to pass a catalog check, so the shortest path to a passing check is real, and one shared ceiling would make deleting verification the shortest path to room for product code.
+- **Structure first, then lines.** Structural counts, such as tables, named guards, dependencies, verify scenarios, CI steps, and each model's distinct states, say more about cost than lines do. Each role also has a non-whitespace character ceiling, which joining lines cannot shrink, and a longest-line ceiling that only goes down, seeded at today's widest line so no file needs reformatting. A longest-line ceiling alone would still let a change join short lines up to it.
+- **Generous time ceilings.** Each CI job's ceiling was seeded at about twice its longest recent local run: check 3,500 s, models 4,700 s, sims 2,700 s, and simulation 2,000 s. The owner capped verification at 8 of 16 cores the same day, so `budget/raises/core-cap.json` raises each to about four times that run until runs under the cap are measured. Local CI stops a job that passes its ceiling. Time ceilings never lower themselves.
+- **Lowered at landing, never in units.** Each unit raises in its own file under `budget/raises/`, so parallel raises merge without a conflict, and the coordinator's `npm run budget -- --lower` folds them in and sets each count to what landed. `docs/decisions.md` and `docs/feature-map.md` conflicted in almost every candidate on 25 Sep, and a budget file that every unit edits would do the same.
+
+Rejected options:
+
+- **One total line budget.** It is the simplest to read, but it lets a change pay for product code by deleting tests or simulations, which is the failure the per-role ceilings exist to stop.
+- **Units lower the ceilings.** Every unit would edit the same numbers, so the budget file would conflict in almost every integration.
+- **Tight time budgets.** Local times swing with machine load, so a tight ceiling fails healthy runs and teaches agents to raise it without looking. The distinct state count is the ratchet for model cost, because it does not depend on load.
+- **A raise that states the new ceiling.** Two parallel raises of the same area would each count the same room, so a raise states the amount it adds.
+
 ## Open
 
 Each open question names the current lean or default. A lean is not a decision.
 
-- **What the dashboard's Overview shows first.** The lean is what needs the person picked, with the pipeline board and the history one click away.
 - **When AutoWorker posts to chat.** The default is to post when a task parks as waiting, when a routine is overdue, and once a day as a digest.
-- **Whether outbox rows need a claim.** The data model draft has no claim on outbox rows, and Jira comments and chat posts are not idempotent on the other side. The outbox's TLA+ model settles this before the outbox is built.
-- **When sign-in becomes necessary.** Runs now carry personal logins, so picking a person runs an agent with that person's GitHub token and ChatGPT account. The lean is to add sign-in before the first run with real personal credentials.
-- **How a person gives AutoWorker a Codex login.** The lean is a Connect button that has the engine run `codex login --device-auth` and show the person its link and code, so the login is made for AutoWorker by construction.
-- **How a worker that keeps stalling loses its task.** The TLA+ model in `features/tasks/` assumes that a lease that keeps lapsing is reaped at one of its lapses, which it states as strong fairness for the reaper. Nothing guarantees that yet, and the reaper's ticket, AUTO-10, picks the mechanism.

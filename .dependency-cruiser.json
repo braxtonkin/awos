@@ -64,6 +64,13 @@
       "to": { "path": "^(features|services|shared)/" }
     },
     {
+      "name": "dashboard-imports-no-engine-code",
+      "severity": "error",
+      "comment": "The engine alone changes task state and runs workflows, so the dashboard reads published rows and writes person requests, and never imports a workflow, the request loop, or the task code.",
+      "from": { "path": "^services/dashboard/" },
+      "to": { "path": "^features/([^/]+/workflow\\.ts$|requests/|tasks/)", "reachable": true }
+    },
+    {
       "name": "no-circular",
       "severity": "error",
       "comment": "Circular imports hide a missing boundary.",
@@ -73,14 +80,14 @@
     {
       "name": "no-orphans",
       "severity": "error",
-      "comment": "A module nothing imports and that imports nothing is dead code (B5).",
-      "from": { "orphan": true, "pathNot": "\\.d\\.ts$" },
+      "comment": "A module nothing imports and that imports nothing is dead code (B5), except the entry files Next loads by their path.",
+      "from": { "orphan": true, "pathNot": "(\\.d\\.ts$|^services/dashboard/(next\\.config\\.ts|app/(page|layout|not-found)\\.tsx|app/.*/(page|layout|not-found|route)\\.tsx?)$)" },
       "to": {}
     }
   ],
   "options": {
     "doNotFollow": { "path": "(^|/)node_modules/" },
-    "exclude": { "path": "^\\.claude/" },
+    "exclude": { "path": "(^\\.claude/|(^|/)\\.next/|next-env\\.d\\.ts$)" },
     "preserveSymlinks": true,
     "tsPreCompilationDeps": true,
     "tsConfig": { "fileName": "tsconfig.json" }

@@ -1,9 +1,10 @@
 import { spawn } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { z } from 'zod';
-import { codexLogin, refreshable, type Check, type Checked } from './kinds.ts';
+import { codexLogin } from '../../shared/codex-login.ts';
+import { refreshable, type Check, type Checked, type RefreshUse } from './kinds.ts';
 
 export type CodexCheckSettings = { readonly timeoutMs: number };
 
@@ -141,6 +142,28 @@ function verdictOf(finished: Finished, events: Events, reply: string | null, sec
   return { verdict: 'unknown', cause: `Codex exited with code ${String(finished.exit)}: ${said}` };
 }
 
+export type CodexExit = { readonly ranToItsEnd: boolean; readonly before: string; readonly after: string | null };
+
+export function refreshUse({ ranToItsEnd, before, after }: CodexExit): RefreshUse {
+  if (after !== null && after !== before) return { kind: 'rotated', login: after };
+  return ranToItsEnd && after === before ? { kind: 'unused' } : { kind: 'maybe-used' };
+}
+
+const ranToItsEnd = (finished: Finished): boolean => finished.spawnError !== null || (!finished.timedOut && finished.exit !== null);
+
+export async function clearLeftoverHomes(before: Date): Promise<readonly string[]> {
+  const folder = tmpdir();
+  const cleared: string[] = [];
+  for (const name of (await readdir(folder)).filter(entry => entry.startsWith(codexHomePrefix))) {
+    const path = join(folder, name);
+    const found = await stat(path).catch(() => undefined);
+    if (found === undefined || found.mtimeMs >= before.getTime()) continue;
+    await rm(path, { recursive: true, force: true });
+    cleared.push(path);
+  }
+  return cleared;
+}
+
 export async function probeCodex(settings: CodexCheckSettings, login: string): Promise<CodexProbe> {
   const home = await mkdtemp(join(tmpdir(), codexHomePrefix));
   const started = performance.now();
@@ -155,9 +178,8 @@ export async function probeCodex(settings: CodexCheckSettings, login: string): P
     const events = readEvents(finished.stdout);
     const reply = await readOrNull(join(home, 'last-message.txt'));
     const after = await readOrNull(auth);
-    const rotated = after !== null && after !== login ? { rotated: after } : {};
     const secrets = [...secretsOf(login), ...(after === null ? [] : secretsOf(after))];
-    const checked: Checked = { ...verdictOf(finished, events, reply, secrets), expiresAt: expiryOf(after) ?? expiryOf(login), ...rotated };
+    const checked: Checked = { ...verdictOf(finished, events, reply, secrets), expiresAt: expiryOf(after) ?? expiryOf(login), refresh: refreshUse({ ranToItsEnd: ranToItsEnd(finished), before: login, after }) };
     return { checked, wallMs, inputTokens: events.inputTokens, models: events.models };
   } finally {
     await rm(home, { recursive: true, force: true });

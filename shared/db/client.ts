@@ -23,6 +23,11 @@ export function connect(url: string, connections: number, connectTimeoutMs?: num
   pool.on('error', error => {
     process.stderr.write(`An idle Postgres connection failed, and the pool dropped it: ${error.message}\n`);
   });
+  pool.on('connect', client => {
+    client.on('error', error => {
+      process.stderr.write(`A Postgres connection in use failed, so its work fails and the pool drops it on release: ${error.message}\n`);
+    });
+  });
   return new Kysely<DB>({ dialect: new PostgresDialect({ pool }) });
 }
 

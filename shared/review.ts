@@ -25,3 +25,7 @@ export const answer = z.discriminatedUnion('kind', [
 ]);
 
 export type Answer = z.infer<typeof answer>;
+
+export const note = z.string().trim().min(1).max(4000).brand<'Note'>();
+
+export type Note = z.infer<typeof note>;

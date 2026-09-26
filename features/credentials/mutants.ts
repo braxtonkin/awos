@@ -36,6 +36,7 @@ type Attempt = { readonly accepted: true } | { readonly accepted: false; readonl
 
 type Guard = {
   readonly table: 'credential' | 'human_action';
+  readonly by?: 'trigger';
   readonly refuses: string;
   readonly expect: Refusal;
   readonly probe: (world: World, targets: Targets) => Promise<unknown>;
@@ -55,6 +56,7 @@ const guardName = z.enum([
   'one_credential_per_connector_and_person',
   'personal_credential_has_person',
   'checked_credential_has_time',
+  'stored_login_is_newest',
   'one_target',
   'target_fits_kind',
 ]);
@@ -173,6 +175,18 @@ const mutants: Readonly<Record<GuardName, Guard>> = {
       sql`insert into credential (connector, scope, person_id, ciphertext, key_version, action_id, state)
           values ('codex', 'personal', ${world.ada}, ${randomBytes(44)}, 1, ${targets.action}, 'valid')`.execute(world.engine),
   },
+  stored_login_is_newest: {
+    table: 'credential',
+    by: 'trigger',
+    refuses: 'a login that expires earlier than the one stored under the same replacement',
+    expect: { kind: 'check', name: 'stored_login_is_newest' },
+    probe: async (world, targets) => {
+      await sql`insert into credential (connector, scope, person_id, ciphertext, key_version, action_id, expires_at)
+          values ('codex', 'personal', ${world.ada}, ${randomBytes(44)}, 1, ${targets.action}, timestamptz '2026-01-01T02:00:00Z')
+          on conflict (connector, person_id) do nothing`.execute(world.engine);
+      return sql`update credential set expires_at = timestamptz '2026-01-01T01:00:00Z' where action_id = ${targets.action}`.execute(world.engine);
+    },
+  },
   one_target: {
     table: 'human_action',
     refuses: 'a replacement that names both a connector and a routine',
@@ -264,10 +278,11 @@ function refusedAs(tried: Attempt, expected: Refusal): readonly string[] {
 }
 
 async function guardOutcome(world: World, guard: GuardName): Promise<Outcome> {
-  const { table, expect, probe: run } = mutants[guard];
+  const { table, by, expect, probe: run } = mutants[guard];
   const targets = await seedTargets(world);
   const standing = await attempt(() => run(world, targets));
-  await world.engine.schema.alterTable(table).dropConstraint(guard).execute();
+  if (by === 'trigger') await sql`drop trigger ${sql.id(guard)} on ${sql.table(table)}`.execute(world.engine);
+  else await world.engine.schema.alterTable(table).dropConstraint(guard).execute();
   const dropped = await attempt(() => run(world, targets));
   return {
     problems: [...refusedAs(standing, expect), ...(dropped.accepted ? [] : [`once ${guard} was dropped, the probe was still refused: ${dropped.message}`])],

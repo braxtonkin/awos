@@ -6,7 +6,8 @@ import { z } from 'zod';
 import { fail, pass, type Check, type Scenario } from '../../tools/verify/check.ts';
 import { checkModel, codexHomePrefix, probeCodex, type CodexProbe } from './codex-check.ts';
 import { githubApi, githubCheck } from './github-check.ts';
-import { codexLogin, refreshable, type Checked, type Verdict } from './kinds.ts';
+import { codexLogin } from '../../shared/codex-login.ts';
+import { refreshable, type Checked, type Verdict } from './kinds.ts';
 import { fakeGithubToken } from './world.ts';
 
 type Answer = { readonly status: number; readonly headers: Readonly<Record<string, string>>; readonly expect: Verdict; readonly expiresAt: Date | null };
@@ -68,7 +69,7 @@ async function codexScenario(args: readonly string[]): Promise<readonly Check[]>
     const detail = `run ${String(index + 1)}: ${describe(probe.checked)}; ${(probe.wallMs / 1000).toFixed(1)} s; ${probe.inputTokens === null ? 'no usage reported' : `${String(probe.inputTokens)} input tokens`}`;
     return probe.checked.verdict === expected ? pass(`verdict is ${expected}`, detail) : fail(`verdict is ${expected}`, detail);
   });
-  const unchanged = probes.every(probe => probe.checked.rotated === undefined);
+  const unchanged = probes.every(probe => probe.checked.refresh.kind !== 'rotated');
   const checks = [
     pass('login is access-only', `${values.login} holds no refresh token`),
     ...perRun,

@@ -1,5 +1,6 @@
 services:
   verify:
+    image: ${COMPOSE_PROJECT_NAME}-verify
     build:
       context: tools/verify
       dockerfile: Dockerfile
@@ -11,6 +12,34 @@ services:
     environment:
       TESTCONTAINERS_HOST_OVERRIDE: host.docker.internal
       TESTCONTAINERS_RYUK_DISABLED: "true"
+      GITHUB_BASE_REF: ${GITHUB_BASE_REF:-}
+    extra_hosts:
+      - host.docker.internal:host-gateway
+
+  live:
+    extends: verify
+    env_file:
+      - path: ~/.autoworker/sandbox.env
+        required: false
+    volumes:
+      - ~/.autoworker/codex:/codex:ro
+
+  dashboard:
+    image: ${COMPOSE_PROJECT_NAME}-verify
+    working_dir: /repo
+    volumes:
+      - .:/repo
+      - node_modules:/repo/node_modules
+    command: sh -c "node node_modules/next/dist/bin/next build services/dashboard && exec node node_modules/next/dist/bin/next start services/dashboard -p 4850 -H 0.0.0.0"
+    init: true
+    ports:
+      - 127.0.0.1:4850:4850
+    environment:
+      DASHBOARD_URL: http://127.0.0.1:4850
+      DATABASE_URL: ${DASHBOARD_DATABASE_URL:-}
+      CREDENTIAL_KEY: ${CREDENTIAL_KEY:-}
+      CREDENTIAL_KEY_VERSION: ${CREDENTIAL_KEY_VERSION:-}
+      NEXT_TELEMETRY_DISABLED: "1"
     extra_hosts:
       - host.docker.internal:host-gateway
 

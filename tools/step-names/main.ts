@@ -8,11 +8,19 @@ type Name = { readonly name: string; readonly what: string; readonly isWorkflow:
 type Found = { readonly path: string; readonly line: number; readonly problem: string };
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
-const executionFolders = ['features/tasks', 'services/engine'] as const;
+const executionFolders = ['features/tasks', 'services/engine', 'services/dashboard'] as const;
 const verificationFiles: ReadonlySet<string> = new Set(['verify.ts', 'simulate.ts', 'invariants.ts', 'failed-seeds.ts', 'catalog.ts']);
 const workflowList = 'services/engine/workflows.ts';
 const declarationFile = 'workflow.ts';
 const quoted = /'([^']*)'/g;
+const buildFolder = '.next';
+
+const holdsPage = (folder: string): boolean => readdirSync(join(root, folder), { recursive: true, encoding: 'utf8' }).some(path => path.endsWith('.tsx'));
+
+const pageFeatures = (): readonly string[] =>
+  readdirSync(join(root, 'features'), { withFileTypes: true })
+    .filter(dirent => dirent.isDirectory() && holdsPage(`features/${dirent.name}`))
+    .map(dirent => `features/${dirent.name}`);
 
 const unwrapped = (expression: ts.Expression): ts.Expression =>
   ts.isSatisfiesExpression(expression) || ts.isAsExpression(expression) || ts.isParenthesizedExpression(expression) ? unwrapped(expression.expression) : expression;
@@ -62,7 +70,7 @@ function* executionFiles(prefix: string): Generator<string> {
   if (!existsSync(join(root, prefix))) return;
   for (const dirent of readdirSync(join(root, prefix), { withFileTypes: true })) {
     const path = `${prefix}/${dirent.name}`;
-    if (dirent.isDirectory()) yield* executionFiles(path);
+    if (dirent.isDirectory() && dirent.name !== buildFolder) yield* executionFiles(path);
     else if (dirent.isFile() && /\.(?:ts|tsx|mts|cts)$/.test(dirent.name) && !isVerification(path)) yield path;
   }
 }
@@ -86,7 +94,7 @@ function violationsIn(path: string, names: readonly Name[]): readonly Found[] {
       found.push({
         path,
         line: file.getLineAndCharacterOfPosition(node.getStart(file)).line + 1,
-        problem: `names ${name.what} "${name.name}". The runner never names a workflow or a step (docs/spec.md); read it from the task's workflow, which ${workflowList} lists.`,
+        problem: `names ${name.what} "${name.name}". Neither the runner nor the dashboard names a workflow or a step (docs/spec.md). The runner reads it from the task's workflow, which ${workflowList} lists, and the dashboard reads published_workflow_step.`,
       });
     }
   };
@@ -105,6 +113,6 @@ function violationsIn(path: string, names: readonly Name[]): readonly Found[] {
 }
 
 const { names, problems } = declaredNames();
-const violations = [...problems, ...executionFolders.flatMap(folder => [...executionFiles(folder)]).flatMap(path => violationsIn(path, names))];
+const violations = [...problems, ...[...executionFolders, ...pageFeatures()].flatMap(folder => [...executionFiles(folder)]).flatMap(path => violationsIn(path, names))];
 for (const { path, line, problem } of violations) process.stdout.write(`${path}:${String(line)} ${problem}\n`);
 process.exitCode = violations.length === 0 ? 0 : 1;

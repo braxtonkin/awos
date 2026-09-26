@@ -1,6 +1,5 @@
-import { sql } from 'kysely';
-import { connect } from '../../shared/db/client.ts';
 import type { DB } from '../../shared/db/types.ts';
+import { auditCatalog, type Audit } from '../../tools/verify/catalog.ts';
 import type { TestPostgres } from '../../tools/verify/postgres.ts';
 import { mutants } from './simulate.ts';
 
@@ -15,6 +14,8 @@ export const noMutantYet: Readonly<Record<string, readonly string[]>> = {
     'attempt_names_its_epoch',
   ],
   "it speeds finding a task's attempts and refuses nothing": ['attempts_by_task'],
+  'the task simulator launches no Job, so it never writes a token, a Job creation, or a not_launched verdict; npm run verify -- launch-faults runs the worker that writes them': ['job_created_after_its_token', 'not_launched_created_no_job'],
+  "the task simulator never writes a repository's Job image, and npm run verify -- jobs plants a mutable tag that the column refuses": ['job_image_named_by_digest'],
   'the claim reads the task, its newest routine version, and the person it runs as from rows that exist, so no claim can name a missing row': [
     'attempt_of_task',
     'attempt_cites_goal_version',
@@ -25,6 +26,7 @@ export const noMutantYet: Readonly<Record<string, readonly string[]>> = {
     'review_when_judged',
     'waiting_has_reason',
     'waiting_says_on_what',
+    'only_a_gate_stop_keeps_its_wait',
     'review_wait_names_its_review',
     'counts_are_an_object',
     'stopped_has_stop_action',
@@ -53,7 +55,7 @@ export const noMutantYet: Readonly<Record<string, readonly string[]>> = {
     'version_saved_by_action',
     'routine_version_is_final',
     'goal_not_blank',
-    'schedule_is_five_cron_fields',
+    'every_is_a_positive_span_without_months',
     'pause_names_its_action',
     'action_on_routine',
     'action_taken_by_person',
@@ -63,10 +65,22 @@ export const noMutantYet: Readonly<Record<string, readonly string[]>> = {
     'version_lists_its_gates',
     'version_says_how_it_treats_later_reviews',
     'source_names_its_kind',
+    'jira_start_status_is_named',
+    'jira_end_status_is_named',
     'version_repository_when_needed',
     'version_workflow_rule',
     'setting_of_version',
     'routine_step_is_final',
+  ],
+  'the claim names the branch from the task key and the count of its attempts and takes the start from continuation, and the simulated Job pushes only 40-character commits to its own branch, so no paved write reaches a row these refuse': [
+    'attempt_branch_is_its_own',
+    'start_is_a_commit',
+    'push_is_a_commit',
+    'branch_starts_somewhere',
+    'push_needs_a_branch',
+  ],
+  'two claims of one task count the same attempt number only when they race, and one_live_attempt_per_task already refuses the second of those as busy, so dropping this index changes nothing a property can see while that one stands; the claim refuses a collision here as busy too': [
+    'one_attempt_per_branch',
   ],
   'the badName fault writes a bad skill, step, and workflow name and a waiting reason that is not a sentence, and its seed fails unless the domain refuses the write, but dropGuard drops only table constraints, indexes, and triggers, so a domain has no mutant yet': [
     'workflow_name_is_a_slug',
@@ -97,47 +111,5 @@ export const noMutantYet: Readonly<Record<string, readonly string[]>> = {
   ],
 };
 
-export type Catalog = { readonly guards: number; readonly unlisted: readonly string[]; readonly absent: readonly string[]; readonly listedTwice: readonly string[] };
-
-export async function checkCatalog(postgres: TestPostgres): Promise<Catalog> {
-  const scratch = await postgres.scratch();
-  const db = connect(scratch.url, 1);
-  try {
-    const { rows } = await sql<{ name: string }>`
-      with owned as (select unnest(${ownedTables}::regclass[]) as relation)
-      select c.conname as name
-      from pg_constraint c
-      join owned o on o.relation = c.conrelid
-      join pg_class t on t.oid = c.conrelid
-      left join pg_attribute a on a.attrelid = c.conrelid and a.attnum = c.conkey[1]
-      where not (c.contype = 'p' and c.conname = t.relname || '_pkey')
-        and not (c.contype = 'n' and c.conname = t.relname || '_' || a.attname || '_not_null')
-      union all
-      select i.relname
-      from pg_index x
-      join owned o on o.relation = x.indrelid
-      join pg_class i on i.oid = x.indexrelid
-      where not exists (select 1 from pg_constraint c where c.conindid = x.indexrelid and c.contype in ('p', 'u', 'x'))
-      union all
-      select g.tgname
-      from pg_trigger g
-      join owned o on o.relation = g.tgrelid
-      where not g.tgisinternal
-      union all
-      select c.conname
-      from pg_constraint c
-      join pg_type d on d.oid = c.contypid
-      where c.contypid <> 0 and d.typnamespace = 'public'::regnamespace`.execute(db);
-    const guards = new Set(rows.map(row => row.name));
-    const listed = [...Object.keys(mutants), ...Object.values(noMutantYet).flat()];
-    return {
-      guards: guards.size,
-      unlisted: [...guards].filter(name => !listed.includes(name)).sort(),
-      absent: listed.filter(name => !guards.has(name)).sort(),
-      listedTwice: [...new Set(listed.filter((name, index) => listed.indexOf(name) !== index))].sort(),
-    };
-  } finally {
-    await db.destroy();
-    await scratch.drop();
-  }
-}
+export const checkCatalog = (postgres: TestPostgres): Promise<Audit> =>
+  auditCatalog(postgres, { tables: ownedTables, domains: true }, { mutated: Object.keys(mutants), reasoned: Object.values(noMutantYet).flat() });

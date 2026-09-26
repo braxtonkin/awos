@@ -1,15 +1,20 @@
 import { spawnSync } from 'node:child_process';
-import { cp, lstat, mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
+import { cp, lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { budgetFile, ceilingsOf, diskSource, loadBudget, withCeilings } from '../budget/budget.ts';
 import { fail, pass, type Check, type Scenario } from './check.ts';
+import { plantAnchor, plantedFixture, plantIds, plants } from './screens/plants.ts';
 
-type Tool = 'tsc' | 'node' | 'eslint' | 'depcruise' | 'check' | 'shape' | 'sql-comments' | 'model-names' | 'step-names' | 'db-types' | 'models';
+type Tool = 'tsc' | 'node' | 'eslint' | 'depcruise' | 'check' | 'shape' | 'sql-comments' | 'model-names' | 'step-names' | 'strict-schemas' | 'ci-plan' | 'db-types' | 'models' | 'migration-versions' | 'screen-gates' | 'screen-review' | 'budget' | 'contrast';
+
+type Edit = { readonly from: string; readonly to: string };
 
 type Plant =
-  | { readonly file: string; readonly source: string; readonly linkTo?: never }
-  | { readonly file: string; readonly linkTo: string; readonly source?: never };
+  | { readonly file: string; readonly source: string; readonly linkTo?: never; readonly edit?: never }
+  | { readonly file: string; readonly linkTo: string; readonly source?: never; readonly edit?: never }
+  | { readonly file: string; readonly edit: Edit; readonly source?: never; readonly linkTo?: never };
 
 type Violation = Plant & {
   readonly name: string;
@@ -22,6 +27,7 @@ type Violation = Plant & {
 type Allowance = Plant & {
   readonly name: string;
   readonly tool: Tool;
+  readonly shows?: string;
   readonly companions?: readonly Plant[];
   readonly env?: Readonly<Record<string, string>>;
 };
@@ -59,6 +65,19 @@ const hiddenComment = `${plantedMigration}:2 holds the SQL comment "-- hidden"`;
 
 const plantedConfig = 'features/planted/Planted.cfg';
 
+const clashingMigration = 'db/migrations/20260923220000_planted.sql';
+
+const clash = `${clashingMigration} shares version 20260923220000 with db/migrations/20260923220000_tasks.sql`;
+
+const owing = "import type { Enqueue } from '../../shared/actions.ts';\nimport type { Database } from '../../shared/db/client.ts';\n\nconst owed = { task: 't1', actsAs: 'p1', now: new Date() };\n\n";
+
+const livenessModel = (section: string): string =>
+  `import { defineModel } from '../../tools/verify/models.ts';\n\nconst floors = { Limit: 2 };\n\nexport const scenarios = [\n  defineModel({\n    name: 'planted',\n    module: new URL('Planted.tla', import.meta.url),\n    configs: { pr: { file: 'Planted.cfg', floors }, nightly: { file: 'Planted.cfg', floors } },\n    guards: ['Fair'],\n    properties: { Settles: '${section}' },\n    liveness: ['Settles'],\n    mutants: [{ guard: 'Fair', property: 'Settles' }],\n  }),\n];\n`;
+
+const plantedSpec = '---- MODULE Planted ----\nEXTENDS Naturals\nCONSTANTS Limit, Fair\nVARIABLE x\nTypeOK == x \\in 0..Limit\nInit == x = 0\nNext == x < Limit /\\ x\' = x + 1\nSpec == Init /\\ [][Next]_x /\\ (Fair => WF_x(Next))\nSettles == <>(x = Limit)\n====\n';
+
+const settlingSpec = plantedSpec.replace("Next == x < Limit /\\ x' = x + 1", "Next == (x < Limit /\\ x' = x + 1) \\/ (x = Limit /\\ UNCHANGED x)");
+
 const plantedInvariants = 'features/planted/invariants.ts';
 
 const holdsAndStepConfig = 'SPECIFICATION Spec\n\nINVARIANTS\n    PlantedHolds\n\nPROPERTIES\n    PlantedStep\n';
@@ -79,9 +98,120 @@ const staleTypes = `${generatedTypes} differs from a fresh generation`;
 
 const codeChange = 'code-change';
 
-const plantedStep = "name: 'planted', reads: [], prompt: 'Planted.', needsRepository: true, canEnd: true, owes: [], output: review, requires: ['text'], failures: { fail: { kind: 'fail' } }";
+const optionalVerifyField: Edit = {
+  from: "behavior: z.enum(['fixed', 'still_wrong']).nullable() })",
+  to: "behavior: z.enum(['fixed', 'still_wrong']).nullable(), extra: z.string().optional() })",
+};
+
+const optionalExtra = `${codeChange} verify $.properties.extra is not in required`;
+
+const textBlock = "z.strictObject({ kind: z.enum(['text']), title: z.string().nullable(), body: z.string() })";
+
+const textBlockStartsWithBody: Edit = {
+  from: textBlock,
+  to: "z.strictObject({ body: z.string(), kind: z.enum(['text']), title: z.string().nullable() })",
+};
+
+const bodyFirst = `${codeChange} specify $.properties.blocks.items.anyOf[0] starts with body`;
+
+const refToSummary = (ref: string): Edit => ({ from: 'summary: z.string(),', to: `summary: z.string().meta({ $ref: '${ref}' }),` });
+
+const schemaPlants: readonly (readonly [string, string, Edit, string])[] = [
+  [
+    'an object that allows keys it does not declare',
+    'shared/review.ts',
+    { from: textBlock, to: "z.looseObject({ kind: z.enum(['text']), title: z.string().nullable(), body: z.string() })" },
+    `${codeChange} specify $.properties.blocks.items.anyOf[0] does not set additionalProperties to false`,
+  ],
+  ['a oneOf from z.discriminatedUnion', 'shared/review.ts', { from: 'const block = z.union([', to: "const block = z.discriminatedUnion('kind', [" }, `${codeChange} specify $.properties.blocks.items uses oneOf`],
+  [
+    'an allOf from .and',
+    'shared/review.ts',
+    { from: textBlock, to: "z.strictObject({ kind: z.enum(['text']), title: z.string().nullable(), body: z.string().and(z.string().min(1)) })" },
+    `${codeChange} specify $.properties.blocks.items.anyOf[0].properties.body uses allOf`,
+  ],
+  ['a $ref the schema does not define', 'shared/review.ts', refToSummary('#/definitions/missing'), `${codeChange} specify $.properties.summary refers to "#/definitions/missing"`],
+  [
+    'an output whose root is not an object',
+    `features/${codeChange}/workflow.ts`,
+    { from: optionalVerifyField.from, to: "behavior: z.enum(['fixed', 'still_wrong']).nullable() }).nullable()" },
+    `${codeChange} verify $ is not type "object"`,
+  ],
+];
+
+const plantedStep = "name: 'planted', reads: [], runBy: 'agent', prompt: 'Planted.', startsEnvironment: false, afterTurn: 'push', needsRepository: true, canEnd: true, owes: [], output: review, requires: ['text'], failures: { fail: { kind: 'fail' } }";
+
+const noBrandAssertions = 'autoworker/no-brand-assertions';
+
+const ciWorkflow = '.github/workflows/ci.yml';
+
+const afterDoctor = (added: string): Edit => ({
+  from: '      - run: docker compose run --rm verify npm run verify -- doctor\n',
+  to: `      - run: docker compose run --rm verify npm run verify -- doctor\n${added}`,
+});
+
+const setupNode = 'actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020';
+
+const setupNodeStep = afterDoctor(`      - uses: ${setupNode}\n`);
+
+const unknownStep = `${ciWorkflow} job check step 7 uses ${setupNode}, which ci-local cannot run`;
+
+const accessOnlyLoginFrom = "import { accessOnly, type AccessOnlyLogin } from '../../shared/codex-login.ts';\n\nconst launch = (login: AccessOnlyLogin): string => login;\n";
+
+const plantedCheck = "import type { Checks } from './checks.ts';\nimport type { Check } from './kinds.ts';\n\nconst check: Check = { rotates: () => false, run: () => Promise.reject(new Error('planted')) };\n";
+
+const ticketKeyPattern = ['^[A-Z]', '[A-Z0-9_]*', '-\\d+$'].join('');
+
+const ticketKeyCopy = 'Import ticket from shared/actions.ts';
+
+const dashboardTokens = 'shared/ui/tokens.ts';
+
+const dashboardConfig = 'services/dashboard/tsconfig.dashboard.json';
+
+const plantedPage = 'services/dashboard/app/planted/page.tsx';
+
+const plainPage = 'export default function Page() {\n  return <main>Planted</main>;\n}\n';
 
 const violations: readonly Violation[] = [
+  {
+    name: 'tsc rejects a review step that owes an approval',
+    file: 'features/planted/approves.ts',
+    source: "import { z } from 'zod';\nimport type { ActionSpec } from '../../shared/actions.ts';\nimport { reviewOwes, type ReviewStep } from '../code-change/land.ts';\n\nconst approve: ActionSpec<'pr.approve', { readonly repository: string }, { readonly review: string }> = { kind: 'pr.approve', payload: z.object({ repository: z.string() }), result: z.object({ review: z.string() }) };\n\nexport const approving: ReviewStep = pull => ({ actions: [reviewOwes(approve, { repository: pull.repository })], note: 'The planted step approved.' });\n",
+    tool: 'tsc',
+    expect: ['TS2345'],
+  },
+  {
+    name: 'tsc rejects a review step that owes pr.merge, which would bypass the ready rule and the gates',
+    file: 'features/planted/merges.ts',
+    source:
+      "import { actionKinds } from '../../shared/actions.ts';\nimport { reviewOwes, type ReviewStep } from '../code-change/land.ts';\n\nexport const merging: ReviewStep = pull => ({ actions: [reviewOwes(actionKinds.prMerge, { repository: pull.repository, number: pull.number ?? 1, commit: 'a'.repeat(40) })], note: 'The planted step merged.' });\n",
+    tool: 'tsc',
+    expect: ['TS2345'],
+  },
+  {
+    name: 'tsc rejects a review step that owes an allowed kind it did not build with reviewOwes',
+    file: 'features/planted/owes.ts',
+    source:
+      "import { actionKinds, owe } from '../../shared/actions.ts';\nimport type { ReviewStep } from '../code-change/land.ts';\n\nexport const commenting: ReviewStep = (_pull, task) => ({ actions: [owe(actionKinds.ticketComment, { ticket: task.key, text: 'Please review.', linkPullRequest: true })], note: 'The planted step commented.' });\n",
+    tool: 'tsc',
+    expect: ['TS2322'],
+  },
+  {
+    name: 'tsc rejects a GitHub performer map without pr.merge',
+    file: 'features/github/planted.ts',
+    source:
+      "import type { Performers } from '../../shared/actions.ts';\nimport { githubPerformers, type GithubKind } from './performers.ts';\n\nconst { 'pr.merge': merge, ...others } = githubPerformers({ clientFor: () => Promise.resolve({ failed: 'planted' }), mergeRowOf: () => Promise.resolve(undefined) });\n\nexport const withoutMerge: Performers<GithubKind> = others;\n\nexport const planted = merge;\n",
+    tool: 'tsc',
+    expect: ['TS2741'],
+  },
+  {
+    name: 'tsc rejects a request handler record that leaves out a request kind',
+    file: 'services/engine/planted.ts',
+    source:
+      "import type { Handlers } from '../../features/requests/apply.ts';\nimport type { RequestKind } from '../../shared/requests.ts';\n\nconst refused = () => Promise.resolve({ refused: 'Planted.' });\n\nexport const handlers = { stop: refused, retry: refused, approve: refused, send_back: refused, answer: refused, pause: refused, resume: refused } satisfies Handlers<RequestKind>;\n",
+    tool: 'tsc',
+    expect: ['TS1360'],
+  },
   {
     name: 'tsc rejects an unchecked index access',
     file: 'features/planted/index.ts',
@@ -223,6 +353,27 @@ const violations: readonly Violation[] = [
     source: "import { pass } from '../../tools/verify/check.js';\nexport const planted = pass('planted', 'tsc resolves this import and node cannot');\n",
     tool: 'eslint',
     expect: ['no-restricted-syntax'],
+  },
+  {
+    name: 'eslint rejects a regular expression that copies the ticket-key pattern',
+    file: 'features/planted/ticket-key.ts',
+    source: `export const key = /${ticketKeyPattern}/;\n`,
+    tool: 'eslint',
+    expect: [ticketKeyCopy],
+  },
+  {
+    name: 'eslint rejects a string that copies the ticket-key pattern',
+    file: 'features/planted/ticket-key-text.ts',
+    source: `export const key = new RegExp('${ticketKeyPattern.replaceAll('\\', '\\\\')}');\n`,
+    tool: 'eslint',
+    expect: [ticketKeyCopy],
+  },
+  {
+    name: 'eslint rejects a copy of the ticket-key pattern in shared/ outside shared/actions.ts, which alone may hold it',
+    file: 'shared/planted-ticket-key.ts',
+    source: `export const key = /${ticketKeyPattern}/;\n`,
+    tool: 'eslint',
+    expect: [ticketKeyCopy],
   },
   {
     name: 'eslint rejects a dynamic import by its .js name',
@@ -385,7 +536,7 @@ const violations: readonly Violation[] = [
   },
   {
     name: 'dependency-cruiser rejects a Job reaching the database through a helper',
-    file: 'services/job/main.ts',
+    file: 'services/job/through-helper.ts',
     source: "import { helper } from '../../shared/helper.ts';\nexport const job = helper;\n",
     tool: 'depcruise',
     expect: ['job-has-no-database'],
@@ -393,6 +544,14 @@ const violations: readonly Violation[] = [
       { file: 'shared/helper.ts', source: "import { pool } from './db/pool.ts';\nexport const helper = pool;\n" },
       { file: 'shared/db/pool.ts', source: 'export const pool = 1;\n' },
     ],
+  },
+  {
+    name: "dependency-cruiser rejects a database driver in the bridge's Job side, which the Job entry point imports",
+    file: 'features/bridge/job.ts',
+    edit: { from: "import { spawn } from 'node:child_process';\n", to: "import { spawn } from 'node:child_process';\nimport 'pg';\n" },
+    tool: 'depcruise',
+    expect: ['job-has-no-database'],
+    rejects: 'services/job/main.ts',
   },
   {
     name: 'dependency-cruiser rejects a Kubernetes client in a Job',
@@ -640,6 +799,42 @@ const violations: readonly Violation[] = [
     expect: ['.claude/skills/linked is a symbolic link'],
   },
   {
+    name: 'the shape check rejects a nested tsconfig that turns on skipLibCheck',
+    file: 'features/alpha/tsconfig.json',
+    source: '{\n  "compilerOptions": {\n    "skipLibCheck": true\n  }\n}\n',
+    tool: 'shape',
+    expect: ['features/alpha/tsconfig.json names skipLibCheck'],
+  },
+  {
+    name: 'the shape check rejects a tsconfig that inherits skipLibCheck from a base under .claude/',
+    file: 'features/alpha/tsconfig.json',
+    source: '{\n  "extends": "../../.claude/base.json"\n}\n',
+    tool: 'shape',
+    expect: ['features/alpha/tsconfig.json names skipLibCheck or extends a config that turns it on'],
+    companions: [{ file: '.claude/base.json', source: '{\n  // agent tooling\n  "compilerOptions": { "skipLibCheck": true, },\n}\n' }],
+  },
+  {
+    name: 'the shape check rejects a tsconfig under a .claude folder below the root',
+    file: 'features/alpha/.claude/tsconfig.json',
+    source: '{\n  "compilerOptions": {\n    "skipLibCheck": true\n  }\n}\n',
+    tool: 'shape',
+    expect: ['features/alpha/.claude/tsconfig.json names skipLibCheck'],
+  },
+  {
+    name: 'the shape check rejects skipLibCheck passed to tsc in a package script, in any case',
+    file: 'lib/package.json',
+    source: '{\n  "scripts": {\n    "typecheck": "tsc --noEmit --SKIPLIBCHECK"\n  }\n}\n',
+    tool: 'shape',
+    expect: ['lib/package.json names skipLibCheck'],
+  },
+  {
+    name: 'the shape check rejects skipLibCheck passed to tsc in a workflow',
+    file: 'features/alpha/.github/workflows/typecheck.yml',
+    source: 'jobs:\n  typecheck:\n    steps:\n      - run: npx tsc --noEmit --skipLibCheck\n',
+    tool: 'shape',
+    expect: ['features/alpha/.github/workflows/typecheck.yml names skipLibCheck'],
+  },
+  {
     name: 'npm run check runs the shape check',
     file: 'docs/guide.md',
     linkTo: '../README.md',
@@ -795,6 +990,27 @@ const violations: readonly Violation[] = [
     expect: [`${plantedMigration}:2 holds the SQL comment "-- why"`],
   },
   {
+    name: 'migration-versions rejects two migrations that share a version',
+    file: clashingMigration,
+    source: markedMigration,
+    tool: 'migration-versions',
+    expect: [clash],
+  },
+  {
+    name: 'migration-versions rejects a migration with no version prefix',
+    file: 'db/migrations/planted.sql',
+    source: markedMigration,
+    tool: 'migration-versions',
+    expect: ['db/migrations/planted.sql has no version prefix'],
+  },
+  {
+    name: 'npm run check runs the migration-versions check',
+    file: clashingMigration,
+    source: markedMigration,
+    tool: 'check',
+    expect: ['shares version 20260923220000'],
+  },
+  {
     name: 'npm run check runs the SQL comment check',
     file: plantedMigration,
     source: explainedMigration,
@@ -918,6 +1134,78 @@ const violations: readonly Violation[] = [
     expect: [`names the step of ${codeChange} "land"`],
   },
   {
+    name: "step-names rejects a step's name in a page feature",
+    file: 'features/task-page/planted.tsx',
+    source: "export const next = 'implement';\n",
+    tool: 'step-names',
+    expect: [`features/task-page/planted.tsx:1 names the step of ${codeChange} "implement"`],
+  },
+  {
+    name: 'the import rules reject a dashboard file that imports a workflow',
+    file: 'services/dashboard/planted.ts',
+    source: `import { workflow } from '../../features/${codeChange}/workflow.ts';\n\nexport const planted = workflow.name;\n`,
+    tool: 'depcruise',
+    expect: ['dashboard-imports-no-engine-code'],
+  },
+  {
+    name: 'the import rules reject a plain orphan module in the dashboard',
+    file: 'services/dashboard/orphan.ts',
+    source: 'export const orphan = 1;\n',
+    tool: 'depcruise',
+    expect: ['no-orphans'],
+  },
+  {
+    name: 'contrast rejects a text color under its floor',
+    file: dashboardTokens,
+    edit: { from: "faint: '#666670',", to: "faint: '#a3a3ab'," },
+    tool: 'contrast',
+    expect: [`${dashboardTokens} light faint on`],
+  },
+  {
+    name: 'npm run check runs the contrast check',
+    file: dashboardTokens,
+    edit: { from: "faint: '#666670',", to: "faint: '#a3a3ab'," },
+    tool: 'check',
+    expect: ['light faint on'],
+  },
+  {
+    name: "the shape check rejects a strict flag turned off in the dashboard's config",
+    file: dashboardConfig,
+    edit: { from: '"moduleResolution": "bundler"', to: '"moduleResolution": "bundler",\n    "strict": false' },
+    tool: 'shape',
+    expect: [`${dashboardConfig} must extend ../../tsconfig.json`],
+  },
+  {
+    name: 'the shape check rejects a second nested tsconfig',
+    file: 'features/planted/tsconfig.json',
+    source: '{ "extends": "../../tsconfig.json", "compilerOptions": { "strict": false } }\n',
+    tool: 'shape',
+    expect: ['features/planted/tsconfig.json is a tsconfig beside the root one'],
+  },
+  {
+    name: "strict-schemas rejects an optional field in an agent step's output",
+    file: `features/${codeChange}/workflow.ts`,
+    edit: optionalVerifyField,
+    tool: 'strict-schemas',
+    expect: [optionalExtra],
+  },
+  {
+    name: 'strict-schemas rejects a block kind whose first field is not kind',
+    file: 'shared/review.ts',
+    edit: textBlockStartsWithBody,
+    tool: 'strict-schemas',
+    expect: [bodyFirst],
+  },
+  ...schemaPlants.map(([what, file, edit, line]): Violation => ({ name: `strict-schemas rejects ${what}`, file, edit, tool: 'strict-schemas', expect: [line] })),
+  {
+    name: 'npm run check runs the strict-schemas check',
+    file: `features/${codeChange}/workflow.ts`,
+    edit: optionalVerifyField,
+    tool: 'check',
+    expect: [optionalExtra],
+    rejects: optionalExtra,
+  },
+  {
     name: 'db-types rejects the committed types when a planted migration adds a table',
     file: plantedMigration,
     source: tableMigration,
@@ -947,6 +1235,69 @@ const violations: readonly Violation[] = [
     expect: ['TS2322', 'TS2741'],
   },
   {
+    name: 'tsc rejects a Checks record that has no check for a connector kind',
+    file: 'features/credentials/planted-checks.ts',
+    source: `${plantedCheck}\nexport const planted: Checks = { codex: check, github: check };\n`,
+    tool: 'tsc',
+    expect: ['TS2741'],
+  },
+  {
+    name: 'tsc rejects a raw login where AccessOnlyLogin is required',
+    file: 'features/credentials/planted-job.ts',
+    source: `${accessOnlyLoginFrom}\nexport const planted = launch('{"tokens": {"refresh_token": "rt"}}');\nexport const made = accessOnly;\n`,
+    tool: 'tsc',
+    expect: ['TS2345'],
+  },
+  {
+    name: 'tsc rejects owing an action on the database outside a transaction, so the owed row commits with the state that owes it',
+    file: 'features/planted/owe-outside.ts',
+    source: `${owing}export const oweOutside = (enqueue: Enqueue, db: Database): Promise<readonly string[]> => enqueue(db, owed, []);\n`,
+    tool: 'tsc',
+    expect: ['TS2345'],
+  },
+  {
+    name: 'tsc rejects owing an action in a transaction that inTransaction did not open',
+    file: 'features/planted/owe-own-transaction.ts',
+    source: `${owing}export const oweInOwnTransaction = (enqueue: Enqueue, db: Database): Promise<readonly string[]> => db.transaction().execute(tx => enqueue(tx, owed, []));\n`,
+    tool: 'tsc',
+    expect: ['TS2345'],
+  },
+  {
+    name: 'tsc rejects a model that declares a liveness property under INVARIANTS',
+    file: 'features/planted/verify.ts',
+    source: livenessModel('INVARIANTS'),
+    tool: 'tsc',
+    expect: ['TS2322'],
+  },
+  {
+    name: 'eslint rejects a type assertion that makes an AccessOnlyLogin',
+    file: 'features/credentials/planted-assertion.ts',
+    source: "import type { AccessOnlyLogin } from '../../shared/codex-login.ts';\n\nexport const login = '{}' as AccessOnlyLogin;\n",
+    tool: 'eslint',
+    expect: [noBrandAssertions],
+  },
+  {
+    name: 'eslint rejects a double assertion through unknown that makes a SealingKey',
+    file: 'features/credentials/planted-key-assertion.ts',
+    source: "import type { SealingKey } from './seal.ts';\n\nexport const key = {} as unknown as SealingKey;\n",
+    tool: 'eslint',
+    expect: [noBrandAssertions],
+  },
+  {
+    name: 'eslint rejects an angle-bracket assertion to a brand keyed by a symbol the file declares',
+    file: 'features/planted/marked.ts',
+    source: "const mark = Symbol('mark');\n\ntype Marked = string & { readonly [mark]: true };\n\nexport const marked = <Marked>'text';\n",
+    tool: 'eslint',
+    expect: [noBrandAssertions],
+  },
+  {
+    name: 'eslint rejects a type predicate that narrows a string to a zod brand',
+    file: 'features/planted/predicate.ts',
+    source: "import { z } from 'zod';\n\nconst name = z.string().brand<'Name'>();\n\ntype Name = z.infer<typeof name>;\n\nexport const isName = (text: string): text is Name => text !== '';\nexport const parsed = name.parse('ada');\n",
+    tool: 'eslint',
+    expect: [noBrandAssertions],
+  },
+  {
     name: 'tsc rejects a step kind built without step(), so every verdict comes from the declared output',
     file: `features/${codeChange}/planted-kind.ts`,
     source: `import { review } from '../../shared/review.ts';\nimport type { StepKind } from '../../shared/workflow.ts';\n\nexport const planted: StepKind = { ${plantedStep}, blocked: 'fail', judge: () => 'pass' };\n`,
@@ -967,6 +1318,115 @@ const violations: readonly Violation[] = [
     tool: 'tsc',
     expect: ['TS2322'],
   },
+  {
+    name: 'ci-plan rejects a uses: step other than actions/checkout, and names it',
+    file: ciWorkflow,
+    edit: setupNodeStep,
+    tool: 'ci-plan',
+    expect: [unknownStep],
+  },
+  {
+    name: 'ci-plan rejects a run: step outside the verify container',
+    file: ciWorkflow,
+    edit: afterDoctor('      - run: npm test\n'),
+    tool: 'ci-plan',
+    expect: [`${ciWorkflow} job check step 7 runs "npm test", which ci-local cannot run`],
+  },
+  {
+    name: 'ci-plan rejects a verify step that needs a shell',
+    file: ciWorkflow,
+    edit: afterDoctor('      - run: docker compose run --rm verify npm test && echo done\n'),
+    tool: 'ci-plan',
+    expect: [`${ciWorkflow} job check step 7 runs "docker compose run --rm verify npm test && echo done", which ci-local cannot run`],
+  },
+  {
+    name: 'ci-plan rejects a block scalar',
+    file: ciWorkflow,
+    edit: afterDoctor('      - run: |\n          npm test\n'),
+    tool: 'ci-plan',
+    expect: ['which starts with |, and the ci-local reader does not read that form'],
+  },
+  {
+    name: 'ci-plan rejects a job key it does not run, such as env',
+    file: ciWorkflow,
+    edit: { from: '  models:\n    runs-on: ubuntu-24.04\n', to: '  models:\n    env:\n      PLANTED: one\n    runs-on: ubuntu-24.04\n' },
+    tool: 'ci-plan',
+    expect: [`${ciWorkflow} jobs.models: Unrecognized key: "env"`],
+  },
+  {
+    name: 'npm run check runs the local CI plan',
+    file: ciWorkflow,
+    edit: setupNodeStep,
+    tool: 'check',
+    expect: [unknownStep],
+  },
+];
+
+const screenFixture = (name: string): string => `tools/verify/screens/fixtures/${name}.html`;
+
+const screenGateCases: readonly Violation[] = [
+  ...plantIds.map(
+    (id): Violation => ({
+      name: `screen-gates fails ${id} on a copy of ${plantedFixture} that holds its plant`,
+      file: screenFixture(plantedFixture),
+      edit: { from: plantAnchor, to: `${plantAnchor}${plants[id]}` },
+      tool: 'screen-gates',
+      expect: [`FAIL  ${plantedFixture} ${id}`],
+    }),
+  ),
+  {
+    name: 'screen-gates voids the run when the busy control stops failing every clutter gate',
+    file: screenFixture('task-a-live'),
+    edit: { from: '</style>', to: 'body > * { display: none; }</style>' },
+    tool: 'screen-gates',
+    expect: ['FAIL  control task-a-live fails at least one clutter gate'],
+  },
+  {
+    name: 'screen-gates counts the words in the summary of a closed details, which a person sees',
+    file: screenFixture(plantedFixture),
+    edit: { from: plantAnchor, to: `${plantAnchor}<details><summary>${plants['clutter.words']}</summary></details>` },
+    tool: 'screen-gates',
+    expect: [`FAIL  ${plantedFixture} clutter.words`],
+  },
+];
+
+const screenGateAllowances: readonly Allowance[] = [
+  {
+    name: 'screen-gates skips the words, controls, and boxes inside a closed details, which a person cannot see',
+    file: screenFixture(plantedFixture),
+    edit: { from: plantAnchor, to: `${plantAnchor}<details style="position:absolute">${plants['clutter.words']}${plants['clutter.controls']}${plants['clutter.boxes']}</details>` },
+    tool: 'screen-gates',
+  },
+];
+
+const reviewedPacket = 'tools/verify/screens/fixtures/reviewed';
+
+const firstReview = `${reviewedPacket}/task.r1.json`;
+
+const reviewRejected = 'FAIL  task.r1.json parses against review.schema.json and fits the packet';
+
+const screenReviewCases: readonly Violation[] = [
+  {
+    name: 'screen-review rejects a review that lowers a score only for what a later unit adds',
+    file: firstReview,
+    edit: { from: '"agent":5', to: '"agent":3' },
+    tool: 'screen-review',
+    expect: [reviewRejected],
+  },
+  {
+    name: 'screen-review rejects a problem that waits for an item the scope note does not list',
+    file: firstReview,
+    edit: { from: '"later":"message-box"', to: '"later":"top-bar-links"' },
+    tool: 'screen-review',
+    expect: [reviewRejected],
+  },
+  {
+    name: 'screen-review fails a screen that lacks what its own unit owns, whatever the scope note defers',
+    file: firstReview,
+    edit: { from: '"actionability":4', to: '"actionability":2' },
+    tool: 'screen-review',
+    expect: ['FAIL  task-a-revised scores 4 or higher on every scored dimension'],
+  },
 ];
 
 const plantedModel: Violation = {
@@ -977,7 +1437,259 @@ const plantedModel: Violation = {
   expect: ['FAIL  planted-model: the planted model holds'],
 };
 
+const plantedLiveness: Violation = {
+  name: 'npm run verify -- models refuses a config that files a liveness property under INVARIANTS',
+  file: 'features/planted/Planted.cfg',
+  source: 'SPECIFICATION Spec\n\nCONSTANTS\n    Limit = 2\n    Fair = TRUE\n\nINVARIANTS\n    TypeOK\n    Settles\n',
+  tool: 'models',
+  expect: ['Settles is a liveness property, so TLC checks it only under PROPERTIES'],
+  companions: [{ file: 'features/planted/verify.ts', source: livenessModel('PROPERTIES') }, { file: 'features/planted/Planted.tla', source: plantedSpec }],
+};
+
+const raiseFile = (raise: Readonly<Record<string, number>>): string => `${JSON.stringify({ why: 'planted by guardrails', raise }, null, 2)}\n`;
+
+const plantedRaise = 'budget/raises/planted.json';
+
+const plantedStates: Violation = {
+  name: 'npm run verify -- models fails a model that explores more distinct states than its ceiling',
+  file: plantedRaise,
+  source: raiseFile({ 'states/Planted': 1 }),
+  tool: 'models',
+  expect: ['Planted explores 3 distinct states, over its ceiling of 1'],
+  companions: [
+    { file: 'features/planted/verify.ts', source: livenessModel('PROPERTIES') },
+    { file: 'features/planted/Planted.tla', source: settlingSpec },
+    { file: 'features/planted/Planted.cfg', source: 'SPECIFICATION Spec\n\nCONSTANTS\n    Limit = 2\n    Fair = TRUE\n\nINVARIANTS\n    TypeOK\n\nPROPERTIES\n    Settles\n' },
+  ],
+};
+
+const grownProduct = 'features/tasks/grown.ts';
+
+const grownSource = 'export const grown = 1;\n';
+
+const overProductLines = `${budgetFile} lines/product is`;
+
+const budgetViolations: readonly Violation[] = [
+  {
+    name: 'the budget check rejects a product file past the product ceiling',
+    file: grownProduct,
+    source: grownSource,
+    tool: 'budget',
+    expect: [overProductLines],
+  },
+  {
+    name: 'the budget check rejects product code that makes room by deleting verification code',
+    file: grownProduct,
+    source: grownSource,
+    tool: 'budget',
+    expect: [overProductLines],
+    companions: [{ file: 'features/credentials/seal.test.ts', edit: { from: 'const samples = 10_000;\nconst longestSecret = 2048;\n', to: 'const samples = 10_000;\n' } }],
+  },
+  {
+    name: 'the budget check rejects a line past its role longest-line ceiling, even when a raise covers the lines',
+    file: 'features/tasks/wide.ts',
+    source: `export const wide = '${'w'.repeat(400)}';\n`,
+    tool: 'budget',
+    expect: ['features/tasks/wide.ts:1 is 423 characters wide, over the longest-line/product ceiling'],
+    companions: [{ file: plantedRaise, source: raiseFile({ 'lines/product': 1, 'characters/product': 1000 }) }],
+  },
+  {
+    name: 'the budget check rejects a raise of a longest-line ceiling',
+    file: plantedRaise,
+    source: raiseFile({ 'longest-line/product': 100 }),
+    tool: 'budget',
+    expect: [`${plantedRaise} names longest-line/product. A longest-line ceiling only goes down`],
+  },
+  {
+    name: 'npm run check runs the budget check',
+    file: grownProduct,
+    source: grownSource,
+    tool: 'check',
+    expect: [overProductLines],
+    rejects: budgetFile,
+  },
+];
+
+const budgetFixture = 'tools/verify/fixtures/planted.html';
+
+const wideFixture = `<p>${'f'.repeat(900)}</p>\n`;
+
+const fixtureViolation: Violation = {
+  name: 'the budget check still counts fixture lines against the fixtures ceiling',
+  file: budgetFixture,
+  source: wideFixture,
+  tool: 'budget',
+  expect: [`${budgetFile} lines/fixtures is`],
+};
+
+const budgetAllowances: readonly Allowance[] = [
+  {
+    name: 'the budget check accepts a product file that a raise file covers',
+    file: grownProduct,
+    source: grownSource,
+    tool: 'budget',
+    companions: [{ file: plantedRaise, source: raiseFile({ 'lines/product': 1, 'characters/product': 20 }) }],
+  },
+  {
+    name: 'the budget check skips a binary file and says so',
+    file: 'tools/verify/planted.woff2',
+    source: `wOF2\u0000${'x'.repeat(1000)}\n`,
+    tool: 'budget',
+    shows: 'tools/verify/planted.woff2 holds a NUL byte or is not UTF-8, so the budget skips it.',
+  },
+  {
+    name: 'the budget check holds a fixture to no longest-line ceiling once a raise covers its lines',
+    file: budgetFixture,
+    source: wideFixture,
+    tool: 'budget',
+    companions: [{ file: plantedRaise, source: raiseFile({ 'lines/fixtures': 1, 'characters/fixtures': 1000 }) }],
+  },
+  {
+    name: 'the budget check holds a markdown line to no longest-line ceiling once a raise covers its lines',
+    file: 'docs/planted.md',
+    source: `| ${'row '.repeat(1500)}|\n`,
+    tool: 'budget',
+    companions: [{ file: plantedRaise, source: raiseFile({ 'lines/docs': 1, 'characters/docs': 5000 }) }],
+  },
+];
+
+const committer: Readonly<Record<string, string>> = {
+  GIT_AUTHOR_NAME: 'guardrails',
+  GIT_AUTHOR_EMAIL: 'guardrails@example.invalid',
+  GIT_COMMITTER_NAME: 'guardrails',
+  GIT_COMMITTER_EMAIL: 'guardrails@example.invalid',
+};
+
+function gitIn(copy: string, args: readonly string[]): string {
+  const result = spawnSync('git', args, { cwd: copy, encoding: 'utf8', env: { ...process.env, ...committer } });
+  if (result.status !== 0) throw new Error(`git ${args.join(' ')} failed in the copy: ${result.stderr.trim()}`);
+  return result.stdout;
+}
+
+type Commit = { readonly name: string; readonly write: (copy: string) => Promise<void>; readonly expect: string | undefined };
+
+const lowerFeatures = async (copy: string): Promise<void> => {
+  const path = join(copy, budgetFile);
+  const text = await readFile(path, 'utf8');
+  const lowered = text.replace(/("features": \{\s*"why": "[^"]*",\s*"ceiling": )(\d+)/, (_all, head: string, ceiling: string) => `${head}${String(Number(ceiling) - 1)}`);
+  if (lowered === text) throw new Error(`${budgetFile} has no structure.features ceiling for the case to lower. Update the case to match the file.`);
+  await writeFile(path, lowered);
+};
+
+const writePlant = (file: string, source: string) => async (copy: string): Promise<void> => {
+  await mkdir(dirname(join(copy, file)), { recursive: true });
+  await writeFile(join(copy, file), source);
+};
+
+const commits: readonly Commit[] = [
+  {
+    name: 'the range check rejects a commit that raises a ceiling and changes code',
+    write: async copy => {
+      await writePlant(plantedRaise, raiseFile({ 'lines/product': 1, 'characters/product': 20 }))(copy);
+      await writePlant(grownProduct, grownSource)(copy);
+    },
+    expect: `raises characters/product from`,
+  },
+  { name: 'the range check accepts a commit that only raises a ceiling', write: writePlant(plantedRaise, raiseFile({ 'lines/product': 1 })), expect: undefined },
+  {
+    name: 'the range check accepts a commit that lowers a ceiling beside a code change',
+    write: async copy => {
+      await lowerFeatures(copy);
+      await writePlant(grownProduct, grownSource)(copy);
+    },
+    expect: undefined,
+  },
+];
+
+async function commitChecks(copy: string): Promise<readonly Check[]> {
+  gitIn(copy, ['init', '--quiet']);
+  await writeFile(join(copy, '.git', 'info', 'exclude'), 'node_modules\n');
+  gitIn(copy, ['add', '--all']);
+  gitIn(copy, ['commit', '--quiet', '--message', 'base']);
+  const checks: Check[] = [];
+  for (const commit of commits) {
+    await commit.write(copy);
+    gitIn(copy, ['add', '--all']);
+    gitIn(copy, ['commit', '--quiet', '--message', commit.name]);
+    const outcome = spawnSync('npm', ['run', '--silent', 'budget', '--', '--since', 'HEAD~1'], { cwd: copy, encoding: 'utf8' });
+    const output = `${outcome.stdout}${outcome.stderr}`;
+    const rejected = outcome.status !== 0;
+    const judged = commit.expect === undefined ? !rejected : rejected && output.includes(commit.expect) && output.includes(`also changes ${grownProduct}`);
+    checks.push(judged ? pass(commit.name, output.trim().split('\n')[0] ?? '') : fail(commit.name, `exit ${String(outcome.status)}: ${output.trim().split('\n').slice(0, 2).join(' | ')}`));
+    gitIn(copy, ['reset', '--hard', '--quiet', 'HEAD~1']);
+  }
+  return checks;
+}
+
+async function withRoom(copy: string): Promise<void> {
+  const loaded = loadBudget(diskSource(copy));
+  if ('unreadable' in loaded) throw new Error(loaded.unreadable);
+  const room = new Map([...ceilingsOf(loaded.budget)].map(([key]): [string, number] => [key, roomyCeiling]));
+  await writeFile(join(copy, budgetFile), `${JSON.stringify(withCeilings(loaded.budget, room), null, 2)}\n`);
+}
+
+const roomyCeiling = 1_000_000_000;
+
 const allowances: readonly Allowance[] = [
+  {
+    name: 'the import rules accept a new dashboard page that imports nothing, because Next loads it by its path',
+    file: plantedPage,
+    source: plainPage,
+    tool: 'depcruise',
+  },
+  {
+    name: 'tsc accepts a new dashboard page, which the dashboard config checks',
+    file: plantedPage,
+    source: plainPage,
+    tool: 'tsc',
+  },
+  {
+    name: 'strict-schemas accepts a $ref that the schema defines',
+    file: 'shared/review.ts',
+    edit: refToSummary('#/properties/outcome'),
+    tool: 'strict-schemas',
+  },
+  {
+    name: 'ci-plan runs a new run: step in the verify container with no code change',
+    file: ciWorkflow,
+    edit: {
+      from: '      - run: docker compose run --rm verify npm run verify -- jira\n',
+      to: '      - run: docker compose run --rm verify npm run verify -- jira\n      - run: docker compose run --rm verify npm run verify -- planted --seeds 3\n',
+    },
+    tool: 'ci-plan',
+    shows: 'simulation: docker compose run --rm -T verify npm run verify -- planted --seeds 3\n',
+  },
+  {
+    name: 'tsc accepts a review step that owes a ticket comment, a kind the review allow-list holds',
+    file: 'features/planted/requests.ts',
+    source:
+      "import { actionKinds } from '../../shared/actions.ts';\nimport { reviewOwes, type ReviewStep } from '../code-change/land.ts';\n\nexport const requesting: ReviewStep = (pull, task) => ({ actions: [reviewOwes(actionKinds.ticketComment, { ticket: task.key, text: `Please review ${pull.repository}.`, linkPullRequest: true })], note: 'The planted step asked for a review.' });\n",
+    tool: 'tsc',
+  },
+  {
+    name: 'eslint accepts as const, and an assertion that widens a branded value to its base type',
+    file: 'features/planted/assertions.ts',
+    source: "import { z } from 'zod';\n\nconst name = z.string().brand<'Name'>();\n\nexport const names = ['ada'] as const;\nexport const plain = name.parse('ada') as string;\n",
+    tool: 'eslint',
+  },
+  {
+    name: 'tsc accepts a Checks record that has a check for every connector kind',
+    file: 'features/credentials/planted-checks.ts',
+    source: `${plantedCheck}\nexport const planted: Checks = { codex: check, github: check, jira: check };\n`,
+    tool: 'tsc',
+  },
+  {
+    name: 'tsc accepts a login that accessOnly made where AccessOnlyLogin is required',
+    file: 'features/credentials/planted-job.ts',
+    source: `${accessOnlyLoginFrom}\nconst copy = accessOnly('{}');\nexport const planted = 'login' in copy ? launch(copy.login) : copy.reason;\n`,
+    tool: 'tsc',
+  },
+  {
+    name: 'tsc accepts owing an action in the transaction inTransaction opened',
+    file: 'features/planted/owe-inside.ts',
+    source: `import { inTransaction } from '../../shared/transaction.ts';\n${owing}export const oweInside = (enqueue: Enqueue, db: Database): Promise<readonly string[]> => inTransaction(db, tx => enqueue(tx, owed, []));\n`,
+    tool: 'tsc',
+  },
   {
     name: 'eslint accepts a shebang on line 1, as an editor parses it',
     file: 'features/planted/cli.ts',
@@ -1027,6 +1739,12 @@ const allowances: readonly Allowance[] = [
     name: 'the shape check accepts the packages that agent tooling installs under .claude/',
     file: '.claude/skills/poteto-mode/scripts/node_modules/.bin/tsc',
     linkTo: '../typescript/bin/tsc',
+    tool: 'shape',
+  },
+  {
+    name: 'the shape check accepts skipLibCheck in a tsconfig of agent tooling under .claude/',
+    file: '.claude/skills/planted/scripts/tsconfig.json',
+    source: '{\n  "compilerOptions": {\n    "skipLibCheck": true\n  }\n}\n',
     tool: 'shape',
   },
   {
@@ -1192,9 +1910,37 @@ const tools: Record<
     command: () => ['npm', 'run', '--silent', 'step-names'],
     caught: startsALine,
   },
+  'strict-schemas': {
+    command: () => ['npm', 'run', '--silent', 'strict-schemas'],
+    caught: startsALine,
+  },
+  'ci-plan': {
+    command: () => ['npm', 'run', '--silent', 'ci-plan'],
+    caught: (outcome, _file, code) => outcome.output.includes(code),
+  },
   'db-types': {
     command: () => ['npm', 'run', '--silent', 'db-types'],
     caught: startsALine,
+  },
+  'migration-versions': {
+    command: () => ['npm', 'run', '--silent', 'migration-versions'],
+    caught: startsALine,
+  },
+  'screen-gates': {
+    command: () => ['npm', 'run', '--silent', 'verify', '--', 'screen-gates', '--repeat', '1'],
+    caught: startsALine,
+  },
+  'screen-review': {
+    command: () => ['npm', 'run', '--silent', 'verify', '--', 'screen-review', 'task', '--judge', '--packet', reviewedPacket],
+    caught: startsALine,
+  },
+  contrast: {
+    command: () => ['npm', 'run', '--silent', 'contrast'],
+    caught: startsALine,
+  },
+  budget: {
+    command: () => ['npm', 'run', '--silent', 'budget'],
+    caught: (outcome, _file, code) => outcome.output.includes(code),
   },
   models: {
     command: () => ['npm', 'run', '--silent', 'verify', '--', 'models'],
@@ -1203,7 +1949,7 @@ const tools: Record<
 };
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
-const skipped = new Set(['node_modules', '.git', '.claude']);
+const skipped = new Set(['node_modules', '.git', '.claude', '.next']);
 
 function run(tool: Tool, copy: string, file: string, env: Readonly<Record<string, string>> = {}): Outcome {
   const [executable, ...args] = tools[tool].command(copy, file);
@@ -1212,23 +1958,30 @@ function run(tool: Tool, copy: string, file: string, env: Readonly<Record<string
 }
 
 async function withPlanted(copy: string, plants: readonly Plant[], judge: () => Check): Promise<Check> {
-  const created: string[] = [];
+  const undo: (() => Promise<void>)[] = [];
   for (const plant of plants) {
     const path = join(copy, plant.file);
+    if (plant.edit !== undefined) {
+      const original = await readFile(path, 'utf8');
+      if (original.split(plant.edit.from).length !== 2) throw new Error(`${plant.file} must hold "${plant.edit.from}" exactly once for the case to edit it. Update the case to match the file.`);
+      await writeFile(path, original.replace(plant.edit.from, plant.edit.to));
+      undo.push(() => writeFile(path, original));
+      continue;
+    }
     const occupied = await lstat(path).then(
       () => true,
       () => false,
     );
     if (occupied) throw new Error(`${plant.file} already exists in the repository, and planting there would delete it. Plant the case at a path the repository does not use.`);
     const firstNewFolder = await mkdir(dirname(path), { recursive: true });
-    created.push(firstNewFolder ?? path);
+    undo.push(() => rm(firstNewFolder ?? path, { recursive: true, force: true }));
     if (plant.linkTo === undefined) await writeFile(path, plant.source);
     else await symlink(plant.linkTo, path);
   }
   try {
     return judge();
   } finally {
-    for (const path of created.toReversed()) await rm(path, { recursive: true, force: true });
+    for (const restore of undo.toReversed()) await restore();
   }
 }
 
@@ -1244,7 +1997,8 @@ const reject = (copy: string, violation: Violation): Promise<Check> =>
 const accept = (copy: string, allowance: Allowance): Promise<Check> =>
   withPlanted(copy, [allowance, ...(allowance.companions ?? [])], () => {
     const outcome = run(allowance.tool, copy, allowance.file, allowance.env);
-    return outcome.status === 0 ? pass(allowance.name, 'accepted') : fail(allowance.name, (tools[allowance.tool].summary ?? firstLines)(outcome));
+    if (outcome.status !== 0) return fail(allowance.name, (tools[allowance.tool].summary ?? firstLines)(outcome));
+    return allowance.shows === undefined || outcome.output.includes(allowance.shows) ? pass(allowance.name, 'accepted') : fail(allowance.name, `accepted without printing "${allowance.shows}"`);
   });
 
 async function withCopy(work: (copy: string) => Promise<readonly Check[]>, leftOut: readonly string[] = []): Promise<readonly Check[]> {
@@ -1263,16 +2017,24 @@ export const guardrails: Scenario = {
   summary: 'plants each violation a check must reject and each line it must accept, and proves both',
   run: async () => [
     ...(await withCopy(async copy => {
-      const checks: Check[] = (['tsc', 'eslint', 'depcruise', 'shape', 'sql-comments', 'model-names', 'step-names', 'db-types'] as const).map(tool => {
+      await withRoom(copy);
+      const checks: Check[] = (['tsc', 'eslint', 'depcruise', 'shape', 'sql-comments', 'migration-versions', 'model-names', 'step-names', 'strict-schemas', 'ci-plan', 'db-types', 'screen-gates', 'screen-review', 'contrast'] as const).map(tool => {
         const clean = run(tool, copy, '.');
         const name = `the unplanted copy passes ${tool}`;
         const problem = clean.status === 0 ? tools[tool].unclean?.(clean) : (tools[tool].summary ?? firstLines)(clean);
         return problem === undefined ? pass(name, '') : fail(name, problem);
       });
-      for (const violation of violations) checks.push(await reject(copy, violation));
-      for (const allowance of allowances) checks.push(await accept(copy, allowance));
+      for (const violation of [...violations, ...screenGateCases, ...screenReviewCases]) checks.push(await reject(copy, violation));
+      for (const allowance of [...allowances, ...screenGateAllowances]) checks.push(await accept(copy, allowance));
       return checks;
     })),
-    ...(await withCopy(async copy => [await reject(copy, plantedModel)], ['features'])),
+    ...(await withCopy(async copy => {
+      const clean = run('budget', copy, '.');
+      const checks: Check[] = [clean.status === 0 ? pass('the unplanted copy passes budget', '') : fail('the unplanted copy passes budget', firstLines(clean))];
+      for (const violation of [...budgetViolations, fixtureViolation]) checks.push(await reject(copy, violation));
+      for (const allowance of budgetAllowances) checks.push(await accept(copy, allowance));
+      return [...checks, ...(await commitChecks(copy))];
+    })),
+    ...(await withCopy(async copy => [await reject(copy, plantedModel), await reject(copy, plantedLiveness), await reject(copy, plantedStates)], ['features'])),
   ],
 };
