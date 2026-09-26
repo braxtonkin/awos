@@ -19,7 +19,7 @@ export async function saveRepositorySettings(_previous: SaveState, form: FormDat
   const db = database();
   const id = randomUUID();
   try {
-    const sent = await request(db, { id, person, at: new Date(), kind: 'save_repository', target: null, payload: parsed.save });
+    const sent = await request(db, { id, person, at: new Date(), kind: 'save_repository', target: parsed.saving.target, payload: parsed.saving.save });
     if ('refused' in sent) throw new Error(`The new request id ${id} was already taken.`);
   } catch (error) {
     const refused = refusal(error);

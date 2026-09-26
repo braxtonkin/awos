@@ -5,7 +5,7 @@ import { sql } from 'kysely';
 import { z } from 'zod';
 import { connect, type Database } from '../../shared/db/client.ts';
 import { neverStops, runLoop, type Clock, type Loop } from '../../shared/loop.ts';
-import { request, requestKinds, type Asked, type PayloadOf, type RequestKind, type TargetKind } from '../../shared/requests.ts';
+import { request, requestKinds, targetValues, type Asked, type PayloadOf, type RequestKind, type TargetKind } from '../../shared/requests.ts';
 import { note } from '../../shared/review.ts';
 import { inTransaction, type Transacting } from '../../shared/transaction.ts';
 import type { TestPostgres } from '../../tools/verify/postgres.ts';
@@ -29,7 +29,7 @@ type Mutant = { readonly guard: Guard; readonly breaks: PropertyName; readonly p
 const claimAny: Claim = tx =>
   tx
     .selectFrom('person_request as request')
-    .select(eb => ['request.id', 'request.kind', 'request.person_id as person', eb.fn.coalesce('request.task_id', 'request.routine_id').$castTo<string>().as('target'), 'request.payload'])
+    .select(eb => ['request.id', 'request.kind', 'request.person_id as person', eb.fn.coalesce('request.task_id', 'request.routine_id', 'request.repository_id').$castTo<string>().as('target'), 'request.payload'])
     .where('request.answer', 'is', null)
     .orderBy('request.at')
     .orderBy('request.id')
@@ -173,10 +173,10 @@ const realWaitMs = 5_000;
 
 const kindsOn: Readonly<Record<TargetKind, readonly RequestKind[]>> = { task: ['stop', 'retry', 'approve'], routine: ['pause', 'resume', 'run_now', 'save_routine'], repository: ['save_repository'] };
 
-const newRoutineOdds = 0.3;
+const newTargetOdds = 0.3;
 
 const saved: PayloadOf<'save_repository'> = {
-  repository: { kind: 'listed', id: '1' },
+  github: null,
   branch: 'main',
   image: null,
   fastTestCommand: null,
@@ -333,9 +333,9 @@ const askFor = (world: World, id: string, target: Target, kind: RequestKind): As
     case 'steer':
       return { ...base, kind, payload: { message: 'Also check the edge case.' } };
     case 'save_routine':
-      return world.random() < newRoutineOdds ? { ...base, target: null, kind, payload: { ...draft, from: null } } : { ...base, kind, payload: draft };
+      return world.random() < newTargetOdds ? { ...base, target: null, kind, payload: { ...draft, from: null } } : { ...base, kind, payload: draft };
     case 'save_repository':
-      return { ...base, target: null, kind, payload: { ...saved, repository: { kind: 'listed', id: target.id }, fastTestCommand: `npm test -- --seed ${String(Math.floor(world.random() * 1e9))}` } };
+      return world.random() < newTargetOdds ? { ...base, target: null, kind, payload: { ...saved, github: `example/new-${id.slice(0, 8)}` } } : { ...base, kind, payload: { ...saved, fastTestCommand: `npm test -- --seed ${String(Math.floor(world.random() * 1e9))}` } };
   }
 };
 
@@ -429,7 +429,7 @@ async function race(world: World): Promise<string> {
     let settled = false;
     let pending: Promise<unknown> = Promise.resolve();
     const { state, passed } = await slow.transaction().execute(async tx => {
-      await tx.insertInto('person_request').values({ id: first.id, person_id: first.person, at: first.at, kind: first.kind, payload: JSON.stringify(first.payload), ...(first.target === null ? {} : target.on === 'task' ? { task_id: first.target } : { routine_id: first.target }) }).execute();
+      await tx.insertInto('person_request').values({ id: first.id, person_id: first.person, at: first.at, kind: first.kind, payload: JSON.stringify(first.payload), ...targetValues(first.kind, first.target) }).execute();
       pending = request(fast, second).then(() => {
         settled = true;
       });

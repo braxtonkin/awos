@@ -930,7 +930,7 @@ async function engineSavesRepository(world: SetupWorld): Promise<Outcome> {
   const person = (await world.engine.selectFrom('person').select('id').where('email', '=', 'ada@example.com').executeTakeFirstOrThrow()).id;
   const repository = (await world.engine.selectFrom('repository').select('id').where('github', '=', sandboxRepository.github).executeTakeFirstOrThrow()).id;
   const saved: RepositorySave = {
-    repository: { kind: 'listed', id: repository },
+    github: null,
     branch: 'main',
     image: sandboxImage,
     fastTestCommand: 'npm run test:quick',
@@ -942,11 +942,21 @@ async function engineSavesRepository(world: SetupWorld): Promise<Outcome> {
   };
   const good = randomUUID();
   const planted = randomUUID();
-  await request(world.engine, { id: good, person, at: new Date(), kind: 'save_repository', target: null, payload: saved });
-  await request(world.engine, { id: planted, person, at: new Date(), kind: 'save_repository', target: null, payload: { ...saved, fastTestCommand: 'npm run never', verifyProvider: 'made-up' } });
-  const answers = async (): Promise<readonly (RequestAnswer | undefined)[]> => Promise.all([answerOf(world.engine, good), answerOf(world.engine, planted)]);
+  const added = randomUUID();
+  await request(world.engine, { id: good, person, at: new Date(), kind: 'save_repository', target: repository, payload: saved });
+  await request(world.engine, { id: planted, person, at: new Date(), kind: 'save_repository', target: repository, payload: { ...saved, fastTestCommand: 'npm run never', verifyProvider: 'made-up' } });
+  await request(world.engine, { id: added, person, at: new Date(), kind: 'save_repository', target: null, payload: { ...saved, github: 'example/other' } });
+  const answers = async (): Promise<readonly (RequestAnswer | undefined)[]> => Promise.all([answerOf(world.engine, good), answerOf(world.engine, planted), answerOf(world.engine, added)]);
   const run = await engineUntil(world.url, async () => (await answers()).every(answer => answer !== 'waiting'));
-  const [kept, refusedPlant] = await answers();
+  const [kept, refusedPlant, addedAnswer] = await answers();
+  const addedAction = await world.engine
+    .selectFrom('human_action')
+    .innerJoin('repository', 'repository.id', 'human_action.repository_id')
+    .select(['human_action.kind', 'repository.github', 'repository.branch'])
+    .where('human_action.id', '=', added)
+    .executeTakeFirst();
+  const lines = await world.engine.selectFrom('person_request').select(['id', 'target', 'position']).where('id', 'in', [good, planted, added]).execute();
+  const placeOf = (id: string) => lines.find(line => line.id === id);
   const row = await world.engine.selectFrom('repository').select(['fast_test_command', 'saved_by']).where('id', '=', repository).executeTakeFirstOrThrow();
   const action = await world.engine
     .selectFrom('human_action')
@@ -959,6 +969,10 @@ async function engineSavesRepository(world: SetupWorld): Promise<Outcome> {
     ...(isDeepStrictEqual(kept, { recorded: good }) ? [] : [`the save was answered ${JSON.stringify(kept)}, not recorded`]),
     ...(isDeepStrictEqual(action, { kind: 'edit_repository', repository_id: repository, email: 'ada@example.com' }) ? [] : [`the save's action is ${JSON.stringify(action)}, not Ada's edit_repository`]),
     ...(typeof refusedPlant === 'object' && 'refused' in refusedPlant && refusedPlant.refused.includes('made-up') ? [] : [`the planted unpublished provider was answered ${JSON.stringify(refusedPlant)}, not refused by name`]),
+    ...(isDeepStrictEqual(addedAnswer, { recorded: added }) && isDeepStrictEqual(addedAction, { kind: 'add_repository', github: 'example/other', branch: 'main' }) ? [] : [`the new repository's save was answered ${JSON.stringify(addedAnswer)} with the action ${JSON.stringify(addedAction)}, not an add_repository of example/other`]),
+    ...(isDeepStrictEqual(placeOf(good), { id: good, target: `repository ${repository}`, position: 1 }) && isDeepStrictEqual(placeOf(planted), { id: planted, target: `repository ${repository}`, position: 2 }) && isDeepStrictEqual(placeOf(added), { id: added, target: `new ${added}`, position: 1 })
+      ? []
+      : [`the saves queued as ${JSON.stringify(lines)}, not two in line on the repository and the new one on its own`]),
     ...(row.fast_test_command === 'npm run test:quick' && row.saved_by === good ? [] : [`the row holds ${JSON.stringify(row)} after the refused plant`]),
   ];
   return { problems, detail: `recorded ${good} as edit_repository; the plant was refused: ${typeof refusedPlant === 'object' && 'refused' in refusedPlant ? refusedPlant.refused : 'no'}` };
@@ -1053,7 +1067,7 @@ const setupChecks: readonly Entry[] = [
   { name: 'the engine saves a routine through a save_routine request as version 2, and refuses a planted routine naming a workflow it did not publish', run: inSetup(savesThroughTheEngine) },
   { name: 'two people with one Jira account id are refused by Postgres, and the people section rolls back', run: inSetup(duplicateAccountRollsBack) },
   { name: 'after setup, the dashboard role cannot select a sealed column', run: inSetup(dashboardCannotReadSetupLogins) },
-  { name: "the engine applies a save_repository request through saveRepository as the person's edit_repository, and refuses a Verify provider it did not publish by name", run: inSetup(engineSavesRepository) },
+  { name: "the engine applies a save_repository request on a listed repository as the person's edit_repository in its line, refuses a Verify provider it did not publish by name, and adds a new repository from a save that names none", run: inSetup(engineSavesRepository) },
   { name: repeatLimit, run: postgres => setupSpeed(postgres) },
   { name: 'the speed check fails when each repeat apply starts late by the median fresh apply so far', run: slowRepeatFails },
 ];

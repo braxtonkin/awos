@@ -11,10 +11,10 @@ export const draftLeaves = z.enum(['when-green', 'at-once']);
 
 export type DraftLeaves = z.output<typeof draftLeaves>;
 
-const repositoryId = z.string().regex(/^[1-9]\d*$/, { error: 'must be the id of a listed repository' });
+export const repositoryId = z.string().regex(/^[1-9]\d*$/, { error: 'must be the id of a listed repository' });
 
 export const repositorySave = z.strictObject({
-  repository: z.discriminatedUnion('kind', [z.strictObject({ kind: z.literal('new'), github }), z.strictObject({ kind: z.literal('listed'), id: repositoryId })]),
+  github: github.nullable(),
   branch: words,
   image: imageByDigest.nullable(),
   fastTestCommand: words.nullable(),

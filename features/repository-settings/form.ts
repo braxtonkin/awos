@@ -1,5 +1,5 @@
-import type { z } from 'zod';
-import { repositorySave, type RepositorySave } from '../../shared/repository-settings.ts';
+import { z } from 'zod';
+import { repositoryId, repositorySave } from '../../shared/repository-settings.ts';
 import { fields, type Field, type Problems } from './protocol.ts';
 
 type Entry = ReturnType<FormData['get']>;
@@ -22,18 +22,25 @@ const problemsOf = (error: z.ZodError): Problems => {
   return found;
 };
 
-export function saveFrom(form: FormData): { readonly save: RepositorySave } | { readonly problems: Problems } {
+const saving = z.strictObject({ target: repositoryId.nullable(), save: repositorySave });
+
+export type Saving = z.output<typeof saving>;
+
+export function saveFrom(form: FormData): { readonly saving: Saving } | { readonly problems: Problems } {
   const id = text(form.get('repository'));
-  const parsed = repositorySave.safeParse({
-    repository: id === '' ? { kind: 'new', github: text(form.get('github')).trim() } : { kind: 'listed', id },
-    branch: text(form.get('branch')),
-    image: optional(form.get('image')),
-    fastTestCommand: optional(form.get('fastTestCommand')),
-    setupCommand: optional(form.get('setupCommand')),
-    verifyProvider: text(form.get('verifyProvider')),
-    ignorableChecks: lines(form.get('ignorableChecks')),
-    draftLeaves: text(form.get('draftLeaves')),
-    ignoredReviewers: lines(form.get('ignoredReviewers')),
+  const parsed = saving.safeParse({
+    target: id === '' ? null : id,
+    save: {
+      github: id === '' ? text(form.get('github')).trim() : null,
+      branch: text(form.get('branch')),
+      image: optional(form.get('image')),
+      fastTestCommand: optional(form.get('fastTestCommand')),
+      setupCommand: optional(form.get('setupCommand')),
+      verifyProvider: text(form.get('verifyProvider')),
+      ignorableChecks: lines(form.get('ignorableChecks')),
+      draftLeaves: text(form.get('draftLeaves')),
+      ignoredReviewers: lines(form.get('ignoredReviewers')),
+    },
   });
-  return parsed.success ? { save: parsed.data } : { problems: problemsOf(parsed.error) };
+  return parsed.success ? { saving: parsed.data } : { problems: problemsOf(parsed.error) };
 }

@@ -39,7 +39,7 @@ export const claimOldest: Claim = tx =>
       'request.id',
       'request.kind',
       'request.person_id as person',
-      eb.fn.coalesce('request.task_id', 'request.routine_id').$castTo<string | null>().as('target'),
+      eb.fn.coalesce('request.task_id', 'request.routine_id', 'request.repository_id').$castTo<string | null>().as('target'),
       'request.payload',
     ])
     .where('request.answer', 'is', null)

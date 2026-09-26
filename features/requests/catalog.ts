@@ -10,6 +10,7 @@ export const noMutantYet: Readonly<Record<string, readonly string[]>> = {
     'request_asked_by_person',
     'request_on_task',
     'request_on_routine',
+    'request_on_repository',
     'request_names_one_target',
     'request_kind_fits_target',
     'payload_is_an_object',

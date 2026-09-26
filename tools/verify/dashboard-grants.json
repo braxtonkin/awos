@@ -2,7 +2,7 @@
   "why": "Every privilege the dashboard role holds. A page unit that needs a new read adds its grants migration and its lines here in the same commit, so a reviewer sees each widening.",
   "held": [
     "execute on replace_credential",
-    "insert on person_request (at, id, kind, payload, person_id, routine_id, task_id)",
+    "insert on person_request (at, id, kind, payload, person_id, repository_id, routine_id, task_id)",
     "select on attempt (finished_at, id, output, run_as_id, started_at, step, task_id, verdict)",
     "select on attempt_event (attempt_id, body, kind, seq, stored_at)",
     "select on connector",

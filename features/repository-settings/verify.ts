@@ -25,16 +25,29 @@ const cases: readonly { readonly name: string; readonly form: FormData; readonly
     name: 'an edit with blank commands and two lines of checks parses to nulls and a list',
     form: formOf({ fastTestCommand: '  ', image: '', ignorableChecks: 'lint-docs\n\n  spell \n', ignoredReviewers: '' }),
     expected: {
-      save: {
-        repository: { kind: 'listed', id: '1' },
-        branch: 'main',
-        image: null,
-        fastTestCommand: null,
-        setupCommand: null,
-        verifyProvider: 'tests-only',
-        ignorableChecks: ['lint-docs', 'spell'],
-        draftLeaves: 'when-green',
-        ignoredReviewers: [],
+      saving: {
+        target: '1',
+        save: {
+          github: null,
+          branch: 'main',
+          image: null,
+          fastTestCommand: null,
+          setupCommand: null,
+          verifyProvider: 'tests-only',
+          ignorableChecks: ['lint-docs', 'spell'],
+          draftLeaves: 'when-green',
+          ignoredReviewers: [],
+        },
+      },
+    },
+  },
+  {
+    name: 'a new repository names no target and carries its owner and name in the save',
+    form: formOf({ repository: '', github: ' example/other ' }),
+    expected: {
+      saving: {
+        target: null,
+        save: { github: 'example/other', branch: 'main', image: null, fastTestCommand: null, setupCommand: null, verifyProvider: 'tests-only', ignorableChecks: [], draftLeaves: 'when-green', ignoredReviewers: [] },
       },
     },
   },

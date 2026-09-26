@@ -271,18 +271,19 @@ const wantedFrom = (save: RepositorySave): Wanted => ({
   ignored_reviewers: [...save.ignoredReviewers],
 });
 
-async function savedOver(tx: Transacting, save: RepositorySave): Promise<{ readonly named: string; readonly found: Stored | undefined } | { readonly refused: string }> {
-  if (save.repository.kind === 'new') return { named: save.repository.github, found: undefined };
-  const row = await tx.selectFrom('repository').select(['github', ...storedColumns]).where('id', '=', save.repository.id).executeTakeFirst();
-  if (row === undefined) return { refused: `No listed repository has the id ${save.repository.id}.` };
+async function savedOver(tx: Transacting, target: string | null, save: RepositorySave): Promise<{ readonly named: string; readonly found: Stored | undefined } | { readonly refused: string }> {
+  if (target === null) return save.github === null ? { refused: 'A new repository must name its owner and repository, such as example/sandbox.' } : { named: save.github, found: undefined };
+  if (save.github !== null) return { refused: 'A save to a listed repository keeps its owner and repository, so it must not name them.' };
+  const row = await tx.selectFrom('repository').select(['github', ...storedColumns]).where('id', '=', target).executeTakeFirst();
+  if (row === undefined) return { refused: `No listed repository has the id ${target}.` };
   const { github: named, ...found } = row;
   return { named, found };
 }
 
-export async function saveRepository(tx: Transacting, by: Acting, save: RepositorySave): Promise<RepositorySaved> {
+export async function saveRepository(tx: Transacting, by: Acting, target: string | null, save: RepositorySave): Promise<RepositorySaved> {
   const providers = (await tx.selectFrom('published_provider').select('name').orderBy('name').execute()).map(row => row.name);
   if (!providers.includes(save.verifyProvider)) return { refused: `This engine does not publish the Verify provider ${save.verifyProvider}. Pick one of: ${providers.join(', ')}.` };
-  const over = await savedOver(tx, save);
+  const over = await savedOver(tx, target, save);
   if ('refused' in over) return over;
   const { named, found } = over;
   const listed = tx.selectFrom('repository').select('id').where('github', '=', named).where('branch', '=', save.branch);

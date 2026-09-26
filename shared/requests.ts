@@ -34,9 +34,9 @@ export type PayloadOf<K extends RequestKind> = z.output<(typeof requestKinds)[K]
 
 export type TargetKind = (typeof requestKinds)[RequestKind]['on'];
 
-export type TargetOf<K extends RequestKind> = K extends 'save_routine' ? string | null : K extends 'save_repository' ? null : string;
+export type TargetOf<K extends RequestKind> = K extends 'save_routine' | 'save_repository' ? string | null : string;
 
-const target = z.string().regex(/^[1-9]\d*$/, { error: 'must be the id of the task or routine the request names' });
+const target = z.string().regex(/^[1-9]\d*$/, { error: 'must be the id of the task, routine, or repository the request names' });
 
 export const targets: { readonly [K in RequestKind]: z.ZodType<TargetOf<K>> } = {
   stop: target,
@@ -49,7 +49,7 @@ export const targets: { readonly [K in RequestKind]: z.ZodType<TargetOf<K>> } = 
   resume: target,
   run_now: target,
   save_routine: target.nullable(),
-  save_repository: z.null(),
+  save_repository: target.nullable(),
 };
 
 export const payloads: { readonly [K in RequestKind]: z.ZodType<PayloadOf<K>> } = {
@@ -76,12 +76,26 @@ export type RequestAnswer = 'waiting' | { readonly recorded: string } | { readon
 
 const positionTries = 20;
 
-const columnOf = (kind: RequestKind): 'task_id' | 'routine_id' => (requestKinds[kind].on === 'task' ? 'task_id' : 'routine_id');
+const targetColumns = { task: 'task_id', routine: 'routine_id', repository: 'repository_id' } as const satisfies Readonly<Record<TargetKind, string>>;
+
+const columnOf = (kind: RequestKind): (typeof targetColumns)[TargetKind] => targetColumns[requestKinds[kind].on];
+
+export function targetValues(kind: RequestKind, target: string | null): { readonly task_id?: string; readonly routine_id?: string; readonly repository_id?: string } {
+  if (target === null) return {};
+  switch (requestKinds[kind].on) {
+    case 'task':
+      return { task_id: target };
+    case 'routine':
+      return { routine_id: target };
+    case 'repository':
+      return { repository_id: target };
+  }
+}
 
 async function insert(db: Database, asked: Asked, payload: string): Promise<boolean> {
   const inserted = await db
     .insertInto('person_request')
-    .values({ id: asked.id, person_id: asked.person, at: asked.at, kind: asked.kind, payload, ...(columnOf(asked.kind) === 'task_id' ? { task_id: asked.target } : { routine_id: asked.target }) })
+    .values({ id: asked.id, person_id: asked.person, at: asked.at, kind: asked.kind, payload, ...targetValues(asked.kind, asked.target) })
     .onConflict(conflict => conflict.column('id').doNothing())
     .returning('id')
     .executeTakeFirst();
