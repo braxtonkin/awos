@@ -33,14 +33,14 @@ const ticketKeyCopy = {
 };
 
 export default defineConfig(
-  { ignores: ['.claude/**'] },
+  { ignores: ['.claude/**', '**/.next/**', '**/next-env.d.ts'] },
   {
     files: ['**/*.{ts,tsx,mts,cts,js,jsx,mjs,cjs}'],
     extends: [js.configs.recommended, tseslint.configs.strictTypeChecked],
     plugins: { autoworker },
     languageOptions: {
       parserOptions: {
-        project: './tsconfig.json',
+        project: ['./tsconfig.json', './services/dashboard/tsconfig.dashboard.json'],
         tsconfigRootDir: import.meta.dirname,
       },
     },

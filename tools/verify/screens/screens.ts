@@ -6,6 +6,7 @@ import type { Browser } from 'playwright-core';
 import { z } from 'zod';
 import { open, record, run, shoot, withBrowser, type Script, type Served, type Step, type Theme } from '../browser.ts';
 import { fail, info, pass, type Line, type Scenario } from '../check.ts';
+import { buildDashboard, withWorld } from '../dashboard.ts';
 import { isClutter, judge, measured, readLimits, verdict, type Captured, type GateId, type Judged, type Limits, type Measured } from './gates.ts';
 import { measure, type MeasureConfig } from './measure.ts';
 import { decode, differing } from './png.ts';
@@ -44,11 +45,19 @@ type Fixture = { readonly name: string; readonly group: Group | 'control'; reado
 
 const people = ['Braxton Kinney', 'Sam Okafor', 'Priya Raman', 'Jordan Lee'];
 
+export const actingPerson = 'Braxton Kinney';
+
+export const actAs = (name: string): readonly Step[] => [
+  { click: 'summary[aria-label="Acting as"]' },
+  { click: `role=menuitemradio[name="${name}"]` },
+  { waitFor: `summary[aria-label="Acting as"]:has-text("${name}")` },
+];
+
 const control: Fixture = { name: 'task-a-live', group: 'control', height: 1000, names: people };
 
 export const fixtures: readonly Fixture[] = [control, { name: plantedFixture, group: 'task', height: 900, names: people }];
 
-type Target = { readonly name: string; readonly url: string; readonly served?: Served; readonly steps: readonly Step[]; readonly height: number; readonly names: readonly string[] };
+export type Target = { readonly name: string; readonly url: string; readonly served?: Served; readonly steps: readonly Step[]; readonly height: number; readonly names: readonly string[] };
 
 const fixtureOrigin = 'http://fixtures.test';
 
@@ -111,7 +120,7 @@ export const renders = (capture: Capture): Line => {
   return sized ? pass(name, `${capture.shots.light}, ${capture.shots.dark}`) : fail(name, `the page measured ${viewports.map(viewport => `${String(viewport.w)}x${String(viewport.h)}`).join(' and ')}`);
 };
 
-const gateLines = (capture: Capture, limits: Limits): readonly Line[] => judge(capture.captured, limits).map(judged => (judged.passed ? pass : fail)(`${capture.name} ${judged.id}`, verdict(judged)));
+export const gateLines = (capture: Capture, limits: Limits): readonly Line[] => judge(capture.captured, limits).map(judged => (judged.passed ? pass : fail)(`${capture.name} ${judged.id}`, verdict(judged)));
 
 function controlStillFails(capture: Capture, limits: Limits): readonly Line[] {
   const judged = judge(capture.captured, limits);
@@ -270,13 +279,29 @@ export const screens = (declared: readonly Screen[]): Scenario => ({
     const selected = declared.filter(each => group === 'all' || each.group === known);
     const limits = await readLimits();
     const folder = shotsOf('screens');
-    const taken = await withBrowser(browser => capture(browser, fixtureTarget(control), limits, folder));
-    return [
-      renders(taken),
-      ...controlStillFails(taken, limits),
-      selected.length === 0
-        ? info(`no feature declares a screen in ${group ?? 'all'}`, 'n/a', 'a feature adds screens by exporting them from its verify.ts')
-        : fail(`capture ${selected.map(each => each.name).join(', ')}`, 'a declared screen needs the local engine at its seed and the dashboard, which the dashboard unit adds to screens.ts'),
-    ];
+    return withBrowser(async browser => {
+      const taken = await capture(browser, fixtureTarget(control), limits, folder);
+      const lines: Line[] = [renders(taken), ...controlStillFails(taken, limits)];
+      if (selected.length === 0) return [...lines, info(`no feature declares a screen in ${group ?? 'all'}`, 'n/a', 'a feature adds screens by exporting them from its verify.ts')];
+      for (const shot of await captureDeclared(browser, selected, limits, folder)) lines.push(renders(shot), ...gateLines(shot, limits));
+      return lines;
+    });
   },
 });
+
+export async function captureDeclared(browser: Browser, selected: readonly Screen[], limits: Limits, folder: string): Promise<readonly Capture[]> {
+  const echo = (line: string): void => {
+    process.stdout.write(`${line}\n`);
+  };
+  await buildDashboard(false, echo);
+  return withWorld([...new Set(selected.map(each => each.seed))], echo, async world => {
+    const taken: Capture[] = [];
+    for (const each of selected) {
+      const key = world.keys.get(each.seed);
+      if (key === undefined) throw new Error(`local-engine printed no key for the seed ${each.seed}, which ${each.name} needs`);
+      const url = `${world.origin}${each.path.replace('{key}', encodeURIComponent(key))}`;
+      taken.push(await capture(browser, { name: each.name, url, steps: [...actAs(actingPerson), ...each.steps], height: each.height, names: each.names ?? people }, limits, folder));
+    }
+    return taken;
+  });
+}

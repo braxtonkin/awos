@@ -7,7 +7,7 @@ import { budgetFile, ceilingsOf, diskSource, loadBudget, withCeilings } from '..
 import { fail, pass, type Check, type Scenario } from './check.ts';
 import { plantAnchor, plantedFixture, plantIds, plants } from './screens/plants.ts';
 
-type Tool = 'tsc' | 'node' | 'eslint' | 'depcruise' | 'check' | 'shape' | 'sql-comments' | 'model-names' | 'step-names' | 'strict-schemas' | 'ci-plan' | 'db-types' | 'models' | 'migration-versions' | 'screen-gates' | 'budget';
+type Tool = 'tsc' | 'node' | 'eslint' | 'depcruise' | 'check' | 'shape' | 'sql-comments' | 'model-names' | 'step-names' | 'strict-schemas' | 'ci-plan' | 'db-types' | 'models' | 'migration-versions' | 'screen-gates' | 'budget' | 'contrast';
 
 type Edit = { readonly from: string; readonly to: string };
 
@@ -163,6 +163,14 @@ const plantedCheck = "import type { Checks } from './checks.ts';\nimport type { 
 const ticketKeyPattern = ['^[A-Z]', '[A-Z0-9_]*', '-\\d+$'].join('');
 
 const ticketKeyCopy = 'Import ticket from shared/actions.ts';
+
+const dashboardTokens = 'shared/ui/tokens.ts';
+
+const dashboardConfig = 'services/dashboard/tsconfig.dashboard.json';
+
+const plantedPage = 'services/dashboard/app/planted/page.tsx';
+
+const plainPage = 'export default function Page() {\n  return <main>Planted</main>;\n}\n';
 
 const violations: readonly Violation[] = [
   {
@@ -1126,6 +1134,55 @@ const violations: readonly Violation[] = [
     expect: [`names the step of ${codeChange} "land"`],
   },
   {
+    name: "step-names rejects a step's name in a page feature",
+    file: 'features/task-page/planted.tsx',
+    source: "export const next = 'implement';\n",
+    tool: 'step-names',
+    expect: [`features/task-page/planted.tsx:1 names the step of ${codeChange} "implement"`],
+  },
+  {
+    name: 'the import rules reject a dashboard file that imports a workflow',
+    file: 'services/dashboard/planted.ts',
+    source: `import { workflow } from '../../features/${codeChange}/workflow.ts';\n\nexport const planted = workflow.name;\n`,
+    tool: 'depcruise',
+    expect: ['dashboard-imports-no-engine-code'],
+  },
+  {
+    name: 'the import rules reject a plain orphan module in the dashboard',
+    file: 'services/dashboard/orphan.ts',
+    source: 'export const orphan = 1;\n',
+    tool: 'depcruise',
+    expect: ['no-orphans'],
+  },
+  {
+    name: 'contrast rejects a text color under its floor',
+    file: dashboardTokens,
+    edit: { from: "faint: '#666670',", to: "faint: '#a3a3ab'," },
+    tool: 'contrast',
+    expect: [`${dashboardTokens} light faint on`],
+  },
+  {
+    name: 'npm run check runs the contrast check',
+    file: dashboardTokens,
+    edit: { from: "faint: '#666670',", to: "faint: '#a3a3ab'," },
+    tool: 'check',
+    expect: ['light faint on'],
+  },
+  {
+    name: "the shape check rejects a strict flag turned off in the dashboard's config",
+    file: dashboardConfig,
+    edit: { from: '"moduleResolution": "bundler"', to: '"moduleResolution": "bundler",\n    "strict": false' },
+    tool: 'shape',
+    expect: [`${dashboardConfig} must extend ../../tsconfig.json`],
+  },
+  {
+    name: 'the shape check rejects a second nested tsconfig',
+    file: 'features/planted/tsconfig.json',
+    source: '{ "extends": "../../tsconfig.json", "compilerOptions": { "strict": false } }\n',
+    tool: 'shape',
+    expect: ['features/planted/tsconfig.json is a tsconfig beside the root one'],
+  },
+  {
     name: "strict-schemas rejects an optional field in an agent step's output",
     file: `features/${codeChange}/workflow.ts`,
     edit: optionalVerifyField,
@@ -1529,6 +1586,18 @@ const roomyCeiling = 1_000_000_000;
 
 const allowances: readonly Allowance[] = [
   {
+    name: 'the import rules accept a new dashboard page that imports nothing, because Next loads it by its path',
+    file: plantedPage,
+    source: plainPage,
+    tool: 'depcruise',
+  },
+  {
+    name: 'tsc accepts a new dashboard page, which the dashboard config checks',
+    file: plantedPage,
+    source: plainPage,
+    tool: 'tsc',
+  },
+  {
     name: 'strict-schemas accepts a $ref that the schema defines',
     file: 'shared/review.ts',
     edit: refToSummary('#/properties/outcome'),
@@ -1815,6 +1884,10 @@ const tools: Record<
     command: () => ['npm', 'run', '--silent', 'verify', '--', 'screen-gates', '--repeat', '1'],
     caught: startsALine,
   },
+  contrast: {
+    command: () => ['npm', 'run', '--silent', 'contrast'],
+    caught: startsALine,
+  },
   budget: {
     command: () => ['npm', 'run', '--silent', 'budget'],
     caught: (outcome, _file, code) => outcome.output.includes(code),
@@ -1826,7 +1899,7 @@ const tools: Record<
 };
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
-const skipped = new Set(['node_modules', '.git', '.claude']);
+const skipped = new Set(['node_modules', '.git', '.claude', '.next']);
 
 function run(tool: Tool, copy: string, file: string, env: Readonly<Record<string, string>> = {}): Outcome {
   const [executable, ...args] = tools[tool].command(copy, file);
@@ -1895,7 +1968,7 @@ export const guardrails: Scenario = {
   run: async () => [
     ...(await withCopy(async copy => {
       await withRoom(copy);
-      const checks: Check[] = (['tsc', 'eslint', 'depcruise', 'shape', 'sql-comments', 'migration-versions', 'model-names', 'step-names', 'strict-schemas', 'ci-plan', 'db-types', 'screen-gates'] as const).map(tool => {
+      const checks: Check[] = (['tsc', 'eslint', 'depcruise', 'shape', 'sql-comments', 'migration-versions', 'model-names', 'step-names', 'strict-schemas', 'ci-plan', 'db-types', 'screen-gates', 'contrast'] as const).map(tool => {
         const clean = run(tool, copy, '.');
         const name = `the unplanted copy passes ${tool}`;
         const problem = clean.status === 0 ? tools[tool].unclean?.(clean) : (tools[tool].summary ?? firstLines)(clean);

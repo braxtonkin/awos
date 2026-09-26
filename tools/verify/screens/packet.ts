@@ -5,7 +5,7 @@ import { z } from 'zod';
 import { open, shoot, withBrowser } from '../browser.ts';
 import { fail, info, pass, type Line, type Scenario } from '../check.ts';
 import { judge, readLimits, verdict } from './gates.ts';
-import { capture, fixtures, fixtureTarget, groups, renders, shotsOf, type Capture, type Group } from './screens.ts';
+import { capture, captureDeclared, fixtures, fixtureTarget, groups, renders, shotsOf, type Capture, type Group, type Screen } from './screens.ts';
 
 const scored = ['clutter', 'hierarchy', 'findability', 'state', 'actionability', 'language', 'spacing', 'agent'] as const;
 
@@ -173,19 +173,20 @@ ${screensHtml}
 `;
 }
 
-async function write(group: Group, useFixtures: boolean): Promise<readonly Line[]> {
+async function write(group: Group, useFixtures: boolean, declared: readonly Screen[]): Promise<readonly Line[]> {
   const limits = await readLimits();
   const folder = join(shotsOf('screen-review'), group);
   const questions = questionsFile.parse(JSON.parse(await readFile(here('find-questions.json'), 'utf8')));
   const asked = questions.groups[group] ?? [];
-  if (!useFixtures) throw new Error('a group of declared screens needs the local engine and the dashboard, which the dashboard unit adds; pass --fixtures to review the fixtures');
   const chosen = fixtures.filter(each => each.group === group);
-  if (chosen.length === 0) throw new Error(`no fixture is in the ${group} group`);
+  const screens = declared.filter(each => each.group === group);
+  if ((useFixtures ? chosen : screens).length === 0) throw new Error(`no ${useFixtures ? 'fixture' : 'declared screen'} is in the ${group} group`);
   await rm(folder, { recursive: true, force: true });
   await mkdir(folder, { recursive: true });
   return withBrowser(async browser => {
     const captures: Capture[] = [];
-    for (const fixture of chosen) captures.push(await capture(browser, fixtureTarget(fixture), limits, folder));
+    if (useFixtures) for (const fixture of chosen) captures.push(await capture(browser, fixtureTarget(fixture), limits, folder));
+    else captures.push(...(await captureDeclared(browser, screens, limits, folder)));
     const gateText = captures.flatMap(each => judge(each.captured, limits).map(judged => `${judged.passed ? 'PASS' : 'FAIL'}  ${each.name} ${judged.id}  ${verdict(judged)}`));
     const packet: Packet = { group, reviewers: limits.reviewers, screens: Object.fromEntries(captures.map(each => [each.name, each.size])) };
     await writeFile(join(folder, 'packet.json'), `${JSON.stringify(packet, null, 2)}\n`);
@@ -247,13 +248,13 @@ async function judgeReviews(group: Group): Promise<readonly Line[]> {
   return [...lines, ...all, info(`the ${group} group ${passed ? 'passes' : 'does not pass'} review`, passed ? 'passed' : 'failed', `${String(reviews.length)} of ${String(packet.reviewers)} reviews count`)];
 }
 
-export const screenReview: Scenario = {
+export const screenReview = (declared: readonly Screen[]): Scenario => ({
   name: 'screen-review',
-  summary: 'writes a review packet for a group with --fixtures, or judges the returned reviews with --judge, against the screen and group rules in rubric.md',
+  summary: 'writes a review packet for a group of declared screens, or of the fixtures with --fixtures, or judges the returned reviews with --judge, against the screen and group rules in rubric.md',
   run: async args => {
     const { values, positionals } = parseArgs({ args: [...args], options: { fixtures: { type: 'boolean' }, judge: { type: 'boolean' } }, strict: true, allowPositionals: true });
     const group = groups.find(each => each === positionals[0]);
     if (group === undefined || positionals.length !== 1) throw new Error(`screen-review takes one group: ${groups.join(', ')}`);
-    return values.judge === true ? judgeReviews(group) : write(group, values.fixtures === true);
+    return values.judge === true ? judgeReviews(group) : write(group, values.fixtures === true, declared);
   },
-};
+});

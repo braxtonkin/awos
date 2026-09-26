@@ -1,6 +1,6 @@
 import { mkdir, rename } from 'node:fs/promises';
 import { dirname } from 'node:path';
-import { chromium, type Browser, type Page } from 'playwright-core';
+import { chromium, type Browser, type Page, type Request } from 'playwright-core';
 
 export type Theme = 'light' | 'dark';
 
@@ -8,16 +8,17 @@ export type Step = { readonly click: string } | { readonly fill: string; readonl
 
 export type Served = { readonly origin: string; readonly read: (path: string) => Promise<Buffer | undefined> };
 
-type View = {
+export type View = {
   readonly url: string;
   readonly width: number;
   readonly height: number;
   readonly theme: Theme;
   readonly steps: readonly Step[];
   readonly served?: Served;
+  readonly scripts?: boolean;
 };
 
-type Opened = {
+export type Opened = {
   readonly page: Page;
   readonly errors: readonly string[];
 };
@@ -44,6 +45,10 @@ const contentTypes: Readonly<Record<string, string>> = { html: 'text/html; chars
 
 const contentType = (url: string): string => contentTypes[new URL(url).pathname.split('.').pop() ?? ''] ?? 'application/octet-stream';
 
+const pageReads: ReadonlySet<string> = new Set(['fetch', 'eventsource']);
+
+const cancelledByThePage = (request: Request): boolean => pageReads.has(request.resourceType()) && request.failure()?.errorText === 'net::ERR_ABORTED';
+
 async function runStep(page: Page, step: Step): Promise<void> {
   if ('click' in step) await page.locator(step.click).click();
   else if ('fill' in step) await page.locator(step.fill).fill(step.text);
@@ -54,12 +59,14 @@ async function runStep(page: Page, step: Step): Promise<void> {
 export async function open<T>(browser: Browser, view: View, work: (opened: Opened) => Promise<T>, video?: string): Promise<T> {
   const size = { width: view.width, height: view.height };
   if (video !== undefined) await mkdir(video, { recursive: true });
-  const context = await browser.newContext({ viewport: size, colorScheme: view.theme, deviceScaleFactor: 1, reducedMotion: 'reduce', ...(video === undefined ? {} : { recordVideo: { dir: video, size } }) });
+  const context = await browser.newContext({ viewport: size, colorScheme: view.theme, deviceScaleFactor: 1, reducedMotion: 'reduce', javaScriptEnabled: view.scripts ?? true, ...(video === undefined ? {} : { recordVideo: { dir: video, size } }) });
   try {
     const page = await context.newPage();
     const errors: string[] = [];
     page.on('pageerror', error => errors.push(error.message));
-    page.on('requestfailed', request => errors.push(`${request.url()} failed to load`));
+    page.on('requestfailed', request => {
+      if (!cancelledByThePage(request)) errors.push(`${request.method()} ${request.url()} ${request.resourceType()} failed to load: ${request.failure()?.errorText ?? 'no reason given'}`);
+    });
     if (view.served !== undefined) await serve(page, view.served);
     await page.goto(view.url, { waitUntil: 'load' });
     for (const step of view.steps) await runStep(page, step);
@@ -73,17 +80,21 @@ export const run = <W, A, R>(page: Page, script: Script<W, A, R>, argument: A): 
 
 export const shoot = (page: Page, path: string): Promise<Buffer> => page.screenshot({ path, animations: 'disabled', caret: 'hide' });
 
-export async function record(browser: Browser, view: View, seconds: number, file: string): Promise<void> {
+export async function recording<T>(browser: Browser, view: View, file: string, work: (opened: Opened) => Promise<T>): Promise<T> {
   let saved: Promise<string> | undefined;
-  await open(
+  const result = await open(
     browser,
     view,
-    async ({ page }) => {
-      await page.waitForTimeout(seconds * 1000);
-      saved = page.video()?.path();
+    async opened => {
+      const done = await work(opened);
+      saved = opened.page.video()?.path();
+      return done;
     },
     dirname(file),
   );
   if (saved === undefined) throw new Error('the page recorded no video');
   await rename(await saved, file);
+  return result;
 }
+
+export const record = (browser: Browser, view: View, seconds: number, file: string): Promise<void> => recording(browser, view, file, ({ page }) => page.waitForTimeout(seconds * 1000));

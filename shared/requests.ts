@@ -1,3 +1,4 @@
+import { setTimeout as wait } from 'node:timers/promises';
 import { sql } from 'kysely';
 import { z } from 'zod';
 import { refusal, type Database } from './db/client.ts';
@@ -91,11 +92,27 @@ export async function request(db: Database, asked: Asked): Promise<Sent> {
   throw new Error(`The request ${asked.id} lost the race for its place in line ${String(positionTries)} times, so it was not sent.`);
 }
 
-export async function answerOf(db: Database, id: string): Promise<RequestAnswer | undefined> {
-  const row = await db.selectFrom('person_request').select(['answer', 'reason', 'action_id']).where('id', '=', id).executeTakeFirst();
-  if (row === undefined) return undefined;
+export type AnswerRow = { readonly id: string; readonly answer: 'recorded' | 'refused' | null; readonly reason: string | null; readonly action_id: string | null };
+
+export function answerFrom(row: AnswerRow): RequestAnswer {
   if (row.answer === null) return 'waiting';
   if (row.answer === 'recorded' && row.action_id !== null) return { recorded: row.action_id };
   if (row.answer === 'refused' && row.reason !== null) return { refused: row.reason };
-  throw new Error(`The request ${id} holds an answer that answer_names_its_action and refusal_says_why forbid.`);
+  throw new Error(`The request ${row.id} holds an answer that answer_names_its_action and refusal_says_why forbid.`);
+}
+
+export async function answerOf(db: Database, id: string): Promise<RequestAnswer | undefined> {
+  const row = await db.selectFrom('person_request').select(['id', 'answer', 'reason', 'action_id']).where('id', '=', id).executeTakeFirst();
+  return row === undefined ? undefined : answerFrom(row);
+}
+
+const answerPollMs = 100;
+
+export async function answerWithin(db: Database, id: string, waitMs: number): Promise<RequestAnswer | undefined> {
+  const deadline = Date.now() + waitMs;
+  for (;;) {
+    const found = await answerOf(db, id);
+    if (found !== 'waiting' || Date.now() >= deadline) return found;
+    await wait(answerPollMs);
+  }
 }

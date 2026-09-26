@@ -116,8 +116,15 @@ function step(draft: Draft, body: unknown): void {
 
 const statusOf = (completed: boolean, turn: TurnStatus | undefined): ItemStatus => (completed ? 'completed' : turn === 'inProgress' ? 'inProgress' : 'abandoned');
 
-export function reduce(lines: Iterable<{ readonly body: unknown }>): Transcript {
-  const draft: Draft = { turns: new Map(), items: new Map() };
+export const emptyTranscript: Transcript = { items: [], turns: [] };
+
+const draftOf = (start: Transcript): Draft => ({
+  turns: new Map(start.turns.map(turn => [turn.id, { status: turn.status, items: [...turn.items] }])),
+  items: new Map(start.items.map(({ status, ...item }) => [item.id, { ...item, completed: status === 'completed' }])),
+});
+
+export function reduce(lines: Iterable<{ readonly body: unknown }>, start: Transcript = emptyTranscript): Transcript {
+  const draft = draftOf(start);
   for (const line of lines) step(draft, line.body);
   return {
     turns: [...draft.turns].map(([id, turn]) => ({ id, status: turn.status, items: [...turn.items] })),

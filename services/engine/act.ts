@@ -1,10 +1,9 @@
 import { randomUUID } from 'node:crypto';
-import { setTimeout as wait } from 'node:timers/promises';
 import { parseArgs } from 'node:util';
 import { z } from 'zod';
 import { address } from '../../features/tasks/advance.ts';
 import { connect, type Database } from '../../shared/db/client.ts';
-import { answerOf, message, request, type Asked, type RequestAnswer } from '../../shared/requests.ts';
+import { answerOf, answerWithin, message, request, type Asked, type RequestAnswer } from '../../shared/requests.ts';
 import { answer, note } from '../../shared/review.ts';
 
 const settings = z.object({ DATABASE_URL: z.url({ protocol: /^postgres(ql)?$/ }) });
@@ -36,8 +35,6 @@ const isRoutineAction = (kind: Action): kind is (typeof onRoutine)[number] => on
 const waitingExitCode = 3;
 
 const answerWaitMs = 10_000;
-
-const pollMs = 100;
 
 const command = z
   .object({
@@ -109,15 +106,6 @@ function askedOf({ positionals: [kind], values }: Command, found: Target, who: W
   return values.answer === undefined ? 'answer needs --answer.' : { ...base, kind: 'answer', payload: { review, answer: values.answer } };
 }
 
-async function answered(db: Database, id: string): Promise<RequestAnswer | undefined> {
-  const deadline = Date.now() + answerWaitMs;
-  for (;;) {
-    const found = await answerOf(db, id);
-    if (found !== 'waiting' || Date.now() >= deadline) return found;
-    await wait(pollMs);
-  }
-}
-
 type Said = { readonly line: string; readonly waiting: boolean };
 
 const reported = (reply: RequestAnswer | undefined, kind: Action, on: string, id: string): Said => {
@@ -135,14 +123,14 @@ async function run(given: Command): Promise<Said> {
     const [kind, name] = given.positionals;
     const on = `${isRoutineAction(kind) ? 'routine' : 'task'} ${name}`;
     const { id } = given.values;
-    if (id !== undefined && (await answerOf(db, id)) !== undefined) return reported(await answered(db, id), kind, on, id);
+    if (id !== undefined && (await answerOf(db, id)) !== undefined) return reported(await answerWithin(db, id, answerWaitMs), kind, on, id);
     const found = await targetOf(db, given);
     if (typeof found === 'string') throw new Error(found);
     const asked = askedOf(given, found, { id: id ?? randomUUID(), person: found.person, at: new Date() });
     if (typeof asked === 'string') throw new Error(asked);
     const sent = await request(db, asked);
     if ('refused' in sent) throw new Error(`AutoWorker refused ${kind} on ${on}: another request already has the id ${asked.id}.`);
-    return reported(await answered(db, asked.id), kind, on, asked.id);
+    return reported(await answerWithin(db, asked.id, answerWaitMs), kind, on, asked.id);
   } finally {
     await db.destroy();
   }

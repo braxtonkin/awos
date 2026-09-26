@@ -5,6 +5,7 @@ import { existsSync } from 'node:fs';
 import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { setTimeout as wait } from 'node:timers/promises';
+import { createInterface } from 'node:readline';
 import { parseArgs, promisify } from 'node:util';
 import { sql } from 'kysely';
 import type { Database } from '../../shared/db/client.ts';
@@ -252,7 +253,7 @@ function setupFile(login: string, wanted: readonly SeedName[], withRoutines: boo
   };
 }
 
-type Supervised = { readonly stop: () => Promise<void>; readonly starts: () => number; readonly said: () => string };
+type Supervised = { readonly stop: () => Promise<void>; readonly hold: () => Promise<void>; readonly release: () => void; readonly starts: () => number; readonly said: () => string };
 
 function supervise(store: Store, settings: Readonly<Record<string, string>>, stopping: AbortSignal, out: (line: string) => void): Supervised {
   const stopped = new AbortController();
@@ -260,12 +261,19 @@ function supervise(store: Store, settings: Readonly<Record<string, string>>, sto
   let engine: Engine = startEngine(store, settings);
   let starts = 1;
   let said = '';
+  let held: PromiseWithResolvers<void> | undefined;
   const watching = (async () => {
     while (!signal.aborted) {
       const ended = await Promise.race([engine.exited.then(() => 'exited' as const), once(signal, 'abort').then(() => 'stopping' as const)]);
       if (ended === 'stopping') return;
       said += engine.said();
-      out(`the engine exited, so local-engine starts it again in ${String(restartDelayMs)} ms`);
+      if (held !== undefined) {
+        out('the engine is held stopped until start-engine');
+        const released = await Promise.race([held.promise.then(() => true), once(signal, 'abort').then(() => false)]);
+        if (!released) return;
+      } else {
+        out(`the engine exited, so local-engine starts it again in ${String(restartDelayMs)} ms`);
+      }
       const waited = await wait(restartDelayMs, undefined, { signal }).then(
         () => true,
         () => false,
@@ -281,9 +289,34 @@ function supervise(store: Store, settings: Readonly<Record<string, string>>, sto
       await watching;
       await engine.stop();
     },
+    hold: async () => {
+      held ??= Promise.withResolvers();
+      await engine.kill();
+    },
+    release: () => {
+      const releasing = held;
+      held = undefined;
+      releasing?.resolve();
+    },
     starts: () => starts,
     said: () => said + engine.said(),
   };
+}
+
+async function holdWithCommands(engine: Supervised, signal: AbortSignal, out: (line: string) => void): Promise<void> {
+  const commands = createInterface({ input: process.stdin });
+  commands.on('line', text => {
+    if (text.trim() === 'stop-engine') void engine.hold().then(() => { out('engine killed and held'); });
+    if (text.trim() === 'start-engine') {
+      engine.release();
+      out('engine released');
+    }
+  });
+  try {
+    await once(signal, 'abort');
+  } finally {
+    commands.close();
+  }
 }
 
 const agents = ['stand-in', 'real'] as const;
@@ -444,7 +477,7 @@ async function hold(signal: AbortSignal, out: (line: string) => void, options: O
                 lines.push(wrong.length === 0 ? pass(name, describe({ ...entry, observed })) : fail(name, wrong.join('; ')));
               }
             } else {
-              await once(signal, 'abort');
+              await holdWithCommands(engine, signal, out);
             }
           }
         } finally {
@@ -476,7 +509,7 @@ export const localEngineScenario: Scenario = {
     'starts Postgres, a fake GitHub, a fake Jira, the git daemon, and the engine with Jobs on kind in its own JOB_NAMESPACE,',
     'with the Codex stand-in, or real Codex under --agent real in the live service,',
     'applies a setup with Braxton Kinney and three made-up people, plants each --seed (or all), prints local engine ready,',
-    'and holds until SIGTERM, restarting the engine whenever it exits;',
+    'and holds until SIGTERM, restarting the engine whenever it exits and taking stop-engine and start-engine on its standard input to kill and hold the engine and then release it;',
     '--check reads every seed back and exits instead, and --plant <seed> stops that seeded task first so the check must name it',
   ].join(' '),
   run: async args => {
