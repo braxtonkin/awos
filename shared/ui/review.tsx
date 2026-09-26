@@ -193,7 +193,17 @@ function Decide({ context, asked }: { readonly context: Context; readonly asked:
           <summary style={{ ...secondary, display: 'inline-block', listStyle: 'none' }}>Send back</summary>
           <form action={sendBack} style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 8 }}>
             <Hidden values={{ ...keys, intent: 'send_back' }} />
-            <textarea name="note" required aria-label="What to change" placeholder="Say what to change" rows={3} style={field} />
+            <textarea
+              name="note"
+              required
+              aria-label="What to change"
+              placeholder="Say what to change"
+              rows={3}
+              style={field}
+              onChange={event => {
+                event.currentTarget.setCustomValidity(event.currentTarget.value.trim() === '' ? 'Say what to change before you send it back.' : '');
+              }}
+            />
             <span>
               <button type="submit" disabled={sendPending} style={secondary}>
                 Send back with note

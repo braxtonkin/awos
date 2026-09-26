@@ -47,7 +47,7 @@ function doing(item: Item | undefined, action: Action | undefined): string {
   }
 }
 
-const failures: Readonly<Record<Verdict, ((step: string) => string) | null>> = {
+export const failures: Readonly<Record<Verdict, ((step: string) => string) | null>> = {
   behavior_fail: step => `${step} found the change still does not do what the ticket asks.`,
   environment_fail: step => `${step} could not run because the environment broke, not the change.`,
   fail: step => `${step} failed.`,

@@ -1,7 +1,8 @@
 import { markLabels, marks } from '../../shared/task-status.ts';
 import { StatusMarks } from '../../shared/ui/status.tsx';
 import { color } from '../../shared/ui/tokens.ts';
-import { between, duration, nameOf } from './format.ts';
+import { between, duration } from '../../shared/ui/clock.ts';
+import { nameOf } from './format.ts';
 import { actionLink, box, EmptyWorld, Heading, page, taskHref, ViewSwitch } from './parts.tsx';
 import type { ListRow, Option, TaskList } from './read.ts';
 

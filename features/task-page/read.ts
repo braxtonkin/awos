@@ -1,3 +1,4 @@
+import { sql } from 'kysely';
 import { jsonArrayFrom } from 'kysely/helpers/postgres';
 import { z } from 'zod';
 import type { Database } from '../../shared/db/client.ts';
@@ -20,8 +21,24 @@ export type Header = {
   readonly foundAt: string;
 };
 
+export type Step = { readonly name: string; readonly gate: boolean };
+
+export type Field = { readonly name: string; readonly text: string };
+
+export type Evidence = { readonly attempt: string; readonly step: string; readonly recordedAt: string; readonly blocks: readonly Field[]; readonly facts: readonly Field[] };
+
+export type AttemptRow = { readonly id: string; readonly step: string; readonly verdict: Verdict | null; readonly person: string; readonly startedAt: string; readonly finishedAt: string | null };
+
+export type TaskRecord = {
+  readonly steps: readonly Step[];
+  readonly evidence: readonly Evidence[];
+  readonly attempts: readonly AttemptRow[];
+  readonly mergeQueued: boolean;
+};
+
 export type TaskPageData = {
   readonly header: Header;
+  readonly record: TaskRecord;
   readonly live: TaskLive;
   readonly said: readonly Said[];
   readonly attempts: readonly AttemptTranscript[];
@@ -243,6 +260,59 @@ export async function keyAsStored(db: Database, typed: string): Promise<string> 
   return found?.key ?? typed;
 }
 
+const spoken = (machineName: string): string => {
+  const spaced = machineName.replaceAll(/[-_]+/g, ' ');
+  return `${spaced.charAt(0).toUpperCase()}${spaced.slice(1)}`;
+};
+
+type Leaf = Field & { readonly block: boolean };
+
+const counted = (path: readonly string[], index: number): readonly string[] => [...path.slice(0, -1), `${path.at(-1) ?? 'Item'} ${String(index + 1)}`];
+
+function leavesOf(value: unknown, path: readonly string[]): readonly Leaf[] {
+  const name = path.length === 0 ? 'Evidence' : path.join(' › ');
+  if (typeof value === 'string') return [{ name, text: value, block: true }];
+  if (typeof value === 'number' || typeof value === 'boolean') return [{ name, text: String(value), block: false }];
+  if (Array.isArray(value)) return value.flatMap((each: unknown, index) => leavesOf(each, counted(path, index)));
+  if (typeof value === 'object' && value !== null) return Object.entries(value).flatMap(([field, each]: [string, unknown]) => leavesOf(each, [...path, spoken(field)]));
+  return [];
+}
+
+const fieldsOf = (body: unknown): Pick<Evidence, 'blocks' | 'facts'> => {
+  const leaves = leavesOf(body, []);
+  const bare = ({ name, text }: Leaf): Field => ({ name, text });
+  return { blocks: leaves.filter(leaf => leaf.block).map(bare), facts: leaves.filter(leaf => !leaf.block).map(bare) };
+};
+
+const mergeKind = 'pr.merge';
+
+async function recordOf(db: Database, task: { readonly id: string; readonly workflow: string; readonly gates: readonly string[] }): Promise<TaskRecord> {
+  const [steps, evidence, attempts, merge] = await Promise.all([
+    db.selectFrom('published_workflow_step').select('published_workflow_step.name').where('published_workflow_step.workflow', '=', task.workflow).orderBy('published_workflow_step.position').execute(),
+    db
+      .selectFrom('evidence')
+      .innerJoin('attempt', 'attempt.id', 'evidence.attempt_id')
+      .select(['evidence.attempt_id', 'attempt.step', 'evidence.recorded_at', 'evidence.body'])
+      .where('evidence.task_id', '=', task.id)
+      .orderBy('evidence.attempt_id')
+      .execute(),
+    db
+      .selectFrom('attempt')
+      .innerJoin('person', 'person.id', 'attempt.run_as_id')
+      .select(['attempt.id', 'attempt.step', 'attempt.verdict', 'person.name', 'attempt.started_at', 'attempt.finished_at'])
+      .where('attempt.task_id', '=', task.id)
+      .orderBy('attempt.id')
+      .execute(),
+    db.selectFrom('outbox').select('outbox.kind').where('outbox.task_id', '=', task.id).where('outbox.kind', '=', mergeKind).where('outbox.state', 'in', ['owed', 'done']).executeTakeFirst(),
+  ]);
+  return {
+    steps: steps.map(step => ({ name: step.name, gate: task.gates.includes(step.name) })),
+    evidence: evidence.map(row => ({ attempt: row.attempt_id, step: row.step, recordedAt: row.recorded_at.toISOString(), ...fieldsOf(row.body) })),
+    attempts: attempts.map(row => ({ id: row.id, step: row.step, verdict: row.verdict, person: row.name, startedAt: row.started_at.toISOString(), finishedAt: row.finished_at?.toISOString() ?? null })),
+    mergeQueued: merge !== undefined,
+  };
+}
+
 export async function readTask(db: Database, key: string, now: Date = new Date()): Promise<TaskPageData | undefined> {
   const header = await db
     .selectFrom('task')
@@ -253,6 +323,8 @@ export async function readTask(db: Database, key: string, now: Date = new Date()
       'task.key',
       'task.title',
       'task.found_at',
+      'task.workflow',
+      sql<string[]>`version.gates::text[]`.as('gates'),
       'version.name as routine',
       'repository.github',
       'repository.branch',
@@ -268,7 +340,7 @@ export async function readTask(db: Database, key: string, now: Date = new Date()
     .where('task.key', '=', key)
     .executeTakeFirst();
   if (header === undefined) return undefined;
-  const found = await snapshot(db, header.id, { after: undefined, limit: everyLine });
+  const [found, record] = await Promise.all([snapshot(db, header.id, { after: undefined, limit: everyLine }), recordOf(db, header)]);
   if (found === undefined) return undefined;
   const last = found.lines.at(-1);
   return {
@@ -281,6 +353,7 @@ export async function readTask(db: Database, key: string, now: Date = new Date()
       runsAs: header.runs_as,
       foundAt: header.found_at.toISOString(),
     },
+    record,
     live: found.live,
     said: found.said,
     attempts: extend(

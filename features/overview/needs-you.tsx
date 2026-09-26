@@ -6,7 +6,8 @@ import type { Mark } from '../../shared/task-status.ts';
 import { StatusMarks } from '../../shared/ui/status.tsx';
 import { color } from '../../shared/ui/tokens.ts';
 import { useFrames, type Stream } from '../../shared/ui/use-frames.ts';
-import { between, day, nameOf } from './format.ts';
+import { between } from '../../shared/ui/clock.ts';
+import { day, nameOf } from './format.ts';
 import { actionLink, box, EmptyWorld, Heading, page, taskHref } from './parts.tsx';
 import { frame, type Login, type NeedsYou, type TaskRow } from './protocol.ts';
 
