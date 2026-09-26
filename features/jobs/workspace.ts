@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import { z } from 'zod';
 import { codexLogin } from '../../shared/codex-login.ts';
+import { outputLimit, setupLog, type RanScript } from '../../shared/reproduction.ts';
 
 export const layout = { workspace: '/workspace', codexHome: '/home/codex/.codex', bridgeGit: '/var/lib/autoworker/attempt.git', startBundle: '/var/lib/autoworker/start.bundle' } as const;
 
@@ -24,18 +25,20 @@ const common = z.object({
   GIT_AUTHOR_EMAIL: z.email(),
 });
 
-const afterTurn = z.discriminatedUnion('AFTER_TURN', [
-  z.object({ AFTER_TURN: z.literal('push') }),
-  z.object({ AFTER_TURN: z.literal('reproduce'), BASE_COMMIT: commit, SETUP_COMMAND: z.string().trim().transform(text => (text === '' ? null : text)) }),
+const setupCommand = z.string().trim().transform(text => (text === '' ? null : text));
+
+const plan = z.discriminatedUnion('AFTER_TURN', [
+  z.object({ AFTER_TURN: z.literal('push'), SETUP_COMMAND: setupCommand }),
+  z.object({ AFTER_TURN: z.literal('reproduce'), BASE_COMMIT: commit, SETUP_COMMAND: setupCommand }),
 ]);
 
-export type AfterTurnKeys = z.input<typeof afterTurn>;
+export type PlanKeys = z.input<typeof plan>;
 
-export const jobEnvironment = common.and(afterTurn);
+export const jobEnvironment = common.and(plan);
 
 export type JobEnvironment = z.infer<typeof jobEnvironment>;
 
-export type SecretKeys = { readonly [Key in keyof z.infer<typeof common>]: string } & AfterTurnKeys;
+export type SecretKeys = { readonly [Key in keyof z.infer<typeof common>]: string } & PlanKeys;
 
 export function readJobEnvironment(env: NodeJS.ProcessEnv): JobEnvironment | { readonly problems: readonly string[] } {
   const parsed = jobEnvironment.safeParse(env);
@@ -89,6 +92,56 @@ export function run(command: string, args: readonly string[], { as, env, input }
   });
 }
 
+export const kept = (text: string): string => (text.length <= outputLimit ? text : `[first ${String(text.length - outputLimit)} characters cut]\n${text.slice(-outputLimit)}`);
+
+export type Contained = { readonly as: Account; readonly cwd: string; readonly env: Readonly<Record<string, string>>; readonly timeoutMs: number; readonly graceMs: number };
+
+export function contained(command: string, args: readonly string[], given: Contained): Promise<RanScript> {
+  return new Promise(resolve => {
+    const child = spawn(command, args, { cwd: given.cwd, env: given.env, uid: given.as.uid, gid: given.as.gid, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    let output = '';
+    let timedOut = false;
+    const keep = (chunk: Buffer): void => {
+      output = (output + chunk.toString('utf8')).slice(-(outputLimit * 2));
+    };
+    child.stdout.on('data', keep);
+    child.stderr.on('data', keep);
+    const group = (): void => {
+      if (child.pid !== undefined) {
+        try {
+          process.kill(-child.pid, 'SIGKILL');
+        } catch {
+          return;
+        }
+      }
+    };
+    const timer = setTimeout(() => {
+      timedOut = true;
+      group();
+    }, given.timeoutMs);
+    let finished = false;
+    const finish = (exitCode: number | null): void => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      group();
+      resolve({ exitCode, timedOut, output: kept(output) });
+    };
+    child.on('error', error => {
+      output += `\n${error.message}`;
+      finish(null);
+    });
+    child.on('exit', code => {
+      setTimeout(() => {
+        finish(code);
+      }, given.graceMs);
+    });
+    child.on('close', code => {
+      finish(code);
+    });
+  });
+}
+
 export const bridgeGit = (args: readonly string[], given: Run): Promise<string> => run('git', [`--git-dir=${layout.bridgeGit}`, `--work-tree=${layout.workspace}`, ...args], given);
 
 const codexGit = (args: readonly string[], given: Run): Promise<string> => run('git', ['-C', layout.workspace, ...args], given);
@@ -129,18 +182,65 @@ export async function prepareWorkspace(env: JobEnvironment): Promise<Ready> {
   return { commit: env.START_COMMIT, branch: env.ATTEMPT_BRANCH };
 }
 
+export const setupMs = 600_000;
+
+export type Baseline = { readonly before: string; readonly after: string };
+
+export type SetUp = { readonly ended: string; readonly baseline: Baseline };
+
+const snapshot = async (owner: Run): Promise<string> => {
+  await bridgeGit(['add', '--all'], owner);
+  return bridgeGit(['write-tree'], owner);
+};
+
+const endedAs = (command: string, ran: RanScript): string =>
+  `\`${command}\` ${ran.timedOut ? `ran out of time after ${String(setupMs / 1000)} s` : ran.exitCode === null ? 'did not start' : `exited ${String(ran.exitCode)}`}`;
+
+export async function setUp(env: JobEnvironment): Promise<SetUp | null> {
+  if (env.AFTER_TURN !== 'push' || env.SETUP_COMMAND === null) return null;
+  const { bridge, codex } = await accounts();
+  const owner = asBridge(bridge, env);
+  const before = await snapshot(owner);
+  const ran = await contained('sh', ['-c', env.SETUP_COMMAND], { as: codex, cwd: layout.workspace, env: { PATH: path(), HOME: layout.codexHome, LANG: 'C.UTF-8', CI: 'true' }, timeoutMs: setupMs, graceMs: 2_000 });
+  const after = await snapshot(owner);
+  const ended = endedAs(env.SETUP_COMMAND, ran);
+  await run('sh', ['-c', 'cat > "$1"', 'sh', setupLog], { ...asUser(codex), input: `${ended}.\n\n${ran.output}\n` });
+  return { ended, baseline: { before, after } };
+}
+
+export type Git = (args: readonly string[], input?: string) => Promise<string>;
+
+const removed = /^0+$/;
+
+export async function withoutSetup(git: Git, { before, after }: Baseline): Promise<string> {
+  const now = await git(['write-tree']);
+  const fields = (await git(['diff-tree', '-r', '-z', '--no-renames', after, now])).split('\0');
+  const records: string[] = [];
+  for (let at = 0; at + 1 < fields.length; at += 2) {
+    const [, mode = '', , object = ''] = (fields[at] ?? '').slice(1).split(' ');
+    records.push(`${removed.test(mode) ? '0' : mode} ${object}\t${fields[at + 1] ?? ''}`);
+  }
+  await git(['read-tree', before]);
+  if (records.length > 0) await git(['update-index', '-z', '--index-info'], `${records.join('\0')}\0`);
+  return git(['write-tree']);
+}
+
+const asGit =
+  (owner: Run): Git =>
+  (args, input) =>
+    bridgeGit(args, input === undefined ? owner : { ...owner, input });
+
 export type StepPush = { readonly pushed: string } | { readonly unchanged: string };
 
-export async function pushStep(env: JobEnvironment, message: string, lastPushed: string | undefined): Promise<StepPush> {
+export async function pushStep(env: JobEnvironment, message: string, lastPushed: string | undefined, baseline: Baseline | null = null): Promise<StepPush> {
   const { bridge } = await accounts();
   const owner = asBridge(bridge, env);
   await bridgeGit(['add', '--all'], owner);
-  const staged = await bridgeGit(['diff', '--cached', '--name-only'], owner);
-  if (staged !== '') await bridgeGit(['commit', '--quiet', '--no-verify', '--message', message], owner);
-  const head = await bridgeGit(['rev-parse', 'HEAD'], owner);
-  const trees = await bridgeGit(['rev-parse', 'HEAD^{tree}', `${lastPushed ?? env.START_COMMIT}^{tree}`], owner);
-  const [now, before] = trees.split('\n');
-  if (now === before) return { unchanged: head };
+  const tree = baseline === null ? await bridgeGit(['write-tree'], owner) : await withoutSetup(asGit(owner), baseline);
+  const [parent = '', parentTree = '', before = ''] = (await bridgeGit(['rev-parse', 'HEAD', 'HEAD^{tree}', `${lastPushed ?? env.START_COMMIT}^{tree}`], owner)).split('\n');
+  const head = tree === parentTree ? parent : await bridgeGit(['commit-tree', tree, '-p', parent, '-m', message], owner);
+  if (head !== parent) await bridgeGit(['update-ref', 'HEAD', head], owner);
+  if (tree === before) return { unchanged: head };
   const ref = `refs/heads/${env.ATTEMPT_BRANCH}`;
   try {
     await bridgeGit(['push', '--quiet', '--no-verify', `--force-with-lease=${ref}:${lastPushed ?? ''}`, env.REPO_URL, `HEAD:${ref}`], owner);

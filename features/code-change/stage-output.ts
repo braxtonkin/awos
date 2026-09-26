@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { actionKinds, owe, ticket, type Owe, type OwedKinds } from '../../shared/actions.ts';
-import type { AgentSteps, Change, Earlier, Reply, Settled, StepInput, Verdicted } from '../../shared/agent-step.ts';
+import type { AgentSteps, Change, Earlier, History, Reply, Settled, StepInput, Verdicted, Workspace } from '../../shared/agent-step.ts';
 import { behaviorOf, evidenceText, type Reproduction } from '../../shared/reproduction.ts';
 import { review } from '../../shared/review.ts';
 import { workflow } from './workflow.ts';
@@ -31,6 +31,8 @@ function cameBack(earlier: readonly Earlier[]): string | null {
   const evidence = evidenceText(after.evidence);
   return [`The task came back from ${after.step} with ${after.verdict}.`, evidence ?? textOf(after.output) ?? JSON.stringify(after.output)].join('\n\n');
 }
+
+const workspace = ({ step }: History): Workspace => ({ setup: step === 'implement' });
 
 function input({ step, ticket: { key, title, description }, earlier }: StepInput): string {
   const named = description === null ? `Ticket ${key}: ${title}` : `Ticket ${key}: ${title}\n\n${description.trim()}`;
@@ -125,4 +127,4 @@ function stepOwes(verdicted: Verdicted): readonly Owe<Kind>[] {
   }
 }
 
-export const agentSteps: AgentSteps<Kind> = { input, settle, owes };
+export const agentSteps: AgentSteps<Kind> = { workspace, input, settle, owes };

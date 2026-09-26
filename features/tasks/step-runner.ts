@@ -1,10 +1,10 @@
 import { sql } from 'kysely';
 import { z } from 'zod';
 import { actionKinds, type Enqueue } from '../../shared/actions.ts';
-import type { AgentSteps, Change, Earlier, Evidence, PullRequestFact } from '../../shared/agent-step.ts';
+import type { AgentSteps, Change, Earlier, Evidence, PullRequestFact, Workspace } from '../../shared/agent-step.ts';
 import type { Database } from '../../shared/db/client.ts';
 import { finalMessage, reduce } from '../../shared/items.ts';
-import { reproduction } from '../../shared/reproduction.ts';
+import { reproduction, setupLog } from '../../shared/reproduction.ts';
 import type { Transacting } from '../../shared/transaction.ts';
 import { outputSchema, runByAgent, type AgentStepKind, type Workflow } from '../../shared/workflow.ts';
 import { advanceWithin, type Then } from './advance.ts';
@@ -107,13 +107,12 @@ export async function stepOf(db: Database, runner: StepRunner, attempt: string):
 
 const evidenceBody = z.record(z.string(), z.unknown());
 
-async function earlierOf(db: Database, step: Step): Promise<readonly Earlier[]> {
+export async function earlierOf(db: Database, task: string): Promise<readonly Earlier[]> {
   const rows = await db
     .selectFrom('attempt')
     .leftJoin('evidence', 'evidence.attempt_id', 'attempt.id')
     .select(['attempt.step', 'attempt.verdict', 'attempt.output', 'evidence.body'])
-    .where('attempt.task_id', '=', step.task)
-    .where('attempt.id', '<', step.attempt)
+    .where('attempt.task_id', '=', task)
     .where('attempt.finished_at', 'is not', null)
     .orderBy('attempt.id')
     .execute();
@@ -213,9 +212,15 @@ export async function baseOf(db: Database, task: string): Promise<string | null>
 
 export type Prompt = { readonly prompt: string; readonly outputSchema: Readonly<Record<string, unknown>> };
 
-export async function promptFor(db: Database, step: Step, environment: string | null, description: string | null): Promise<Prompt> {
+export type PromptParts = { readonly earlier: readonly Earlier[]; readonly workspace: Workspace; readonly environment: string | null; readonly description: string | null };
+
+const ranBeforeTurn = (command: string): string =>
+  `\`${command}\`\n\nAutoWorker ran this command in the workspace before your turn and wrote how it ended, then the end of its output, to \`${setupLog}\`. Read that file before you run the tests. If the command failed, fix what stopped it or run it again.`;
+
+export async function promptFor(db: Database, step: Step, { earlier, workspace, environment, description }: PromptParts): Promise<Prompt> {
   const { instructions, skills } = await routineStep(db, step);
-  const input = step.agent.input({ step: step.kind.name, ticket: { key: step.key, title: step.title, description }, earlier: await earlierOf(db, step) });
+  const input = step.agent.input({ step: step.kind.name, ticket: { key: step.key, title: step.title, description }, earlier });
+  const setup = step.repository?.setupCommand ?? null;
   const sections = [
     step.kind.prompt.trim(),
     ...(instructions === '' ? [] : [section("The routine's instructions", instructions)]),
@@ -223,7 +228,7 @@ export async function promptFor(db: Database, step: Step, environment: string | 
     ...(await answersFor(db, step)),
     section('Goal', step.goal),
     ...(step.repository?.fastTestCommand == null ? [] : [section('Fast test command', `\`${step.repository.fastTestCommand}\``)]),
-    ...(step.repository?.setupCommand == null ? [] : [section('Setup command', `\`${step.repository.setupCommand}\``)]),
+    ...(setup === null ? [] : [section('Setup command', workspace.setup ? ranBeforeTurn(setup) : `\`${setup}\``)]),
     ...(environment === null ? [] : [section('Environment', environment)]),
     section('Input', input),
     ...skills.map(skillLine),

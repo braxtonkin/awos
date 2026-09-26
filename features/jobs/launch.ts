@@ -1,9 +1,9 @@
 import { ApiException, type V1Job, type V1Pod, type V1Secret } from '@kubernetes/client-node';
 import { labels, type Cluster } from '../../shared/cluster.ts';
 import type { AccessOnlyLogin } from '../../shared/codex-login.ts';
-import type { JobAfterTurn } from '../../shared/workflow.ts';
+import type { JobPlan } from '../../shared/workflow.ts';
 import type { ImageReference, JobSettings } from './settings.ts';
-import type { AfterTurnKeys, SecretKeys } from './workspace.ts';
+import type { PlanKeys, SecretKeys } from './workspace.ts';
 
 export type RunAs = {
   readonly name: string;
@@ -20,7 +20,7 @@ export type LaunchInput = {
   readonly image: ImageReference;
   readonly repositoryUrl: string;
   readonly startCommit: string;
-  readonly afterTurn: JobAfterTurn;
+  readonly plan: JobPlan;
   readonly attemptToken: string;
   readonly engineUrl: string;
   readonly runAs: RunAs;
@@ -40,8 +40,8 @@ const labelValue = (text: string): string =>
 
 export const imageFor = (settings: JobSettings, repositoryImage: ImageReference | null): ImageReference => repositoryImage ?? settings.image;
 
-const afterTurnKeys = (plan: JobAfterTurn): AfterTurnKeys =>
-  plan.kind === 'push' ? { AFTER_TURN: 'push' } : { AFTER_TURN: 'reproduce', BASE_COMMIT: plan.base, SETUP_COMMAND: plan.setup ?? '' };
+const planKeys = (plan: JobPlan): PlanKeys =>
+  plan.kind === 'push' ? { AFTER_TURN: 'push', SETUP_COMMAND: plan.setup ?? '' } : { AFTER_TURN: 'reproduce', BASE_COMMIT: plan.base, SETUP_COMMAND: plan.setup ?? '' };
 
 export function manifests(input: LaunchInput, settings: JobSettings): Manifests {
   const name = jobName(input.attempt);
@@ -62,7 +62,7 @@ export function manifests(input: LaunchInput, settings: JobSettings): Manifests 
     CODEX_AUTH_JSON: input.runAs.codexLogin,
     GIT_AUTHOR_NAME: input.runAs.name,
     GIT_AUTHOR_EMAIL: input.runAs.email,
-    ...afterTurnKeys(input.afterTurn),
+    ...planKeys(input.plan),
   };
   return {
     secret: { apiVersion: 'v1', kind: 'Secret', metadata, type: 'Opaque', stringData: keys },

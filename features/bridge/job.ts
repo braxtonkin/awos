@@ -67,7 +67,9 @@ export function applier(): Applier {
   };
 }
 
-export type AfterTurn = (turn: TurnCompleted) => Promise<readonly LineBody[]>;
+export type AfterTurn<T = undefined> = (turn: TurnCompleted, prepared: T) => Promise<readonly LineBody[]>;
+
+export type TurnSteps<T> = { readonly beforeTurn: () => Promise<T>; readonly afterTurn: AfterTurn<T> };
 
 export type BridgeSettings = {
   readonly engineUrl: URL;
@@ -134,7 +136,7 @@ function waker(): Wake {
 
 type Posted = { readonly answer: EventsAnswer } | { readonly refused: Refused } | { readonly failed: string };
 
-export async function runBridge(settings: BridgeSettings, afterTurn: AfterTurn, say: (line: string) => void): Promise<Ending> {
+export async function runBridge<T>(settings: BridgeSettings, steps: TurnSteps<T>, say: (line: string) => void): Promise<Ending> {
   const box = outbox();
   const commands = applier();
   const posting = waker();
@@ -224,7 +226,7 @@ export async function runBridge(settings: BridgeSettings, afterTurn: AfterTurn, 
       const interrupted = completed.data.params.turn.status === 'interrupted';
       void quiet()
         .then(() => storedOrFenced())
-        .then(() => (interrupted || fenced ? [] : afterTurn(completed.data.params)))
+        .then(async () => (interrupted || fenced ? [] : steps.afterTurn(completed.data.params, await prepared)))
         .then(
           lines => {
             for (const body of lines) box.push(body);
@@ -237,7 +239,15 @@ export async function runBridge(settings: BridgeSettings, afterTurn: AfterTurn, 
         );
     }
   });
-  write(initialize);
+  const prepared = steps.beforeTurn();
+  void prepared.then(
+    () => {
+      if (ending === undefined) write(initialize);
+    },
+    (error: unknown) => {
+      end({ code: 1, reason: `the step before the turn failed: ${error instanceof Error ? error.message : String(error)}` });
+    },
+  );
 
   const post = async (): Promise<Posted> => {
     const lines = box.batch();

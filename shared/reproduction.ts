@@ -2,6 +2,8 @@ import { z } from 'zod';
 
 export const reproductionPath = '/tmp/autoworker-reproduce.sh';
 
+export const setupLog = '/tmp/autoworker-setup.log';
+
 export const outputLimit = 16_000;
 
 const commit = z.string().regex(/^[0-9a-f]{40}$/);

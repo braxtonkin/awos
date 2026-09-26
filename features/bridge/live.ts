@@ -190,7 +190,7 @@ function settingsFor(world: World, overrides: Partial<BridgeSettings> = {}): Bri
 
 function startBridge(world: World, afterTurn: AfterTurn = () => Promise.resolve([]), overrides: Partial<BridgeSettings> = {}): Run {
   const log: string[] = [];
-  const ending = runBridge(settingsFor(world, overrides), afterTurn, line => log.push(`${new Date().toISOString()} ${line}`));
+  const ending = runBridge(settingsFor(world, overrides), { beforeTurn: () => Promise.resolve(undefined), afterTurn }, line => log.push(`${new Date().toISOString()} ${line}`));
   return { ending, log };
 }
 

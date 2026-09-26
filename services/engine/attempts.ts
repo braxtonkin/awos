@@ -104,7 +104,7 @@ export function attempts(settings: AttemptSettings): Loop {
             image,
             repositoryUrl: repositoryUrl(settings.gitBaseUrl, request.repository),
             startCommit: request.startCommit,
-            afterTurn: request.afterTurn,
+            plan: request.plan,
             attemptToken: request.attemptToken,
             engineUrl: settings.engineUrl,
             runAs: { name: request.runAs.name, email: request.runAs.email, githubToken: token.token, codexLogin: login.login },

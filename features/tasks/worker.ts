@@ -1,11 +1,11 @@
 import type { Database } from '../../shared/db/client.ts';
 import type { Loop } from '../../shared/loop.ts';
-import type { Instruction, JobAfterTurn } from '../../shared/workflow.ts';
+import type { Instruction, JobPlan } from '../../shared/workflow.ts';
 import { abandon, advance } from './advance.ts';
 import { claim, claimable, holdingLaunch, jobCreated, park, renew, unlaunched, type Start } from './claim.ts';
 import { continuation } from './continuation.ts';
 import type { RunAsRule } from './run-as.ts';
-import { baseOf, promptFor, stepOf, type Prompt, type StepRunner } from './step-runner.ts';
+import { baseOf, earlierOf, promptFor, stepOf, type Prompt, type StepRunner } from './step-runner.ts';
 
 export type JobRequest = {
   readonly attempt: string;
@@ -15,7 +15,7 @@ export type JobRequest = {
   readonly image: string | null;
   readonly repository: string;
   readonly startCommit: string;
-  readonly afterTurn: JobAfterTurn;
+  readonly plan: JobPlan;
   readonly attemptToken: string;
   readonly runAs: { readonly id: string; readonly name: string; readonly email: string };
 };
@@ -86,7 +86,9 @@ async function launchHeld(db: Database, settings: WorkerSettings, attempt: strin
   }
   if (environment !== null && 'ended' in environment) return `attempt ${attempt} of task ${step.key} ended before its environment started`;
   if (environment !== null && (await renew(db, attempt, new Date(), settings.startLeaseMs)) === 'lost') return `attempt ${attempt} of task ${step.key} ended while its environment started`;
-  const prompt = await promptFor(db, step, environment?.started ?? null, await settings.describeTicket(step.key, step.runAs.id));
+  const earlier = await earlierOf(db, step.task);
+  const workspace = step.agent.workspace({ step: step.kind.name, earlier });
+  const prompt = await promptFor(db, step, { earlier, workspace, environment: environment?.started ?? null, description: await settings.describeTicket(step.key, step.runAs.id) });
   const token = await settings.issueToken(db, attempt);
   if (token === undefined) return `attempt ${attempt} of task ${step.key} ended or heard from its bridge before this pass launched it, so this pass launched nothing`;
   if (!(await turnStarted(db, attempt))) await settings.startTurn(db, attempt, prompt, now);
@@ -98,7 +100,10 @@ async function launchHeld(db: Database, settings: WorkerSettings, attempt: strin
     image: step.repository.jobImage,
     repository: step.repository.github,
     startCommit: step.start,
-    afterTurn: step.kind.afterTurn === 'reproduce' ? { kind: 'reproduce', base: (await baseOf(db, step.task)) ?? step.start, setup: step.repository.setupCommand } : { kind: 'push' },
+    plan:
+      step.kind.afterTurn === 'reproduce'
+        ? { kind: 'reproduce', base: (await baseOf(db, step.task)) ?? step.start, setup: step.repository.setupCommand }
+        : { kind: 'push', setup: workspace.setup ? step.repository.setupCommand : null },
     attemptToken: token,
     runAs: step.runAs,
   });
