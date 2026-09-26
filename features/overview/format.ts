@@ -8,3 +8,10 @@ export const nameOf = (machineName: string): string => {
   const spaced = machineName.replaceAll(/[-_]+/g, ' ');
   return `${spaced.charAt(0).toUpperCase()}${spaced.slice(1)}`;
 };
+
+export type Sentences = { readonly first: string; readonly rest: string };
+
+export const splitFirst = (text: string): Sentences => {
+  const end = text.search(/[.?!]\s/);
+  return end === -1 ? { first: text, rest: '' } : { first: text.slice(0, end + 1), rest: text.slice(end + 1) };
+};

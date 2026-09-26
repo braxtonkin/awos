@@ -14,9 +14,9 @@ const sourceKinds: readonly Choice[] = [
   { id: 'schedule', name: 'Schedule, one task each run' },
 ];
 
-const field = { height: 32, padding: '0 10px', borderRadius: 6, border: `1px solid ${color('rule-strong')}`, background: color('surface'), width: '100%' } as const;
+const field = { height: 32, padding: '0 12px', borderRadius: 6, border: `1px solid ${color('rule-strong')}`, background: color('surface'), width: '100%' } as const;
 
-const area = { ...field, height: 'auto', minHeight: 64, padding: '6px 10px', resize: 'vertical', lineHeight: '20px' } as const;
+const area = { ...field, height: 'auto', minHeight: 64, padding: '6px 12px', resize: 'vertical', lineHeight: '20px' } as const;
 
 const hint = { fontSize: 12, color: color('muted') } as const;
 
@@ -66,7 +66,7 @@ function Said({ state }: { readonly state: SaveState }) {
   if (state.kind === 'ready') return null;
   if (state.kind === 'invalid') {
     return (
-      <ul role="alert" data-save="problems" style={{ margin: 0, paddingLeft: 18, color: color('fail'), display: 'flex', flexDirection: 'column', gap: 4 }}>
+      <ul role="alert" data-save="problems" style={{ margin: 0, paddingLeft: 20, color: color('fail'), display: 'flex', flexDirection: 'column', gap: 4 }}>
         {state.problems.map(problem => (
           <li key={problem}>{problem}</li>
         ))}

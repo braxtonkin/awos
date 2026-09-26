@@ -2,7 +2,7 @@ import { markLabels, marks } from '../../shared/task-status.ts';
 import { StatusMarks } from '../../shared/ui/status.tsx';
 import { color } from '../../shared/ui/tokens.ts';
 import { between, duration } from '../../shared/ui/clock.ts';
-import { nameOf } from './format.ts';
+import { nameOf, splitFirst } from './format.ts';
 import { actionLink, box, EmptyWorld, Heading, page, taskHref, ViewSwitch } from './parts.tsx';
 import type { ListRow, Option, TaskList } from './read.ts';
 
@@ -38,11 +38,6 @@ const lastColumn = (row: ListRow, now: string): string => {
   return said[row.state];
 };
 
-const detailOf = (row: ListRow): string | null => {
-  const said: Readonly<Record<ListRow['state'], string | null>> = { ready: `${nameOf(row.step)} is running.`, waiting: row.waitingReason, stopped: `Stopped at ${nameOf(row.step)}.`, done: null };
-  return said[row.state];
-};
-
 function Rows({ rows, now }: { readonly rows: readonly ListRow[]; readonly now: string }) {
   return (
     <table style={{ ...box, width: '100%', tableLayout: 'fixed', borderCollapse: 'separate', borderSpacing: 0, overflow: 'hidden' }}>
@@ -67,7 +62,11 @@ function Rows({ rows, now }: { readonly rows: readonly ListRow[]; readonly now: 
                 <span className="mono" style={{ color: color('muted'), flex: 'none' }}>{row.key}</span>
                 <span style={{ fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{row.title}</span>
               </a>
-              {detailOf(row) === null ? null : <span style={{ display: 'block', fontSize: 13, color: color('muted'), overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{detailOf(row)}</span>}
+              {row.state !== 'waiting' || row.waitingReason === null ? null : (
+                <span title={row.waitingReason} style={{ display: 'block', fontSize: 13, color: color('muted'), overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {splitFirst(row.waitingReason).first}
+                </span>
+              )}
             </td>
             <td style={{ ...cell, color: color('muted') }}>{row.routine}</td>
             <td style={{ ...cell, color: color('muted') }}>{row.person}</td>
