@@ -53,7 +53,7 @@ const routines = {
 
 type RoutineName = keyof typeof routines;
 
-export const seedNames = ['running', 'steer-acted', 'question', 'waiting-gate', 'failed-behavior', 'failed-environment', 'stopped', 'done', 'expired', 'nobody-to-run-as', 'login-expired', 'no-tasks', 'no-routines'] as const;
+export const seedNames = ['running', 'steer-acted', 'question', 'waiting-gate', 'failed-behavior', 'failed-environment', 'stopped', 'done', 'expired', 'failed-after-conflict', 'nobody-to-run-as', 'login-expired', 'no-tasks', 'no-routines'] as const;
 
 export type SeedName = (typeof seedNames)[number];
 
@@ -104,6 +104,7 @@ export const seeds: Readonly<Record<SeedName, Seed>> = {
   stopped: { plant: { kind: 'ticket', routine: 'work', work: 'longStream', assigned: true, then: 'stop' }, expect: { kind: 'task', state: 'stopped', step: 'specify', ...quiet } },
   done: { plant: { kind: 'past' }, expect: { kind: 'task', state: 'done', step: 'land', ...quiet } },
   expired: { plant: { kind: 'past' }, expect: { kind: 'task', state: 'done', step: 'land', ...quiet, aged: true } },
+  'failed-after-conflict': { plant: { kind: 'past' }, expect: waitsForRetry('implement', 'The Implement step failed 3 times in a row.') },
   'nobody-to-run-as': { plant: { kind: 'ticket', routine: 'unassigned', work: 'longStream', assigned: false }, expect: waitsForRetry('specify', 'Nobody can run this task yet.') },
   'login-expired': { plant: { kind: 'login' }, expect: { kind: 'login', state: 'invalid' } },
   'no-tasks': { plant: { kind: 'empty', routines: true }, expect: { kind: 'world', routines: true, tasks: 0 } },

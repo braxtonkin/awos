@@ -19,7 +19,7 @@ import { catalogProblems, type Audit } from '../../tools/verify/catalog.ts';
 import { checkCatalog } from './catalog.ts';
 import { claim, lostTooOften } from './claim.ts';
 import { coreRunAs } from './run-as.ts';
-import { pastSeedNames, seedPast } from './seed.ts';
+import { pastSeedNames, pastSeeds, seedPast } from './seed.ts';
 import { provePlants, type PlantProof } from './invariants.ts';
 import { stepMutantName, type StepMutantName } from './sim-jobs.ts';
 import {
@@ -1125,9 +1125,11 @@ async function seedChecks(args: readonly string[]): Promise<readonly Check[]> {
   const db = connect(database, 2);
   try {
     const planted = await seedPast(db, seed, routine, key, new Date());
-    const name = `${seed} is seeded as ${planted.key}, done`;
-    const detail = `${planted.state} at ${planted.step}, its last attempt finished at ${planted.finishedAt.toISOString()}`;
-    return [planted.state === 'done' ? pass(name, detail) : fail(name, detail)];
+    const { ends } = pastSeeds[seed];
+    const reached = planted.state === ends.state && (ends.state === 'done' || (planted.waitingOn === ends.waitingOn && planted.reason === ends.reason));
+    const name = `${seed} is seeded as ${planted.key}, ${ends.state === 'done' ? ends.state : `waiting on ${ends.waitingOn}`}`;
+    const detail = `${planted.state} at ${planted.step}, its last attempt finished at ${planted.finishedAt.toISOString()}${planted.reason === null ? '' : `; waiting on ${planted.waitingOn ?? 'nothing'}: ${planted.reason}`}`;
+    return [reached ? pass(name, detail) : fail(name, detail)];
   } finally {
     await db.destroy();
   }
@@ -1159,7 +1161,7 @@ export const scenarios: readonly Scenario[] = [
   },
   {
     name: 'tasks-seed',
-    summary: "writes a past state, done or expired, as task --key of the routine --routine in the database at --database, through the tasks feature's claim and advance with an earlier time, and reads it back",
+    summary: "writes a past seed's story, done, expired, or failed-after-conflict, as task --key of the routine --routine in the database at --database, through the tasks feature's claim, advance, and handOff with earlier times, and checks it ends in the state the seed declares",
     run: seedChecks,
   },
   {

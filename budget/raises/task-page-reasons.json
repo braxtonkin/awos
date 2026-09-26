@@ -1,0 +1,12 @@
+{
+  "why": "The task page says why a task failed. features/task-page/ending.ts words how each attempt ended from its verdict and the words it recorded, features/task-page/reproduction.tsx reads Verify's reproduction as a sentence with both runs side by side, and the Evidence tab folds a step's earlier tries under its newest, so the screens stay within their word limit. The failed-after-conflict past seed and lane u8 reasons reproduce SBX-53, a task that failed after Land sent it back for a conflict; the lane counts as product because the verification role's glob matches only lanes.ts. The feature map describes the new card, step bar, and tabs.",
+  "raise": {
+    "characters/docs": 1018,
+    "characters/e2e-harness": 142,
+    "characters/feature-verification": 483,
+    "characters/product": 19541,
+    "lines/e2e-harness": 1,
+    "lines/feature-verification": 4,
+    "lines/product": 292
+  }
+}

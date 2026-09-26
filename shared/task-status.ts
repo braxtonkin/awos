@@ -6,7 +6,7 @@ export const marks = ['failed', 'needs-you', 'running', 'stopped', 'landed'] as 
 
 export type Mark = (typeof marks)[number];
 
-const failing: Readonly<Record<Verdict, boolean>> = {
+export const failing: Readonly<Record<Verdict, boolean>> = {
   behavior_fail: true,
   environment_fail: true,
   fail: true,
