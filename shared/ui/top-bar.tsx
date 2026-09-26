@@ -67,7 +67,7 @@ export function TopBar({ people, acting, pick }: TopBarProps) {
             {acting === undefined ? 'Pick who you are' : <><Avatar name={acting.name} />{acting.name}</>}
             <Chevron />
           </summary>
-          <form action={pick} onSubmit={close} role="menu" style={{ position: 'absolute', right: 0, top: 40, zIndex: 20, width: 240, padding: 4, background: color('surface'), border: `1px solid ${color('rule')}`, borderRadius: 8 }}>
+          <form action={pick} onSubmit={close} role="menu" style={{ position: 'absolute', right: -12, top: 40, zIndex: 20, width: 240, padding: 4, background: color('surface'), border: `1px solid ${color('rule')}`, borderRadius: 8, boxShadow: '0 8px 24px rgba(0, 0, 0, 0.12)' }}>
             {people.map(person => (
               <button key={person.id} type="submit" name="person" value={person.id} role="menuitemradio" aria-checked={person.id === acting?.id} className="hov" style={item}>
                 <Avatar name={person.name} />
