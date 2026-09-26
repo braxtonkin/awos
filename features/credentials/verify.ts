@@ -11,6 +11,7 @@ import { sql } from 'kysely';
 import { getContainerRuntimeClient } from 'testcontainers';
 import { z } from 'zod';
 import { connect, type Database } from '../../shared/db/client.ts';
+import type { RepositorySave } from '../../shared/repository-settings.ts';
 import { answerOf, request, type PayloadOf, type RequestAnswer } from '../../shared/requests.ts';
 import { fail, pass, type Check, type Scenario } from '../../tools/verify/check.ts';
 import { engineHandlesSigtermFrom, hangCeilingMs } from '../../tools/verify/engine.ts';
@@ -899,6 +900,70 @@ async function duplicateAccountRollsBack(world: SetupWorld): Promise<Outcome> {
   };
 }
 
+async function engineUntil(url: string, done: () => Promise<boolean>): Promise<{ readonly finished: boolean; readonly said: string }> {
+  const env = { ...process.env, DATABASE_URL: url, BRIDGE_PORT: '0', REQUESTS_EVERY_MS: '100', SCHEDULER_EVERY_MS: '3600000' };
+  const child = spawn(process.execPath, [engineMain], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+  let said = '';
+  const hear = (chunk: Buffer): void => {
+    said += chunk.toString('utf8');
+  };
+  child.stdout.on('data', hear);
+  child.stderr.on('data', hear);
+  const exited = new Promise<number | null>(resolve => {
+    child.on('exit', resolve);
+  });
+  const deadline = performance.now() + hangCeilingMs;
+  let finished = false;
+  while (!finished && child.exitCode === null && performance.now() < deadline) {
+    finished = await done();
+    if (!finished) await wait(100);
+  }
+  if (!finished && child.exitCode === null) said += `\nThe verify tool stopped waiting after ${String(hangCeilingMs / 1000)} s, and the engine still ran.`;
+  child.kill(said.includes(engineHandlesSigtermFrom) ? 'SIGTERM' : 'SIGKILL');
+  await Promise.race([exited, wait(hangCeilingMs).then(() => child.kill('SIGKILL'))]);
+  return { finished, said };
+}
+
+async function engineSavesRepository(world: SetupWorld): Promise<Outcome> {
+  const applied = await world.apply(setupFile);
+  if (applied.code !== 0) return { problems: [`setup exited ${String(applied.code)}: ${applied.stderr}`], detail: '' };
+  const person = (await world.engine.selectFrom('person').select('id').where('email', '=', 'ada@example.com').executeTakeFirstOrThrow()).id;
+  const repository = (await world.engine.selectFrom('repository').select('id').where('github', '=', sandboxRepository.github).executeTakeFirstOrThrow()).id;
+  const saved: RepositorySave = {
+    repository: { kind: 'listed', id: repository },
+    branch: 'main',
+    image: sandboxImage,
+    fastTestCommand: 'npm run test:quick',
+    setupCommand: null,
+    verifyProvider: 'tests-only',
+    ignorableChecks: ['lint-docs'],
+    draftLeaves: 'at-once',
+    ignoredReviewers: ['bot-reviewer'],
+  };
+  const good = randomUUID();
+  const planted = randomUUID();
+  await request(world.engine, { id: good, person, at: new Date(), kind: 'save_repository', target: null, payload: saved });
+  await request(world.engine, { id: planted, person, at: new Date(), kind: 'save_repository', target: null, payload: { ...saved, fastTestCommand: 'npm run never', verifyProvider: 'made-up' } });
+  const answers = async (): Promise<readonly (RequestAnswer | undefined)[]> => Promise.all([answerOf(world.engine, good), answerOf(world.engine, planted)]);
+  const run = await engineUntil(world.url, async () => (await answers()).every(answer => answer !== 'waiting'));
+  const [kept, refusedPlant] = await answers();
+  const row = await world.engine.selectFrom('repository').select(['fast_test_command', 'saved_by']).where('id', '=', repository).executeTakeFirstOrThrow();
+  const action = await world.engine
+    .selectFrom('human_action')
+    .innerJoin('person', 'person.id', 'human_action.person_id')
+    .select(['human_action.kind', 'human_action.repository_id', 'person.email'])
+    .where('human_action.id', '=', good)
+    .executeTakeFirst();
+  const problems = [
+    ...(run.finished ? [] : [`the engine never answered both requests: ${run.said}`]),
+    ...(isDeepStrictEqual(kept, { recorded: good }) ? [] : [`the save was answered ${JSON.stringify(kept)}, not recorded`]),
+    ...(isDeepStrictEqual(action, { kind: 'edit_repository', repository_id: repository, email: 'ada@example.com' }) ? [] : [`the save's action is ${JSON.stringify(action)}, not Ada's edit_repository`]),
+    ...(typeof refusedPlant === 'object' && 'refused' in refusedPlant && refusedPlant.refused.includes('made-up') ? [] : [`the planted unpublished provider was answered ${JSON.stringify(refusedPlant)}, not refused by name`]),
+    ...(row.fast_test_command === 'npm run test:quick' && row.saved_by === good ? [] : [`the row holds ${JSON.stringify(row)} after the refused plant`]),
+  ];
+  return { problems, detail: `recorded ${good} as edit_repository; the plant was refused: ${typeof refusedPlant === 'object' && 'refused' in refusedPlant ? refusedPlant.refused : 'no'}` };
+}
+
 async function dashboardCannotReadSetupLogins(world: SetupWorld): Promise<Outcome> {
   const run = await world.apply(setupFile);
   const login = `dashboard_${randomBytes(6).toString('hex')}`;
@@ -988,6 +1053,7 @@ const setupChecks: readonly Entry[] = [
   { name: 'the engine saves a routine through a save_routine request as version 2, and refuses a planted routine naming a workflow it did not publish', run: inSetup(savesThroughTheEngine) },
   { name: 'two people with one Jira account id are refused by Postgres, and the people section rolls back', run: inSetup(duplicateAccountRollsBack) },
   { name: 'after setup, the dashboard role cannot select a sealed column', run: inSetup(dashboardCannotReadSetupLogins) },
+  { name: "the engine applies a save_repository request through saveRepository as the person's edit_repository, and refuses a Verify provider it did not publish by name", run: inSetup(engineSavesRepository) },
   { name: repeatLimit, run: postgres => setupSpeed(postgres) },
   { name: 'the speed check fails when each repeat apply starts late by the median fresh apply so far', run: slowRepeatFails },
 ];
@@ -1270,7 +1336,10 @@ export const scenarios: readonly Scenario[] = [
   {
     name: 'setup',
     summary:
-      'runs node services/engine/setup.ts as a child process against fresh Postgres databases with made-up logins, and proves it applies a file once, refuses inline tokens and unmarked refreshable Codex logins, keeps a login the engine refreshed, records each replacement, never prints or stores a secret in the clear, and that a repeat apply takes at most 1.5 times as long as a fresh one',
+      [
+        'runs node services/engine/setup.ts as a child process against fresh Postgres databases with made-up logins, and proves it applies a file once, refuses inline tokens and unmarked refreshable Codex logins, keeps a login the engine refreshed, records each replacement, never prints or stores a secret in the clear,',
+        'that the engine applies a save_repository request as an edit_repository by the person who sent it, refuses a Verify provider it did not publish, and that a repeat apply takes at most 1.5 times as long as a fresh one',
+      ].join(' '),
     run: () => withPostgres(postgres => runEntries(postgres, setupChecks)),
   },
 ];

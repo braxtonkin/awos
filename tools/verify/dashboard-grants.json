@@ -13,7 +13,7 @@
     "select on person_request",
     "select on published_provider",
     "select on published_workflow_step",
-    "select on repository (branch, github, id)",
+    "select on repository (branch, draft_leaves, fast_test_command, github, id, ignorable_checks, ignored_reviewers, job_image, saved_by, setup_command, verify_provider)",
     "select on routine (creator_id, id, paused_by, run_as_id)",
     "select on routine_run (finished_at, id, outcome, pressed_by, reason, routine_id, slot, started_at, version)",
     "select on routine_step (instructions, routine_id, skills, step, version)",

@@ -6,7 +6,7 @@ import { color } from './tokens.ts';
 
 export type Link = { readonly href: string; readonly label: string };
 
-export const links: readonly Link[] = [{ href: '/routines', label: 'Routines' }];
+export const links: readonly Link[] = [{ href: '/routines', label: 'Routines' }, { href: '/repositories', label: 'Repositories' }];
 
 type TopBarProps = { readonly people: readonly Person[]; readonly acting: Person | undefined; readonly pick: (form: FormData) => Promise<void> };
 

@@ -7,6 +7,7 @@ import { z } from 'zod';
 import { refusal, type Database } from '../../shared/db/client.ts';
 import type { PersonKind, Repository as RepositoryRow } from '../../shared/db/types.ts';
 import { everyMinutes, jiraSearch, slug, source, stepSettings, words, type RoutineDraft, type Source } from '../../shared/routine-draft.ts';
+import { draftLeaves, github, imageByDigest, type RepositorySave } from '../../shared/repository-settings.ts';
 import type { Transacting } from '../../shared/transaction.ts';
 import type { Workflows } from './start.ts';
 
@@ -18,16 +19,9 @@ type Problem = { readonly path: readonly (string | number)[]; readonly message: 
 
 const email = z.string().trim().toLowerCase().pipe(z.email({ error: 'must be an email address' }));
 
-const repositoryFields = {
-  github: z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/, { error: 'must name an owner and a repository, such as example/sandbox' }),
-  branch: words,
-};
+const repositoryFields = { github, branch: words };
 
 const repository = z.strictObject(repositoryFields);
-
-const imageByDigest = z.string().regex(/^[a-z0-9][a-z0-9._/:-]*@sha256:[0-9a-f]{64}$/, {
-  error: 'must name the image by its sha256 digest, as name@sha256:<64 hex digits>, because a tag can move',
-});
 
 const repositorySettings = z.strictObject({
   ...repositoryFields,
@@ -36,7 +30,7 @@ const repositorySettings = z.strictObject({
   setupCommand: words.optional(),
   verifyProvider: slug.default('tests-only'),
   ignorableChecks: z.array(words).default([]),
-  draftLeaves: z.enum(['when-green', 'at-once']).default('when-green'),
+  draftLeaves: draftLeaves.default('when-green'),
   ignoredReviewers: z.array(words).default([]),
 });
 
@@ -237,26 +231,65 @@ const settingsOf = (planned: RepositorySettings): SettingColumns => ({
   ignored_reviewers: [...planned.ignoredReviewers],
 });
 
-async function applyRepository(trx: Database, admin: string, planned: RepositorySettings): Promise<Outcome> {
-  const { github, branch } = planned;
-  const wanted = settingsOf(planned);
-  const found = await trx
-    .selectFrom('repository')
-    .select(['id', ...settingColumns])
-    .where('github', '=', github)
-    .where('branch', '=', branch)
-    .executeTakeFirst();
-  const saved = randomUUID();
+type Acting = { readonly id: string; readonly person: string; readonly at: Date };
+
+type Wanted = { readonly branch: string } & SettingColumns;
+
+type Stored = { readonly id: string } & Wanted;
+
+const storedColumns = ['id', 'branch', ...settingColumns] as const;
+
+async function writeRepository(trx: Database, by: Acting, named: string, found: Stored | undefined, wanted: Wanted): Promise<Outcome> {
   if (found === undefined) {
-    const { id } = await trx.insertInto('repository').values({ github, branch, ...wanted, saved_by: saved }).returning('id').executeTakeFirstOrThrow();
-    await trx.insertInto('human_action').values({ id: saved, at: new Date(), person_id: admin, kind: 'add_repository', repository_id: id }).execute();
+    const { id } = await trx.insertInto('repository').values({ github: named, ...wanted, saved_by: by.id }).returning('id').executeTakeFirstOrThrow();
+    await trx.insertInto('human_action').values({ id: by.id, at: by.at, person_id: by.person, kind: 'add_repository', repository_id: id }).execute();
     return 'added';
   }
   const { id, ...stored } = found;
   if (isDeepStrictEqual(stored, wanted)) return 'same';
-  await trx.insertInto('human_action').values({ id: saved, at: new Date(), person_id: admin, kind: 'edit_repository', repository_id: id }).execute();
-  await trx.updateTable('repository').set({ ...wanted, saved_by: saved }).where('id', '=', id).execute();
+  await trx.insertInto('human_action').values({ id: by.id, at: by.at, person_id: by.person, kind: 'edit_repository', repository_id: id }).execute();
+  await trx.updateTable('repository').set({ ...wanted, saved_by: by.id }).where('id', '=', id).execute();
   return 'changed';
+}
+
+async function applyRepository(trx: Database, admin: string, planned: RepositorySettings): Promise<Outcome> {
+  const { github: named, branch } = planned;
+  const found = await trx.selectFrom('repository').select(storedColumns).where('github', '=', named).where('branch', '=', branch).executeTakeFirst();
+  return writeRepository(trx, { id: randomUUID(), person: admin, at: new Date() }, named, found, { branch, ...settingsOf(planned) });
+}
+
+export type RepositorySaved = 'recorded' | { readonly refused: string };
+
+const wantedFrom = (save: RepositorySave): Wanted => ({
+  branch: save.branch,
+  job_image: save.image,
+  fast_test_command: save.fastTestCommand,
+  setup_command: save.setupCommand,
+  verify_provider: save.verifyProvider,
+  ignorable_checks: [...save.ignorableChecks],
+  draft_leaves: save.draftLeaves,
+  ignored_reviewers: [...save.ignoredReviewers],
+});
+
+async function savedOver(tx: Transacting, save: RepositorySave): Promise<{ readonly named: string; readonly found: Stored | undefined } | { readonly refused: string }> {
+  if (save.repository.kind === 'new') return { named: save.repository.github, found: undefined };
+  const row = await tx.selectFrom('repository').select(['github', ...storedColumns]).where('id', '=', save.repository.id).executeTakeFirst();
+  if (row === undefined) return { refused: `No listed repository has the id ${save.repository.id}.` };
+  const { github: named, ...found } = row;
+  return { named, found };
+}
+
+export async function saveRepository(tx: Transacting, by: Acting, save: RepositorySave): Promise<RepositorySaved> {
+  const providers = (await tx.selectFrom('published_provider').select('name').orderBy('name').execute()).map(row => row.name);
+  if (!providers.includes(save.verifyProvider)) return { refused: `This engine does not publish the Verify provider ${save.verifyProvider}. Pick one of: ${providers.join(', ')}.` };
+  const over = await savedOver(tx, save);
+  if ('refused' in over) return over;
+  const { named, found } = over;
+  const listed = tx.selectFrom('repository').select('id').where('github', '=', named).where('branch', '=', save.branch);
+  const clash = await (found === undefined ? listed : listed.where('id', '<>', found.id)).executeTakeFirst();
+  if (clash !== undefined) return { refused: `${named} on ${save.branch} is already listed.` };
+  const outcome = await writeRepository(tx, by, named, found, wantedFrom(save));
+  return outcome === 'same' ? { refused: 'Nothing changed, so nothing was saved.' } : 'recorded';
 }
 
 export function applyRepositories<L>(db: Database, file: SetupFile<L>): Promise<Count> {

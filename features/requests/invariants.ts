@@ -30,6 +30,8 @@ export const world: readonly Statement[] = [
              (2, 1, 'Second', 'Hold requests.', interval '1 minute', '00000000-0000-4000-8000-000000000002', 'post', '{"kind": "tickets"}', false)`,
   sql`insert into task (routine_id, found_version, key, title, found_at, assignee_account_id, workflow, needs_repository, step)
       values (1, 1, 'T-1', 'First', ${t0}, null, 'post', false, 'post'), (2, 1, 'T-2', 'Second', ${t0}, null, 'post', false, 'post')`,
+  sql`with saved as (insert into human_action (id, at, person_id, kind, repository_id) values ('00000000-0000-4000-8000-000000000003', ${t0}, 1, 'add_repository', 1) returning id)
+      insert into repository (github, branch, saved_by) select 'example/sandbox', 'main', id from saved`,
 ];
 
 const asked = (id: string, position: number) =>

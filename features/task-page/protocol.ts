@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import type { TaskState, WaitingOn } from '../../shared/db/types.ts';
 import type { Transcript } from '../../shared/items.ts';
-import type { RequestAnswer } from '../../shared/requests.ts';
+import { requestAnswer, type RequestAnswer } from '../../shared/requests.ts';
 import { marks } from '../../shared/task-status.ts';
 
 export type Cursor = { readonly attempt: string; readonly line: number };
@@ -36,8 +36,6 @@ const live = z.strictObject({
 });
 
 export type TaskLive = z.infer<typeof live>;
-
-const requestAnswer = z.union([z.literal('waiting'), z.strictObject({ recorded: z.string() }), z.strictObject({ refused: z.string() })]) satisfies z.ZodType<RequestAnswer>;
 
 const line = z.strictObject({ kind: z.literal('line'), attempt: z.string(), seq: z.int().nonnegative(), at: moment, body: z.unknown() });
 

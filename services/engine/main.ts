@@ -35,6 +35,7 @@ import { sourcesByKind } from '../../features/routines/source.ts';
 import { actWithin, advance, approveFromOutside, handOff, refusalOf, steerWithin, type PersonAction, type SteerTurn, type StopTurn } from '../../features/tasks/advance.ts';
 import { claim, renew } from '../../features/tasks/claim.ts';
 import { reaper } from '../../features/tasks/reaper.ts';
+import { saveRepository } from '../../features/tasks/setup.ts';
 import { saveRoutine } from '../../features/tasks/setup.ts';
 import { coreRunAs, type RunAsRule } from '../../features/tasks/run-as.ts';
 import { finishStep, type StepRunner } from '../../features/tasks/step-runner.ts';
@@ -150,6 +151,7 @@ const handlers = {
     const saved = await saveRoutine(tx, workflows, { action: request.action, person: request.person, at: request.at, routine: request.target, draft: request.payload });
     return 'version' in saved ? 'recorded' : saved;
   },
+  save_repository: (tx, request) => saveRepository(tx, byWhom(request), request.payload),
 } satisfies Handlers<RequestKind>;
 
 const checkSettings = (given: Settings, key: SealingKey): CheckLoopSettings => ({

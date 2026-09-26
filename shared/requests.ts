@@ -2,6 +2,7 @@ import { setTimeout as wait } from 'node:timers/promises';
 import { sql } from 'kysely';
 import { z } from 'zod';
 import { refusal, type Database } from './db/client.ts';
+import { repositorySave } from './repository-settings.ts';
 import { answer, note } from './review.ts';
 import { routineDraft } from './routine-draft.ts';
 
@@ -22,6 +23,7 @@ export const requestKinds = {
   resume: { on: 'routine', payload: nothing },
   run_now: { on: 'routine', payload: nothing },
   save_routine: { on: 'routine', payload: routineDraft },
+  save_repository: { on: 'repository', payload: repositorySave },
 } as const;
 
 export type RequestKind = keyof typeof requestKinds;
@@ -32,7 +34,7 @@ export type PayloadOf<K extends RequestKind> = z.output<(typeof requestKinds)[K]
 
 export type TargetKind = (typeof requestKinds)[RequestKind]['on'];
 
-export type TargetOf<K extends RequestKind> = K extends 'save_routine' ? string | null : string;
+export type TargetOf<K extends RequestKind> = K extends 'save_routine' ? string | null : K extends 'save_repository' ? null : string;
 
 const target = z.string().regex(/^[1-9]\d*$/, { error: 'must be the id of the task or routine the request names' });
 
@@ -47,6 +49,7 @@ export const targets: { readonly [K in RequestKind]: z.ZodType<TargetOf<K>> } = 
   resume: target,
   run_now: target,
   save_routine: target.nullable(),
+  save_repository: z.null(),
 };
 
 export const payloads: { readonly [K in RequestKind]: z.ZodType<PayloadOf<K>> } = {
@@ -60,6 +63,7 @@ export const payloads: { readonly [K in RequestKind]: z.ZodType<PayloadOf<K>> } 
   resume: requestKinds.resume.payload,
   run_now: requestKinds.run_now.payload,
   save_routine: requestKinds.save_routine.payload,
+  save_repository: requestKinds.save_repository.payload,
 };
 
 type AskedAs<K extends RequestKind> = { readonly id: string; readonly person: string; readonly at: Date; readonly kind: K; readonly target: TargetOf<K>; readonly payload: PayloadOf<K> };
@@ -69,6 +73,8 @@ export type Asked = { readonly [K in RequestKind]: AskedAs<K> }[RequestKind];
 export type Sent = { readonly sent: string } | { readonly refused: 'id-taken' };
 
 export type RequestAnswer = 'waiting' | { readonly recorded: string } | { readonly refused: string };
+
+export const requestAnswer = z.union([z.literal('waiting'), z.strictObject({ recorded: z.string() }), z.strictObject({ refused: z.string() })]) satisfies z.ZodType<RequestAnswer>;
 
 const positionTries = 20;
 
