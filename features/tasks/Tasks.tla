@@ -63,7 +63,8 @@ CONSTANTS
     LapsedLeaseCannotRenew,
     RefusedLaunchIsNotLost,
     FailedLaunchRelaunches,
-    RetryWaitsAtGate
+    RetryWaitsAtGate,
+    RetryReturnsWhenRoundsRunOut
 
 CodeChangeSteps == <<"specify", "implement", "verify", "land">>
 
@@ -362,19 +363,28 @@ Stop(t) ==
     /\ humanActions' = [humanActions EXCEPT ![t] = @ + 1]
     /\ UNCHANGED <<runnable, reassignments, launchFaults>>
 
+RoundsRanOut(current) == current.step \in Returning /\ current.rounds[current.step] >= MaxRounds
+
+RetryStart(current) == IF RoundsRanOut(current) THEN ReturnsTo ELSE current.step
+
 RetriesFrom == IF RetryResumesStopped THEN {"ready", "stopped"} \cup Waiting ELSE {"ready"} \cup Waiting
 
+Restarted(current) ==
+    LET start == IF RetryReturnsWhenRoundsRunOut THEN RetryStart(current) ELSE current.step
+    IN IF start = current.step THEN current
+       ELSE [current EXCEPT !.step = start, !.approved = {g \in @ : Rank[g] < Rank[start]}, !.missing = {g \in @ : Rank[g] < Rank[start]}]
+
 Retried(current) ==
-    [current EXCEPT !.state = "ready",
-                    !.rounds = NoRounds,
-                    !.reruns = 0,
-                    !.lost = 0,
-                    !.inputWaits = 0,
-                    !.retries = IF RetryResetsStageRetries THEN 0 ELSE @,
-                    !.reviews = IF RetryKeepsReviews THEN @ ELSE 0,
-                    !.approved = IF RetryKeepsApprovals THEN @ ELSE {},
-                    !.passed = FALSE,
-                    !.outputs = IF RetryKeepsOutputs THEN @ ELSE {}]
+    [Restarted(current) EXCEPT !.state = "ready",
+                               !.rounds = NoRounds,
+                               !.reruns = 0,
+                               !.lost = 0,
+                               !.inputWaits = 0,
+                               !.retries = IF RetryResetsStageRetries THEN 0 ELSE @,
+                               !.reviews = IF RetryKeepsReviews THEN @ ELSE 0,
+                               !.approved = IF RetryKeepsApprovals THEN @ ELSE {},
+                               !.passed = FALSE,
+                               !.outputs = IF RetryKeepsOutputs THEN @ ELSE {}]
 
 StoppedAtGate(current) == current.state = "stopped" /\ current.passed
 
@@ -486,9 +496,9 @@ StoppedTaskCanResume ==
         LET resumed == Resumed(task[t])
         IN /\ "stopped" \in RetriesFrom
            /\ resumed.state \in {"ready", "gated"}
-           /\ resumed.step = task[t].step
+           /\ resumed.step = RetryStart(task[t])
            /\ resumed.outputs = task[t].outputs
-           /\ resumed.approved = task[t].approved
+           /\ resumed.approved = {g \in task[t].approved : Rank[g] < Rank[resumed.step]}
            /\ resumed.reviews = task[t].reviews
 
 GateStopResumesAtGate ==
@@ -519,7 +529,11 @@ StageMovesOneStep ==
 
 OnlyAPersonStops == [][\A t \in Tasks : task'[t].state = "stopped" /\ task[t].state # "stopped" => PersonActsOn(t)]_vars
 
-RetryLeavesNoStageRetries == [][\A t \in Tasks : PersonActsOn(t) /\ task'[t].state = "ready" => task'[t].retries = 0]_vars
+RetryStartsWhereTheFailureRoutes ==
+    [][\A t \in Tasks : PersonActsOn(t) /\ task[t].state \in {"waiting", "stopped"} /\ task'[t].state = "ready" =>
+          task'[t].step = RetryStart(task[t])]_vars
+
+RetryLeavesNoStageRetries ==[][\A t \in Tasks : PersonActsOn(t) /\ task'[t].state = "ready" => task'[t].retries = 0]_vars
 
 GatePassesOnlyOnApprove ==
     [][\A t \in Tasks : \A g \in Gates(t) :

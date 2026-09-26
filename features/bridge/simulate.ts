@@ -160,6 +160,7 @@ export type Run = {
 
 const leaseMs = worldLeaseMs;
 const tickMs = 50;
+const callTimeoutMs = 15_000;
 
 const weights = {
   emit: 24,
@@ -193,6 +194,8 @@ const deliveryWeights: Readonly<Record<Faults, Readonly<Record<Delivery, number>
   all: { once: 76, twice: 6, unanswered: 6, dropped: 5, late: 5, 'crash-before': 1, 'crash-after': 1 },
   'late-only': { once: 60, twice: 0, unanswered: 0, dropped: 0, late: 40, 'crash-before': 0, 'crash-after': 0 },
 };
+
+export const fingerprint = createHash('sha256').update(JSON.stringify({ weights, deliveryWeights, leaseMs, tickMs, callTimeoutMs })).digest('hex').slice(0, 16);
 
 function random(seed: number): () => number {
   let state = seed >>> 0;
@@ -329,7 +332,7 @@ type Bridge = {
   readonly app: App;
   state: BridgeState;
   stream: { cursor: number } | undefined;
-  inFlight: Post | undefined;
+  inFlight: Sent | undefined;
   initialized: boolean;
   finishing: boolean;
   endLine: number | undefined;
@@ -337,6 +340,8 @@ type Bridge = {
 };
 
 type Post = { readonly received: number; readonly lines: readonly Line[] };
+
+type Sent = Post & { readonly sentAt: number };
 
 type Late = { readonly bridge: Bridge; readonly post: Post };
 
@@ -450,7 +455,7 @@ async function apply(sim: Sim, bridge: Bridge, frame: CommandFrame): Promise<voi
   appReads(bridge.app, frame.request);
 }
 
-const postOf = (sim: Sim, bridge: Bridge): Post => ({ received: received(sim, bridge), lines: bridge.box.batch().slice(0, sim.mutant?.linesPerPost) });
+const postOf = (sim: Sim, bridge: Bridge): Sent => ({ received: received(sim, bridge), lines: bridge.box.batch().slice(0, sim.mutant?.linesPerPost), sentAt: sim.time });
 
 const received = (sim: Sim, bridge: Bridge): number => (breaks(sim, 'replay-every-command') ? bridge.highestApplied : bridge.commands.applied());
 
@@ -682,10 +687,12 @@ async function applyMove(sim: Sim, choice: Choice): Promise<string> {
       count(sim, choice.move === 'hang' ? 'bridge hangs' : 'bridge crashes');
       return `attempt ${bridge.attempt}'s bridge ${choice.move === 'hang' ? 'hung' : 'crashed for good'}`;
     }
-    case 'wake':
+    case 'wake': {
       if (bridge === undefined) return 'no bridge';
       bridge.state = 'up';
-      return `attempt ${bridge.attempt}'s bridge woke and resends from line ${String(bridge.box.batch()[0]?.seq ?? bridge.box.emitted() + 1)}`;
+      bridge.inFlight = postOf(sim, bridge);
+      return `attempt ${bridge.attempt}'s bridge woke past its heartbeat and resent at once: ${await deliver(sim, bridge, 'once')}`;
+    }
     case 'steer': {
       const attempt = (await liveAttempts(sim))[Math.floor(sim.next() * 2)];
       if (attempt === undefined) return 'nobody to steer';
@@ -712,7 +719,17 @@ async function applyMove(sim: Sim, choice: Choice): Promise<string> {
       sim.time += ms;
       const beats: string[] = [];
       for (const bridge of sim.bridges) {
-        if (bridge.state !== 'up' || bridge.inFlight !== undefined || sim.engine === 'down') continue;
+        if (bridge.state === 'hung' && bridge.attempt !== expendable) {
+          bridge.state = 'up';
+          beats.push(`attempt ${bridge.attempt}'s bridge woke within a heartbeat, because only the expendable attempt hangs past its lease`);
+        }
+        if (bridge.state !== 'up' || sim.engine === 'down') continue;
+        if (bridge.inFlight !== undefined) {
+          if (sim.time - bridge.inFlight.sentAt < callTimeoutMs) continue;
+          sim.late.push({ bridge, post: bridge.inFlight });
+          count(sim, 'timed-out posts');
+          beats.push(`attempt ${bridge.attempt}'s post of ${range(bridge.inFlight)} timed out after ${String(callTimeoutMs)} ms and may still arrive late`);
+        }
         bridge.inFlight = postOf(sim, bridge);
         beats.push(await deliver(sim, bridge, 'once'));
       }

@@ -499,6 +499,17 @@ Rejected options:
 
 - **Rerun the gated step.** It repeats work that passed, and Send back already covers a redo with a note.
 
+### Retry after a return cap starts again where the failure returns
+
+Decided 25 Sep 2026 by the owner. When Verify finds the behavior still wrong, the task goes back to Implement on its own, up to 3 rounds, and after the third it waits at Verify for a person. Retry used to run Verify again on the same code, so the verdict repeated, and only then did the task go back to Implement. The person's note reached only that wasted Verify run, because an attempt's prompt carries the notes made after the previous attempt started. Implement never saw what the person asked to change.
+
+Now Retry starts again at the step that the failure returns to. That is the `to` of the `return` failure whose counter reached its cap, and the counts the task saved when it parked record which counter that was. For Code change, Retry starts at Implement after Verify's 3 rounds and after Land's 3 rounds of red checks, and the person's note reaches Implement. Each waiting message says so. Every other stop keeps its meaning. A task stopped at a gate returns to waiting for Approve, a `rerun` failure such as Verify's environment runs the same step again, and a step that failed its own retries runs again. Send back is unchanged. The task model checks the rule as `RetryStartsWhereTheFailureRoutes`, and the simulator checks the same property after every step.
+
+Rejected options:
+
+- **Keep today's Retry.** Verify runs again on unchanged code and repeats its verdict, and the note never reaches Implement.
+- **Ask each time where Retry starts.** Every Retry card gains a choice, and after a return cap the answer is nearly always the step the failure returns to.
+
 ### Run branches keep the harness's sandbox status
 
 Decided 24 Sep 2026. Ruleset 23901469 requires the `sandbox` check on `e2e/run-*` branches. It accepts that check from any source, and it applies the rule when a branch is created. So the end-to-end harness posts a `sandbox` success on each seed commit, which lets it create a run branch. The check stays open to other posters, such as a future Verify environment.

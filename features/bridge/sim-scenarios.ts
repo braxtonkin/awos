@@ -59,7 +59,7 @@ async function cleanSeeds(postgres: TestPostgres, options: Options): Promise<rea
   const failed = runs.filter(run => run.failure !== undefined);
   const idle = runs.filter(run => run.ended === 0);
   const erred = runs.filter(run => run.errors.length > 0);
-  const tallies = ['engine crashes', 'duplicated posts', 'unanswered posts', 'dropped posts', 'late posts delivered', 'posts that skip a number', 'broken streams', 'bridge hangs', 'bridge crashes', 'steers', 'stops', 'reaps', 'attempts pass', 'attempts lost', 'attempts stopped', 'attempts live'];
+  const tallies = ['engine crashes', 'duplicated posts', 'unanswered posts', 'dropped posts', 'late posts delivered', 'timed-out posts','posts that skip a number', 'broken streams', 'bridge hangs', 'bridge crashes', 'steers', 'stops', 'reaps', 'attempts pass', 'attempts lost', 'attempts stopped', 'attempts live'];
   const name = `${String(runs.length)} seeds, ${String(failed.length)} violations`;
   return [
     failed.length === 0
