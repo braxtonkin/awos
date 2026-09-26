@@ -29,6 +29,7 @@ async function localWorld(repository: string, agent: Agent): Promise<World> {
       codexLogin: agent === 'real' ? accessCopy : () => Promise.resolve(fakeCodexLogin()),
       image: agent === 'real' ? attemptImage => Promise.resolve(attemptImage) : standInImage,
       trustLogins: true,
+      agent,
     },
     stop: local.stop,
   };

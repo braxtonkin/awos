@@ -32,6 +32,8 @@ export const githubPayloads = {
   ref: z.object({ ref: z.string(), object: z.object({ sha: z.string().min(1) }) }),
   refs: z.array(z.object({ ref: z.string(), object: z.object({ sha: z.string().min(1) }) })),
   sha: z.object({ sha: z.string().min(1) }),
+  commit: z.object({ sha: z.string().min(1), tree: z.object({ sha: z.string().min(1) }), parents: z.array(z.object({ sha: z.string().min(1) })) }),
+  tree: z.object({ tree: z.array(z.object({ path: z.string(), type: z.string(), sha: z.string().min(1) })), truncated: z.boolean() }),
   status: z.object({ state: z.string(), context: z.string() }),
   pull: Pull,
   pulls: z.array(Pull),
@@ -44,12 +46,16 @@ export const githubPayloads = {
 export type Pull = z.infer<typeof Pull>;
 type CheckRun = z.infer<typeof CheckRun>;
 export type SeedFile = { readonly path: string; readonly content: string };
+type Commit = { readonly sha: string; readonly tree: string; readonly parents: readonly string[] };
 
 export type GitHub = {
   readonly repository: string;
   readonly branchHead: (branch: string) => Promise<string | undefined>;
   readonly branchesStartingWith: (prefix: string) => Promise<readonly string[]>;
   readonly seedBranch: (branch: string, files: readonly SeedFile[], message: string) => Promise<string>;
+  readonly advanceBranch: (branch: string, files: readonly SeedFile[], message: string) => Promise<string>;
+  readonly commit: (sha: string) => Promise<Commit>;
+  readonly blobs: (tree: string) => Promise<ReadonlyMap<string, string>>;
   readonly pulls: (base: string) => Promise<readonly Pull[]>;
   readonly pull: (number: number) => Promise<Pull>;
   readonly wasDraft: (pull: Pull) => Promise<boolean>;
@@ -63,7 +69,7 @@ export type GitHub = {
   readonly pushEnvironment: Readonly<Record<string, string>>;
 };
 
-type Method = 'GET' | 'POST' | 'PUT' | 'DELETE';
+type Method = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
 
 const needs = (answer: Response): string => {
   const accepted = answer.headers.get('x-accepted-github-permissions');
@@ -132,28 +138,54 @@ export function githubAt(settings: GitHubSettings): GitHub {
 
   const repo = `/repos/${repository}`;
 
+  const branchHead = async (branch: string): Promise<string | undefined> => {
+    const answer = await send('GET', `${repo}/git/ref/heads/${refPath(branch)}`);
+    if (answer.status === 404) return undefined;
+    if (!answer.ok) throw new Error(`GitHub GET ref answered ${String(answer.status)}`);
+    return parsePayload('GitHub GET ref', githubPayloads.ref, await answer.json()).object.sha;
+  };
+
+  const commit = async (sha: string): Promise<Commit> => {
+    const found = await call('GET', `${repo}/git/commits/${sha}`, githubPayloads.commit);
+    return { sha: found.sha, tree: found.tree.sha, parents: found.parents.map(parent => parent.sha) };
+  };
+
+  const writeCommit = async (files: readonly SeedFile[], message: string, parent: Commit | undefined): Promise<string> => {
+    const tree = await call('POST', `${repo}/git/trees`, githubPayloads.sha, {
+      ...(parent === undefined ? {} : { base_tree: parent.tree }),
+      tree: files.map(file => ({ path: file.path, mode: '100644', type: 'blob', content: file.content })),
+    });
+    const written = await call('POST', `${repo}/git/commits`, githubPayloads.sha, { message, tree: tree.sha, parents: parent === undefined ? [] : [parent.sha] });
+    await call('POST', `${repo}/statuses/${written.sha}`, githubPayloads.status, {
+      state: 'success',
+      context: 'sandbox',
+      description: 'Written by the end-to-end harness. The sandbox workflow tests it once the branch holds it.',
+    });
+    return written.sha;
+  };
+
   return {
     repository,
-    branchHead: async branch => {
-      const answer = await send('GET', `${repo}/git/ref/heads/${refPath(branch)}`);
-      if (answer.status === 404) return undefined;
-      if (!answer.ok) throw new Error(`GitHub GET ref answered ${String(answer.status)}`);
-      return parsePayload('GitHub GET ref', githubPayloads.ref, await answer.json()).object.sha;
-    },
+    branchHead,
     branchesStartingWith: async prefix =>
       (await call('GET', `${repo}/git/matching-refs/heads/${refPath(prefix)}`, githubPayloads.refs)).map(found => found.ref.slice('refs/heads/'.length)),
     seedBranch: async (branch, files, message) => {
-      const tree = await call('POST', `${repo}/git/trees`, githubPayloads.sha, {
-        tree: files.map(file => ({ path: file.path, mode: '100644', type: 'blob', content: file.content })),
-      });
-      const commit = await call('POST', `${repo}/git/commits`, githubPayloads.sha, { message, tree: tree.sha, parents: [] });
-      await call('POST', `${repo}/statuses/${commit.sha}`, githubPayloads.status, {
-        state: 'success',
-        context: 'sandbox',
-        description: 'Seed copied from the sandbox folder. The sandbox workflow tests it once the branch exists.',
-      });
-      await call('POST', `${repo}/git/refs`, githubPayloads.ref, { ref: `refs/heads/${branch}`, sha: commit.sha });
-      return commit.sha;
+      const seed = await writeCommit(files, message, undefined);
+      await call('POST', `${repo}/git/refs`, githubPayloads.ref, { ref: `refs/heads/${branch}`, sha: seed });
+      return seed;
+    },
+    advanceBranch: async (branch, files, message) => {
+      const head = await branchHead(branch);
+      if (head === undefined) throw new Error(`${branch} does not exist, so it cannot move forward`);
+      const advanced = await writeCommit(files, message, await commit(head));
+      await call('PATCH', `${repo}/git/refs/heads/${refPath(branch)}`, githubPayloads.ref, { sha: advanced, force: false });
+      return advanced;
+    },
+    commit,
+    blobs: async tree => {
+      const listed = await call('GET', `${repo}/git/trees/${tree}?recursive=1`, githubPayloads.tree);
+      if (listed.truncated) throw new Error(`GitHub truncated its listing of tree ${tree}`);
+      return new Map(listed.tree.flatMap(entry => (entry.type === 'blob' ? [[entry.path, entry.sha] as const] : [])));
     },
     pulls: base => call('GET', `${repo}/pulls?state=all&per_page=100&base=${encodeURIComponent(base)}`, githubPayloads.pulls),
     pull: number => call('GET', `${repo}/pulls/${String(number)}`, githubPayloads.pull),

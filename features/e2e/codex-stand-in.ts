@@ -16,6 +16,8 @@ export const ticking = (ticks: number, everyMs: number): string => `stand-in tic
 
 export const implementPace = { progressItems: 20, everyMs: 1000 } as const;
 
+export const setupProbe = { item: 'stand-in-setup', command: 'test -d node_modules && echo "node_modules present" || echo "node_modules missing"', present: 'node_modules present' } as const;
+
 export const catalogPlan = (entry: Entry): string =>
   `Stand-in plan: add \`${entry.name}\` in \`${entry.file}\`, exported by name, as the ticket's acceptance criteria describe. Verify proves it with one reproduction script that fails on the base commit, where \`${entry.file}\` does not exist, and passes on the change.`;
 
@@ -294,6 +296,7 @@ async function runTurn(params: Readonly<Record<string, unknown>>): Promise<void>
   notify('turn/started', { threadId: thread, turn: { id: turn, status: 'inProgress', items: [] } });
   item('stand-in-user', { type: 'userMessage', clientId: params['clientUserMessageId'] ?? null, content: [{ type: 'text', text: prompt }] });
   tokenUsage(prompt);
+  if (stepOf(prompt) === 'implement') await run(setupProbe.command, setupProbe.item);
   const found = /stand-in ticks (\d+) every (\d+)/.exec(prompt);
   const ticks = Number(found?.[1] ?? '0');
   const everyMs = Number(found?.[2] ?? '0');

@@ -50,7 +50,7 @@ export const solutions: Readonly<Record<string, Solution>> = {
   },
 };
 
-export const identity = (entry: Entry): string => `export function ${entry.name}(value: unknown): unknown {\n  return value;\n}\n`;
+export const identity = (entry: Pick<Entry, 'name'>): string => `export function ${entry.name}(value: unknown): unknown {\n  return value;\n}\n`;
 
 export const reproductionScript = (entry: Entry, solution: Solution): string =>
   [

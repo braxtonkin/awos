@@ -383,7 +383,7 @@ async function reportLane(): Promise<readonly Check[]> {
     checks.push(JSON.stringify(durations) === '[60,300,120,20]' ? pass('each step keeps its duration', durations.join(', ')) : fail('each step keeps its duration', durations.join(', ')));
     const modelCheckName = `record: every agent attempt ran on ${agentModel}`;
     const landOnly: World = { ...cleanWorld, plans: attemptPlans.filter(plan => !agentSteps.has(plan.step)) };
-    const modelCheck = await inWorld(postgres, landOnly, async db => (await recordChecks(db, ticket, 'owner@example.com', 'Clean')).find(check => check.name === modelCheckName));
+    const modelCheck = await inWorld(postgres, landOnly, async db => (await recordChecks(db, ticket, 'owner@example.com', 'Clean', undefined)).find(check => check.name === modelCheckName));
     const noAgent = 'the model check fails when no agent attempt ran';
     checks.push(modelCheck?.passed === false ? pass(noAgent, modelCheck.detail) : fail(noAgent, modelCheck === undefined ? `no check named ${modelCheckName}` : `it passed: ${modelCheck.detail}`));
     const broken: World = { ...cleanWorld, after: db => db.updateTable('attempt_event').set({ body: JSON.stringify({ method: tokenUsageMethod, params: { tokenUsage: { total: {} } } }) }).where('method', '=', tokenUsageMethod).execute() };

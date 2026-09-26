@@ -14,7 +14,12 @@ import { connect, type Database } from '../../shared/db/client.ts';
 import { checksOf, fail, pass, type Check } from '../../tools/verify/check.ts';
 import { buildAttemptImage, ensureRegistry, jobNamespace, kindAddress, kubernetes, pushByDigest, registry, repositoryRoot, sh } from '../../tools/verify/cluster.ts';
 import { kind } from '../../tools/verify/kind.ts';
+import type { Entry } from './catalog.ts';
+import { setupProbe } from './codex-stand-in.ts';
+import type { GitHub } from './github.ts';
+import { taskFor } from './record.ts';
 import { sandboxCommands } from './sandbox-seed.ts';
+import { identity } from './solutions.ts';
 import type { EngineWorld } from './world.ts';
 
 const run = promisify(execFile);
@@ -218,7 +223,7 @@ export async function runRecord(db: Database, key: string): Promise<readonly Run
 export const describeRecord = (record: RunRecord): string =>
   `attempt ${record.attempt} ${record.step} ${record.verdict ?? 'live'} as ${record.runAs} on ${record.branch ?? 'no branch'} pushed ${record.pushed ?? 'nothing'} owed [${record.owed.join(', ')}] input tokens ${record.inputTokens === null ? 'unknown' : String(record.inputTokens)}`;
 
-export const faultNames = ['engine-restart', 'lost-job'] as const;
+export const faultNames = ['engine-restart', 'lost-job', 'base-conflict'] as const;
 
 export type Fault = (typeof faultNames)[number];
 
@@ -238,7 +243,8 @@ export type Drive = {
   readonly databaseUrl: string;
   readonly namespace: string;
   readonly jira: { readonly site: string; readonly email: string; readonly accountId: () => Promise<string> };
-  readonly github: { readonly repository: string };
+  readonly github: GitHub;
+  readonly entry: Pick<Entry, 'name' | 'file'>;
   readonly world: EngineWorld;
   readonly fault: Fault | undefined;
   readonly runAs: RunAs;
@@ -376,9 +382,9 @@ async function implementAttempts(db: Database, ticket: string): Promise<readonly
 const promptOf = async (db: Database, attempt: string): Promise<string> =>
   (await db.selectFrom('attempt_command').select('input').where('attempt_id', '=', attempt).where('kind', '=', 'turn.start').executeTakeFirst())?.input ?? '';
 
-const faultCheckNames: Readonly<Record<Fault, string>> = { 'engine-restart': 'attempt continued', 'lost-job': 'lost attempt replaced' };
+const faultCheckNames: Readonly<Record<Fault, string>> = { 'engine-restart': 'attempt continued', 'lost-job': 'lost attempt replaced', 'base-conflict': 'conflict resolved by a merge' };
 
-async function continuedCheck(db: Database, ticket: string, fault: Fault, hit: Implementing | undefined): Promise<Check> {
+async function continuedCheck(db: Database, ticket: string, fault: Exclude<Fault, 'base-conflict'>, hit: Implementing | undefined): Promise<Check> {
   const name = faultCheckNames[fault];
   if (hit === undefined) return fail(name, 'the fault never fired, because no Implement event was stored');
   const implement = await implementAttempts(db, ticket);
@@ -395,6 +401,101 @@ async function continuedCheck(db: Database, ticket: string, fault: Fault, hit: I
     ? pass(name, `attempt ${hit.attempt} lost, attempt ${next.id} passed with the lost attempt's summary in its prompt`)
     : fail(name, `Implement attempts: ${described}; the next prompt ${summarised ? 'holds' : 'lacks'} the summary`);
 }
+
+const baseMovedNotes = 'notes/base-moved.md';
+
+const conflictSentBack = 'the pull request conflicts with its base branch';
+
+type Fact = { readonly holds: boolean; readonly said: string };
+
+function factsCheck(name: string, facts: readonly Fact[]): Check {
+  const detail = facts.map(fact => fact.said).join('; ');
+  return facts.every(fact => fact.holds) ? pass(name, detail) : fail(name, detail);
+}
+
+async function resolvedCheck(drive: Drive, db: Database, base: string | undefined): Promise<Check> {
+  const name = faultCheckNames['base-conflict'];
+  if (base === undefined) return fail(name, 'the fault never fired, because no Implement event was stored');
+  const attempts = await db
+    .selectFrom('attempt')
+    .innerJoin('task', 'task.id', 'attempt.task_id')
+    .select(['attempt.id', 'attempt.step', 'attempt.verdict', 'attempt.output', 'attempt.start_commit', 'attempt.last_pushed'])
+    .where('task.key', '=', drive.ticket)
+    .orderBy('attempt.id')
+    .execute();
+  const land = attempts.find(attempt => attempt.step === 'land' && attempt.verdict === 'red_check' && JSON.stringify(attempt.output).includes(conflictSentBack));
+  const listed = attempts.map(attempt => `${attempt.id} ${attempt.step} ${attempt.verdict ?? 'live'}`).join(', ') || 'none';
+  if (land === undefined) return factsCheck(name, [{ holds: false, said: `no Land attempt sent the task back because ${conflictSentBack}; attempts: ${listed}` }]);
+  const sentBack: Fact = { holds: true, said: `Land attempt ${land.id} sent the task back, because ${conflictSentBack}` };
+  const rework = attempts.find(attempt => attempt.step === 'implement' && Number(attempt.id) > Number(land.id));
+  if (rework === undefined) return factsCheck(name, [sentBack, { holds: false, said: `no Implement attempt followed Land attempt ${land.id}` }]);
+  const implement = `Implement attempt ${rework.id}`;
+  const named = (await promptOf(db, rework.id)).includes(base);
+  const pushed = rework.last_pushed === null ? undefined : await drive.github.commit(rework.last_pushed);
+  const parents = pushed?.parents ?? [];
+  const start = rework.start_commit;
+  const merged = parents.length === 2 && start !== null && parents.includes(start) && parents.includes(base);
+  const mergeSaid =
+    pushed === undefined
+      ? `${implement} pushed nothing`
+      : merged
+        ? `${implement} pushed ${pushed.sha}, a merge of its start commit and the base commit`
+        : `${implement} pushed ${pushed.sha} with the parents ${parents.join(' and ') || 'none'}, which are not its start commit ${start ?? 'unknown'} and the base commit`;
+  const blobsAt = async (commit: string): Promise<ReadonlyMap<string, string>> => drive.github.blobs((await drive.github.commit(commit)).tree);
+  const head = await drive.github.branchHead(drive.branch);
+  const onBranch = head === undefined ? new Map<string, string>() : await blobsAt(head);
+  const ours = pushed === undefined ? undefined : (await blobsAt(pushed.sha)).get(drive.entry.file);
+  const theirs = (await blobsAt(base)).get(drive.entry.file);
+  const held = onBranch.get(drive.entry.file);
+  const keptOurs = held !== undefined && held === ours && held !== theirs;
+  const version = keptOurs ? 'the version Implement pushed' : held === undefined ? 'no version' : held === theirs ? "the base commit's own version" : 'another version';
+  const notes = onBranch.has(baseMovedNotes);
+  const task = await taskFor(db, drive.ticket);
+  return factsCheck(name, [
+    sentBack,
+    { holds: true, said: `${implement} followed it` },
+    { holds: named, said: `${implement}'s prompt ${named ? 'names' : 'does not name'} the base commit ${base}` },
+    { holds: rework.verdict === 'pass', said: `${implement} ended ${rework.verdict ?? 'live'}` },
+    { holds: merged, said: mergeSaid },
+    { holds: task?.state === 'done', said: `the task is ${task?.state ?? 'missing'}` },
+    { holds: notes && keptOurs, said: `${drive.branch} ${notes ? 'holds' : 'lacks'} ${baseMovedNotes} and holds ${version} of ${drive.entry.file}` },
+  ]);
+}
+
+async function probeOutput(db: Database, attempt: string): Promise<string | undefined> {
+  const row = await db
+    .selectFrom('attempt_event')
+    .select(sql<string | null>`body -> 'params' -> 'item' ->> 'aggregatedOutput'`.as('output'))
+    .where('attempt_id', '=', attempt)
+    .where('method', '=', 'item/completed')
+    .where('item_id', '=', setupProbe.item)
+    .executeTakeFirst();
+  return row === undefined ? undefined : (row.output ?? '');
+}
+
+async function setupCheck(db: Database, ticket: string): Promise<Check> {
+  const name = "Implement started with the repository's setup already run";
+  const probes = await Promise.all(
+    (await implementAttempts(db, ticket)).map(async ({ id, verdict }) => {
+      const output = await probeOutput(db, id);
+      return { id, output, skippedAs: output === undefined && (verdict === 'lost' || verdict === 'not_launched') ? verdict : undefined };
+    }),
+  );
+  const judged = probes.filter(probe => probe.skippedAs === undefined);
+  const detail = probes
+    .map(probe => `Implement attempt ${probe.id} ${probe.output === undefined ? `ran no probe${probe.skippedAs === undefined ? '' : `, skipped because it ended ${probe.skippedAs}`}` : `printed "${probe.output.trim()}"`}`)
+    .join('; ');
+  return judged.length > 0 && judged.every(probe => probe.output?.includes(setupProbe.present) === true) ? pass(name, detail) : fail(name, detail || 'no Implement attempt ran');
+}
+
+type Park = { readonly step: string; readonly reason: string | null };
+
+async function parkOf(db: Database, ticket: string): Promise<Park | undefined> {
+  const task = await db.selectFrom('task').select(['state', 'step', 'waiting_reason']).where('key', '=', ticket).executeTakeFirst();
+  return task?.state === 'waiting' ? { step: task.step, reason: task.waiting_reason } : undefined;
+}
+
+const parkedText = (ticket: string, park: Park): string => `${ticket} parked at ${park.step} ${park.reason === null ? 'with no waiting reason' : `with the waiting reason "${park.reason}"`}`;
 
 async function podNames(core: CoreV1Api, namespace: string, attempt: string): Promise<readonly string[]> {
   return (await core.listNamespacedPod({ namespace, labelSelector: `${labels.attempt}=${attempt}` })).items.flatMap(pod => (pod.metadata?.name === undefined ? [] : [pod.metadata.name]));
@@ -417,10 +518,11 @@ export async function inJobNamespace<T>(world: EngineWorld, namespace: string, l
 }
 
 export async function driveAutoWorker(drive: Drive): Promise<void> {
-  await inJobNamespace(drive.world, drive.namespace, drive.log, ({ core, image, address }) => driveInNamespace(drive, core, image, address));
+  const park = await inJobNamespace(drive.world, drive.namespace, drive.log, ({ core, image, address }) => driveInNamespace(drive, core, image, address));
+  if (park !== undefined) throw new Error(parkedText(drive.ticket, park));
 }
 
-async function driveInNamespace(drive: Drive, core: CoreV1Api, image: string, address: string): Promise<void> {
+async function driveInNamespace(drive: Drive, core: CoreV1Api, image: string, address: string): Promise<Park | undefined> {
   const store = await openStore(drive.databaseUrl);
   try {
     const run = drive.branch.replace(/^e2e\/run-/, '');
@@ -431,9 +533,11 @@ async function driveInNamespace(drive: Drive, core: CoreV1Api, image: string, ad
     let engine = startEngine(store, settings);
     let printed = '';
     let hit: Implementing | undefined;
+    let movedBase: string | undefined;
+    let park: Park | undefined;
     let reportedAt = 0;
     try {
-      while (!drive.signal.aborted) {
+      while (!drive.signal.aborted && park === undefined) {
         if (drive.fault !== undefined && hit === undefined) {
           hit = await firstImplementEvent(store.db, drive.ticket);
           if (hit !== undefined && drive.fault === 'engine-restart') {
@@ -448,9 +552,18 @@ async function driveInNamespace(drive: Drive, core: CoreV1Api, image: string, ad
             await Promise.all(pods.map(name => core.deleteNamespacedPod({ name, namespace: drive.namespace, gracePeriodSeconds: 0 })));
             drive.check(pods.length > 0 ? pass('pod deleted mid-step', `${pods.join(', ')} of Implement attempt ${hit.attempt}`) : fail('pod deleted mid-step', `Implement attempt ${hit.attempt} had no pod`));
           }
+          if (hit !== undefined && drive.fault === 'base-conflict') {
+            const files = [
+              { path: drive.entry.file, content: identity(drive.entry) },
+              { path: baseMovedNotes, content: `The base-conflict fault moved ${drive.branch} forward while ${drive.ticket} was in Implement.\n` },
+            ];
+            movedBase = await drive.github.advanceBranch(drive.branch, files, `Move ${drive.branch} forward under ${drive.ticket} for the base-conflict fault`);
+            drive.check(pass('base moved under the pull request', `${drive.branch} moved to ${movedBase} at the first stored event of Implement attempt ${hit.attempt}, with its own ${drive.entry.file} and ${baseMovedNotes}`));
+          }
         }
         if (Date.now() - reportedAt >= reportEveryMs) {
           reportedAt = Date.now();
+          if (hit !== undefined) park = await parkOf(store.db, drive.ticket);
           const lines = (await runRecord(store.db, drive.ticket)).map(describeRecord).join('\n');
           if (lines !== printed) {
             for (const line of lines.split('\n').filter(line => line !== '' && !printed.includes(line))) drive.log(line);
@@ -459,7 +572,15 @@ async function driveInNamespace(drive: Drive, core: CoreV1Api, image: string, ad
         }
         await wait(watchEveryMs, undefined, { signal: drive.signal }).catch(() => undefined);
       }
-      if (drive.fault !== undefined) drive.check(await continuedCheck(store.db, drive.ticket, drive.fault, hit));
+      if (park !== undefined) drive.check(fail('task never parked after the fault', parkedText(drive.ticket, park)));
+      const endChecks: Readonly<Record<Fault, () => Promise<Check>>> = {
+        'engine-restart': () => continuedCheck(store.db, drive.ticket, 'engine-restart', hit),
+        'lost-job': () => continuedCheck(store.db, drive.ticket, 'lost-job', hit),
+        'base-conflict': () => resolvedCheck(drive, store.db, movedBase),
+      };
+      if (drive.fault !== undefined) drive.check(await endChecks[drive.fault]());
+      if (drive.world.agent === 'stand-in') drive.check(await setupCheck(store.db, drive.ticket));
+      return park;
     } finally {
       await engine.stop();
       drive.log(`engine said: ${engine.said().split('\n').slice(-20).join(' | ')}`);

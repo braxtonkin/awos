@@ -144,7 +144,11 @@ function seriesFrom(values: Parsed, inspect: Inspect | undefined): Series | Chec
 
 const e2e: Scenario = {
   name: 'e2e',
-  summary: 'files an SBX ticket on a new e2e/run-* branch per run, lets a driver (AutoWorker by default) take it to merged and clean, checks the record, and posts a report; --runs N runs in a row and stops at the first failure, --fault injects engine-restart or lost-job, --world local runs offline against fakes on kind',
+  summary:
+    [
+      'files an SBX ticket on a new e2e/run-* branch per run, lets a driver (AutoWorker by default) take it to merged and clean, checks the record, and posts a report;',
+      '--runs N runs in a row and stops at the first failure, --fault injects engine-restart, lost-job, or base-conflict, --world local runs offline against fakes on kind',
+    ].join(' '),
   run: async args => {
     const { values } = parseArgs({ args: [...args], options: seriesOptions, allowPositionals: true });
     const series = seriesFrom(values, undefined);
@@ -218,6 +222,8 @@ const plants: readonly Plant[] = [
   { schema: 'jira.myself', valid: { accountId: 'a' }, remove: ['accountId'] },
   { schema: 'github.pull', valid: pull, remove: ['merged_at'] },
   { schema: 'github.pulls', valid: [pull], remove: [0, 'head', 'sha'] },
+  { schema: 'github.commit', valid: { sha: 'abc', tree: { sha: 'def' }, parents: [{ sha: 'ghi' }] }, remove: ['tree', 'sha'] },
+  { schema: 'github.tree', valid: { sha: 'abc', tree: [{ path: 'src/title-case.ts', mode: '100644', type: 'blob', sha: 'def' }], truncated: false }, remove: ['tree', 0, 'sha'] },
   { schema: 'github.checkRuns', valid: { total_count: 1, check_runs: [{ name: 'sandbox', status: 'completed', conclusion: 'success', completed_at: 'c', html_url: 'https://github.com/owner/repository/runs/1' }] }, remove: ['check_runs', 0, 'conclusion'] },
   { schema: 'catalog', valid: catalog, remove: [0, 'acceptance'] },
 ];
