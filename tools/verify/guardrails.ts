@@ -1381,6 +1381,22 @@ const screenGateCases: readonly Violation[] = [
     tool: 'screen-gates',
     expect: ['FAIL  control task-a-live fails at least one clutter gate'],
   },
+  {
+    name: 'screen-gates counts the words in the summary of a closed details, which a person sees',
+    file: screenFixture(plantedFixture),
+    edit: { from: plantAnchor, to: `${plantAnchor}<details><summary>${plants['clutter.words']}</summary></details>` },
+    tool: 'screen-gates',
+    expect: [`FAIL  ${plantedFixture} clutter.words`],
+  },
+];
+
+const screenGateAllowances: readonly Allowance[] = [
+  {
+    name: 'screen-gates skips the words, controls, and boxes inside a closed details, which a person cannot see',
+    file: screenFixture(plantedFixture),
+    edit: { from: plantAnchor, to: `${plantAnchor}<details style="position:absolute">${plants['clutter.words']}${plants['clutter.controls']}${plants['clutter.boxes']}</details>` },
+    tool: 'screen-gates',
+  },
 ];
 
 const reviewedPacket = 'tools/verify/screens/fixtures/reviewed';
@@ -2009,7 +2025,7 @@ export const guardrails: Scenario = {
         return problem === undefined ? pass(name, '') : fail(name, problem);
       });
       for (const violation of [...violations, ...screenGateCases, ...screenReviewCases]) checks.push(await reject(copy, violation));
-      for (const allowance of allowances) checks.push(await accept(copy, allowance));
+      for (const allowance of [...allowances, ...screenGateAllowances]) checks.push(await accept(copy, allowance));
       return checks;
     })),
     ...(await withCopy(async copy => {

@@ -209,7 +209,15 @@ export async function measure(window: Page, cfg: MeasureConfig): Promise<Measure
     return `${el.tagName.toLowerCase()}${role === null ? '' : `[${role}]`}${text === '' ? '' : ` "${text}"`}`;
   }
   const disabled = (el: Element): boolean => el.closest(':disabled, [aria-disabled="true"]') !== null;
-  const visible = (el: Element): boolean => css(el).visibility === 'visible' && opacityOf(el) >= 0.05;
+  const closedDetails = 'details:not([open])';
+  function folded(el: Element): boolean {
+    for (let fold = el.parentElement?.closest(closedDetails) ?? null; fold !== null; fold = fold.parentElement?.closest(closedDetails) ?? null) {
+      const summary = fold.querySelector(':scope > summary');
+      if (summary === null || !summary.contains(el)) return true;
+    }
+    return false;
+  }
+  const visible = (el: Element): boolean => !folded(el) && css(el).visibility === 'visible' && opacityOf(el) >= 0.05;
 
   function banner(root: Element): Element | undefined {
     for (const header of root.querySelectorAll('header')) if (header.closest('main, article, aside, nav, section') === null) return header;
@@ -222,7 +230,7 @@ export async function measure(window: Page, cfg: MeasureConfig): Promise<Measure
     for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
       const text = collapse(node.nodeValue);
       const el = node.parentElement;
-      if (text === '' || el === null || el.closest('script, style, noscript, template, textarea, select, option') !== null || !visible(el)) continue;
+      if (text === '' || el === null || el.closest('script, style, noscript, template, textarea, select, option') !== null || el.matches(closedDetails) || !visible(el)) continue;
       const range = document.createRange();
       range.selectNodeContents(node);
       const rects = [...range.getClientRects()].map(r => clip(r, el)).filter(r => r !== undefined);
