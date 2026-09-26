@@ -7,10 +7,11 @@ import { deliveryOf, type Said } from '../../shared/said.ts';
 import { clock, day } from '../../shared/ui/clock.ts';
 import { DeliveryLine } from '../../shared/ui/delivery.tsx';
 import { color } from '../../shared/ui/tokens.ts';
-import { reviewOf, shownCommand } from './now.ts';
+import { reviewOf } from './now.ts';
 import type { AttemptSummary, AttemptTranscript, Kept } from './protocol.ts';
 import { stepName } from './time.ts';
 import { numbered } from './timeline.ts';
+import { verbOf, type Action } from './tool-actions.ts';
 
 type Shown =
   | { readonly kind: 'instructions'; readonly text: string }
@@ -18,13 +19,12 @@ type Shown =
   | { readonly kind: 'agent'; readonly text: string }
   | { readonly kind: 'finished'; readonly outcome: Outcome; readonly summary: string }
   | { readonly kind: 'thinking'; readonly text: string }
-  | { readonly kind: 'command'; readonly command: string | undefined; readonly output: string }
-  | { readonly kind: 'tool'; readonly what: string };
+  | { readonly kind: 'command'; readonly action: Action | undefined; readonly running: boolean; readonly output: string }
+  | { readonly kind: 'tool'; readonly what: string; readonly action: Action | undefined };
 
 const tools: Readonly<Record<string, string>> = { fileChange: 'Changed files', mcpToolCall: 'Used a tool', webSearch: 'Searched the web', imageView: 'Looked at an image' };
 
 type Outcome = Review['outcome'];
-
 
 const endings: Readonly<Record<Outcome, (step: string) => string>> = {
   done: step => `Finished ${step}`,
@@ -32,7 +32,7 @@ const endings: Readonly<Record<Outcome, (step: string) => string>> = {
   blocked: step => `Could not finish ${step}`,
 };
 
-function shownOf(item: Item, firstInTurn: boolean, command: string | undefined): Shown {
+function shownOf(item: Item, firstInTurn: boolean, action: Action | undefined, running: boolean): Shown {
   switch (item.type) {
     case 'userMessage':
       return firstInTurn ? { kind: 'instructions', text: item.text } : { kind: 'message', text: item.text };
@@ -43,9 +43,9 @@ function shownOf(item: Item, firstInTurn: boolean, command: string | undefined):
     case 'reasoning':
       return { kind: 'thinking', text: item.text };
     case 'commandExecution':
-      return { kind: 'command', command, output: item.text };
+      return { kind: 'command', action, running, output: item.text };
     default:
-      return { kind: 'tool', what: tools[item.type] ?? 'Used a tool' };
+      return { kind: 'tool', what: tools[item.type] ?? 'Used a tool', action };
   }
 }
 
@@ -75,29 +75,28 @@ function Body({ shown, step }: { readonly shown: Shown; readonly step: string })
     case 'finished':
       return <p style={{ margin: 0 }}>{`${endings[shown.outcome](step)}: ${shown.summary}`}</p>;
     case 'thinking':
-      return <p style={{ ...muted, margin: 0, whiteSpace: 'pre-wrap' }}>{shown.text === '' ? 'Thinking' : shown.text}</p>;
+      return <p style={{ margin: 0, whiteSpace: 'pre-wrap' }}>{shown.text === '' ? 'Thinking' : shown.text}</p>;
     case 'command':
       return (
         <Details
           label={
-            <span data-command="true">
-              Ran <span className="mono">{shown.command === undefined ? 'a command' : shownCommand(shown.command)}</span>
+            <span data-command="true" style={{ display: 'inline-block', maxWidth: 'calc(100% - 16px)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', verticalAlign: 'bottom' }}>
+              {shown.action === undefined ? 'Ran a command' : verbOf(shown.action, shown.running)} {shown.action === undefined ? null : <span className="mono">{shown.action.what}</span>}
             </span>
           }
           body={shown.output === '' ? 'No output yet.' : shown.output}
         />
       );
     case 'tool':
-      return <span>{shown.what}</span>;
+      return shown.action === undefined ? <span>{shown.what}</span> : <span>{verbOf(shown.action, false)} <span className="mono">{shown.action.what}</span></span>;
   }
 }
 
 const who: Readonly<Record<Shown['kind'], string>> = { instructions: 'AutoWorker', message: 'Person', agent: 'Agent', finished: 'Agent', thinking: 'Agent', command: 'Agent', tool: 'Agent' };
 
-type RowProps = { readonly item: Item; readonly shown: Shown; readonly time: string | undefined; readonly step: string; readonly zone: string; readonly heading: boolean };
+type RowProps = { readonly item: Item; readonly shown: Shown; readonly running: boolean; readonly time: string | undefined; readonly step: string; readonly zone: string; readonly heading: boolean };
 
-function Row({ item, shown, time, step, zone, heading }: RowProps) {
-  const running = item.status === 'inProgress';
+function Row({ item, shown, running, time, step, zone, heading }: RowProps) {
   return (
     <li data-item={item.id} data-status={item.status} style={{ display: 'flex', flexDirection: 'column', gap: 4, padding: heading ? '12px 12px 4px' : '4px 12px' }}>
       {heading || running ? (
@@ -137,16 +136,17 @@ function PersonRow({ entry, item, zone }: { readonly entry: Said; readonly item:
   );
 }
 
-type Entry = { readonly kind: 'item'; readonly item: Item; readonly shown: Shown } | { readonly kind: 'said'; readonly entry: Said; readonly item: string | undefined };
+type Entry = { readonly kind: 'item'; readonly item: Item; readonly shown: Shown; readonly running: boolean } | { readonly kind: 'said'; readonly entry: Said; readonly item: string | undefined };
 
-function entriesOf(each: AttemptTranscript, said: readonly Said[]): readonly Entry[] {
+function entriesOf(each: AttemptTranscript, said: readonly Said[], live: boolean): readonly Entry[] {
   const { transcript } = each;
   const byId = new Map(transcript.items.map(item => [item.id, item]));
   const firsts = new Set(transcript.turns.flatMap(turn => turn.items.filter(id => byId.get(id)?.type === 'userMessage').slice(0, 1)));
   const byClient = new Map(said.flatMap(entry => (entry.clientId === null ? [] : [[entry.clientId, entry] as const])));
   return transcript.items.map(item => {
     const entry = item.type === 'userMessage' && item.clientId !== null ? byClient.get(item.clientId) : undefined;
-    return entry === undefined ? { kind: 'item', item, shown: shownOf(item, firsts.has(item.id), each.commands[item.id]) } : { kind: 'said', entry, item: item.id };
+    const running = live && item.status === 'inProgress';
+    return entry === undefined ? { kind: 'item', item, running, shown: shownOf(item, firsts.has(item.id), each.actions[item.id], running) } : { kind: 'said', entry, item: item.id };
   });
 }
 
@@ -157,7 +157,7 @@ function AttemptItems({ entries, times, step, zone }: { readonly entries: readon
         if (entry.kind === 'said') return <PersonRow key={entry.entry.request} entry={entry.entry} item={entry.item} zone={zone} />;
         const before = entries[index - 1];
         const heading = before?.kind !== 'item' || who[before.shown.kind] !== who[entry.shown.kind];
-        return <Row key={entry.item.id} item={entry.item} shown={entry.shown} time={times[entry.item.id]} step={step} zone={zone} heading={heading} />;
+        return <Row key={entry.item.id} item={entry.item} shown={entry.shown} running={entry.running} time={times[entry.item.id]} step={step} zone={zone} heading={heading} />;
       })}
     </ol>
   );
@@ -167,7 +167,7 @@ const headingOf = (attempts: readonly AttemptSummary[], id: string, zone: string
   const found = attempts.find(each => each.id === id);
   if (found === undefined) return { step: 'this step', title: 'Starting' };
   const step = stepName(found.step);
-  return { step, title: `${step} ${String(numbered(attempts, id))} · started ${clock(found.startedAt, zone)}` };
+  return { step, title: `${step}, try ${String(numbered(attempts, id))} · started ${clock(found.startedAt, zone)}` };
 };
 
 const shownSaid = (entry: Said): boolean => deliveryOf(entry) !== 'refused';
@@ -209,7 +209,7 @@ export function Transcript({ attempts, summaries, said, kept, zone }: Transcript
       {attempts.map(each => {
         const heading = headingOf(summaries, each.attempt, zone);
         const summary = summaries.find(found => found.id === each.attempt);
-        const entries = [...entriesOf(each, visible), ...extra(places.get(each.attempt) ?? [])];
+        const entries = [...entriesOf(each, visible, summary?.finishedAt === null), ...extra(places.get(each.attempt) ?? [])];
         const replayed = kept === null ? entries : entries.filter(entry => entry.kind === 'said');
         return (
           <section key={each.attempt} data-attempt={each.attempt} style={{ display: 'flex', flexDirection: 'column', gap: 4, paddingBottom: 16 }}>

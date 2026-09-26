@@ -95,7 +95,7 @@ async function storedItems(db: Database, attempts: readonly string[]): Promise<s
 }
 
 const streamed = (lines: readonly Line[], attempts: readonly string[]): string => {
-  const made = extend(attempts.map(attempt => ({ attempt, transcript: emptyTranscript, times: {}, commands: {} })), lines);
+  const made = extend(attempts.map(attempt => ({ attempt, transcript: emptyTranscript, times: {}, actions: {} })), lines);
   return JSON.stringify(made.map(each => each.transcript.items));
 };
 

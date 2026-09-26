@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { deliveryOf, type Said } from '../../shared/said.ts';
-import { isFailed } from '../../shared/task-status.ts';
+import { isFailed, type Mark } from '../../shared/task-status.ts';
 import { DeliveryLine } from '../../shared/ui/delivery.tsx';
 import { ReviewCard } from '../../shared/ui/review.tsx';
 import type { SendAction } from '../../shared/ui/sending.ts';
@@ -31,6 +31,8 @@ export type AgentPanelProps = {
 };
 
 const tones: Readonly<Record<Tone, ColorName>> = { run: 'run', attn: 'attn', fail: 'fail', muted: 'ink' };
+
+const marked: Readonly<Partial<Record<Tone, Mark>>> = { attn: 'needs-you', fail: 'failed' };
 
 const merged = (known: readonly Said[], entry: Said): readonly Said[] => (known.some(each => each.request === entry.request) ? known : [...known, entry]);
 
@@ -80,6 +82,7 @@ export function AgentPanel({ task: taskId, initial, live, said: saidFirst, kept,
   const newest = task.attempts.at(-1);
   const streaming = task.state === 'ready' && newest !== undefined && newest.finishedAt === null;
   const now = nowOf(task, attempts, zone);
+  const mark = marked[now.tone];
   const dock = dockOf(task, draft);
   const latest = said.findLast(entry => entry.words !== null && entry.kind !== 'answer' && deliveryOf(entry) !== 'refused');
   const failed = isFailed({ state: task.state, waitingOn: task.waitingOn, newestVerdict: newest?.verdict ?? null });
@@ -94,10 +97,11 @@ export function AgentPanel({ task: taskId, initial, live, said: saidFirst, kept,
           </span>
         ) : null}
         <span style={{ marginLeft: 'auto' }}>
-          <Stop task={taskId} action={actions.stop} said={said} stoppable={task.state === 'ready'} onSent={onSent} />
+          <Stop task={taskId} action={actions.stop} said={said} stoppable={streaming} onSent={onSent} />
         </span>
       </div>
       <div data-now={now.tone} style={{ display: 'flex', flexDirection: 'column', gap: 4, padding: '8px 20px 16px', borderBottom: `1px solid ${color('rule')}` }}>
+        {mark === undefined ? null : <StatusMarks marks={[mark]} />}
         <p style={{ margin: 0, fontSize: 15, fontWeight: 500, color: color(tones[now.tone]), overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: now.tone === 'run' ? 'nowrap' : 'normal' }}>
           {now.lead === null ? null : <span style={{ color: color('muted'), fontWeight: 400 }}>{`${now.lead} · `}</span>}
           {now.line}
@@ -117,10 +121,7 @@ export function AgentPanel({ task: taskId, initial, live, said: saidFirst, kept,
       </div>
       {dock === 'question' && task.review !== null ? (
         <Docked label="The agent's question">
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-            <StatusMarks marks={['needs-you']} />
-            <ReviewCard task={taskId} attempt={task.review.attempt} review={task.review.review} said={said} act={actions.review} onSent={onSent} zone={zone} />
-          </div>
+          <ReviewCard task={taskId} attempt={task.review.attempt} review={task.review.review} said={said} act={actions.review} onSent={onSent} zone={zone} />
         </Docked>
       ) : null}
       {dock === 'message' ? (

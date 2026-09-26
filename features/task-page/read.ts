@@ -284,7 +284,7 @@ export async function readTask(db: Database, key: string, now: Date = new Date()
     live: found.live,
     said: found.said,
     attempts: extend(
-      found.live.attempts.map(each => ({ attempt: each.id, transcript: emptyTranscript, times: {}, commands: {} })),
+      found.live.attempts.map(each => ({ attempt: each.id, transcript: emptyTranscript, times: {}, actions: {} })),
       found.lines,
     ),
     cursor: last === undefined ? undefined : { attempt: last.attempt, line: last.seq },

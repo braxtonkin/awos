@@ -4,6 +4,7 @@ import type { Transcript } from '../../shared/items.ts';
 import { review } from '../../shared/review.ts';
 import { said } from '../../shared/said.ts';
 import { marks } from '../../shared/task-status.ts';
+import type { Action } from './tool-actions.ts';
 
 export type Cursor = { readonly attempt: string; readonly line: number };
 
@@ -53,7 +54,7 @@ export type AttemptTranscript = {
   readonly attempt: string;
   readonly transcript: Transcript;
   readonly times: Readonly<Record<string, string>>;
-  readonly commands: Readonly<Record<string, string>>;
+  readonly actions: Readonly<Record<string, Action>>;
 };
 
 export type Kept = { readonly transcriptUntil: string; readonly historyUntil: string } | null;

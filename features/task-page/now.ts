@@ -6,18 +6,11 @@ import { clock } from '../../shared/ui/clock.ts';
 import type { AttemptTranscript, TaskLive } from './protocol.ts';
 import { stepName } from './time.ts';
 import { numbered } from './timeline.ts';
+import { actionLine, type Action } from './tool-actions.ts';
 
 export type Tone = 'run' | 'attn' | 'fail' | 'muted';
 
 export type Now = { readonly tone: Tone; readonly lead: string | null; readonly line: string; readonly detail: string | null };
-
-const wrapped = /^(?:\/bin\/)?(?:ba|z)?sh -l?c (['"])(.*)\1$/s;
-
-export const shownCommand = (command: string): string => {
-  const found = wrapped.exec(command);
-  if (found?.[2] === undefined) return command;
-  return found[1] === "'" ? found[2].replaceAll("'\\''", "'") : found[2];
-};
 
 export const reviewOf = (text: string): Review | undefined => {
   try {
@@ -27,19 +20,19 @@ export const reviewOf = (text: string): Review | undefined => {
   }
 };
 
-const firstLine =(text: string): string => {
+const firstLine = (text: string): string => {
   const line = text.trim().split('\n')[0] ?? '';
   return line.length > 140 ? `${line.slice(0, 139)}…` : line;
 };
 
-function doing(item: Item | undefined, command: string | undefined): string {
+function doing(item: Item | undefined, action: Action | undefined): string {
   if (item === undefined) return 'Starting';
   const running = item.status === 'inProgress';
   switch (item.type) {
     case 'commandExecution':
-      return `${running ? 'Running' : 'Ran'} ${command === undefined ? 'a command' : shownCommand(command)}`;
+      return action === undefined ? (running ? 'Running a command' : 'Ran a command') : actionLine(action, running);
     case 'fileChange':
-      return running ? 'Changing files' : 'Changed files';
+      return action === undefined ? (running ? 'Changing files' : 'Changed files') : actionLine(action, running);
     case 'reasoning':
       return 'Thinking';
     case 'userMessage':
@@ -76,7 +69,7 @@ export function nowOf(live: TaskLive, attempts: readonly AttemptTranscript[], zo
     const shown = attempts.find(each => each.attempt === newest.id);
     const items = shown?.transcript.items ?? [];
     const last = items.findLast(item => item.type !== 'userMessage' || items.indexOf(item) > 0);
-    return { tone: 'run', lead: `${step} ${String(numbered(live.attempts, newest.id))}`, line: doing(last, last === undefined ? undefined : shown?.commands[last.id]), detail: null };
+    return { tone: 'run', lead: `${step}, try ${String(numbered(live.attempts, newest.id))}`, line: doing(last, last === undefined ? undefined : shown?.actions[last.id]), detail: null };
   }
   switch (live.state) {
     case 'ready':

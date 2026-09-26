@@ -4,9 +4,10 @@
       "The task's header: its routine, key, title, repository, who it runs as, and when it was found.",
       "The status card: the task's state mark and one sentence that says what it is doing, what it waits for, or who stopped it.",
       "The agent's conversation as stored, streaming live while the agent runs, grouped by step and try, with times.",
-      "Stop, at the top right of a task whose agent runs or waits, and its answer: Sending, Stopped, Waiting for the engine, or why it was refused.",
+      "Stop, at the top of the agent panel while the agent runs, with the sentence \"Stopping keeps the work already pushed.\", and its answer: Sending, Stopped, Waiting for the engine, or why it was refused.",
       "The Acting as menu in the top bar, which picks the person the dashboard acts as.",
-      "A not-found page for a key no task has, with a field that opens a task by its key."
+      "A not-found page for a key no task has, with a field that opens a task by its key.",
+      "The agent panel: a line at its top saying what the agent is doing now or why the task waits or failed, who said what in order with times, grouped by step and try, tool calls that name their command or file, the message box, answering an agent question in place, and Retry with a note."
     ],
     "later": [
       {
@@ -15,14 +16,34 @@
         "adds": "Links in the top bar to Needs you, the board, and all tasks, and the pages they open. Until then no page links to a list of tasks."
       },
       {
-        "id": "agent-panel",
-        "unit": "U7",
-        "adds": "A plain line at the top of the agent panel saying what the agent is doing now and whether it waits, who said what in order with times, grouped by attempt, tool output that names its command, the message box with sent, received, and acted-on states, answering an agent's question in place, one sentence on why a failed task failed and what the agent tried, Retry with a note, and Stop's final form: shown only while an attempt runs, beside the panel, with the sentence \"Stopping keeps the work already pushed.\""
-      },
-      {
         "id": "status-card",
         "unit": "U8",
         "adds": "The status card's next action, such as Approve, Send back, or Retry, a waiting reason shown as its instruction, the stepper of the task's steps, open reviews, and the evidence and attempts tabs."
+      }
+    ]
+  },
+  "agent": {
+    "shows": [
+      "A line at the top of the panel that says what the agent is doing now, with its step and try, or why the task waits, stopped, or failed, and on a failed task what the agent tried and what the check found.",
+      "The newest message a person sent, under that line, with its delivery states.",
+      "Who said what, in order, with times, grouped by step and try, with each tool call collapsed and named by its command or file, and the output one click away.",
+      "Every message a person sent, a steer, a Retry note, or an answer, with Sent, Received, and Acted on and their times, and a Stop, an Approve, or a bare Retry as the person's action with its time.",
+      "The message box while the agent runs, which keeps the text and shows the engine's sentence when the agent cannot read it.",
+      "An agent question with its answer controls in place, Run again with answers, and Send back with a note.",
+      "Retry with a note on a failed or stopped task.",
+      "Stop at the top of the panel while the agent runs, with the sentence \"Stopping keeps the work already pushed.\"",
+      "A read-only replay of a finished task, and on a task that ended more than 30 days ago, when its transcript expired and until when its attempts and evidence stay."
+    ],
+    "later": [
+      {
+        "id": "status-card",
+        "unit": "U8",
+        "adds": "The status card's next action in the main column, the stepper of the task's steps, gate reviews with Approve and Send back in the main column, and the evidence and attempts tabs, where the evidence a waiting reason points to lives."
+      },
+      {
+        "id": "top-bar-links",
+        "unit": "U6",
+        "adds": "Links in the top bar to Needs you, the board, and all tasks."
       }
     ]
   }
