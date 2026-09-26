@@ -17,13 +17,15 @@ const stopWaitMs = 2000;
 
 const messageWaitMs = 0;
 
-type Asking = Asked extends infer Each ? (Each extends Asked ? Omit<Each, 'id' | 'person' | 'at'> : never) : never;
+type Targeted = Extract<Asked, { readonly target: string }>;
+
+type Asking = Targeted extends infer Each ? (Each extends Targeted ? Omit<Each, 'id' | 'person' | 'at'> : never) : never;
 
 async function send(asking: Asking, waitMs: number): Promise<Sending> {
   const person = await acting();
   if (person === undefined) return { kind: 'pick-first' };
   const db = database();
-  const asked: Asked = { ...asking, id: randomUUID(), person, at: new Date() };
+  const asked: Targeted = { ...asking, id: randomUUID(), person, at: new Date() };
   try {
     const sent = await request(db, asked);
     if ('refused' in sent) throw new Error(`The new request id ${asked.id} was already taken.`);
