@@ -4,7 +4,7 @@ import type { Inspect } from './harness.ts';
 import { threadStartModels } from './record-checks.ts';
 import { attemptsInOrder, taskFor } from './record.ts';
 
-const nobodyToRunAs = 'Nobody to run this task as.';
+const nobodyToRunAs = 'Nobody can run this task yet.';
 
 const noAssigneeInspect: Inspect = async ({ database, clean, ticket }) => {
   const task = await database.selectFrom('task').select(['id', 'state', 'waiting_reason']).where('key', '=', ticket).executeTakeFirst();

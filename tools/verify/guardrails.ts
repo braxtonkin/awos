@@ -7,7 +7,7 @@ import { budgetFile, ceilingsOf, diskSource, loadBudget, withCeilings } from '..
 import { fail, pass, type Check, type Scenario } from './check.ts';
 import { plantAnchor, plantedFixture, plantIds, plants } from './screens/plants.ts';
 
-type Tool = 'tsc' | 'node' | 'eslint' | 'depcruise' | 'check' | 'shape' | 'sql-comments' | 'model-names' | 'step-names' | 'strict-schemas' | 'ci-plan' | 'db-types' | 'models' | 'migration-versions' | 'screen-gates' | 'budget' | 'contrast';
+type Tool = 'tsc' | 'node' | 'eslint' | 'depcruise' | 'check' | 'shape' | 'sql-comments' | 'model-names' | 'step-names' | 'strict-schemas' | 'ci-plan' | 'db-types' | 'models' | 'migration-versions' | 'screen-gates' | 'screen-review' | 'budget' | 'contrast';
 
 type Edit = { readonly from: string; readonly to: string };
 
@@ -1383,6 +1383,36 @@ const screenGateCases: readonly Violation[] = [
   },
 ];
 
+const reviewedPacket = 'tools/verify/screens/fixtures/reviewed';
+
+const firstReview = `${reviewedPacket}/task.r1.json`;
+
+const reviewRejected = 'FAIL  task.r1.json parses against review.schema.json and fits the packet';
+
+const screenReviewCases: readonly Violation[] = [
+  {
+    name: 'screen-review rejects a review that lowers a score only for what a later unit adds',
+    file: firstReview,
+    edit: { from: '"agent":5', to: '"agent":3' },
+    tool: 'screen-review',
+    expect: [reviewRejected],
+  },
+  {
+    name: 'screen-review rejects a problem that waits for an item the scope note does not list',
+    file: firstReview,
+    edit: { from: '"later":"message-box"', to: '"later":"top-bar-links"' },
+    tool: 'screen-review',
+    expect: [reviewRejected],
+  },
+  {
+    name: 'screen-review fails a screen that lacks what its own unit owns, whatever the scope note defers',
+    file: firstReview,
+    edit: { from: '"actionability":4', to: '"actionability":2' },
+    tool: 'screen-review',
+    expect: ['FAIL  task-a-revised scores 4 or higher on every scored dimension'],
+  },
+];
+
 const plantedModel: Violation = {
   name: 'npm run verify -- models runs a failing model scenario from a new feature folder',
   file: 'features/planted/verify.ts',
@@ -1884,6 +1914,10 @@ const tools: Record<
     command: () => ['npm', 'run', '--silent', 'verify', '--', 'screen-gates', '--repeat', '1'],
     caught: startsALine,
   },
+  'screen-review': {
+    command: () => ['npm', 'run', '--silent', 'verify', '--', 'screen-review', 'task', '--judge', '--packet', reviewedPacket],
+    caught: startsALine,
+  },
   contrast: {
     command: () => ['npm', 'run', '--silent', 'contrast'],
     caught: startsALine,
@@ -1968,13 +2002,13 @@ export const guardrails: Scenario = {
   run: async () => [
     ...(await withCopy(async copy => {
       await withRoom(copy);
-      const checks: Check[] = (['tsc', 'eslint', 'depcruise', 'shape', 'sql-comments', 'migration-versions', 'model-names', 'step-names', 'strict-schemas', 'ci-plan', 'db-types', 'screen-gates', 'contrast'] as const).map(tool => {
+      const checks: Check[] = (['tsc', 'eslint', 'depcruise', 'shape', 'sql-comments', 'migration-versions', 'model-names', 'step-names', 'strict-schemas', 'ci-plan', 'db-types', 'screen-gates', 'screen-review', 'contrast'] as const).map(tool => {
         const clean = run(tool, copy, '.');
         const name = `the unplanted copy passes ${tool}`;
         const problem = clean.status === 0 ? tools[tool].unclean?.(clean) : (tools[tool].summary ?? firstLines)(clean);
         return problem === undefined ? pass(name, '') : fail(name, problem);
       });
-      for (const violation of [...violations, ...screenGateCases]) checks.push(await reject(copy, violation));
+      for (const violation of [...violations, ...screenGateCases, ...screenReviewCases]) checks.push(await reject(copy, violation));
       for (const allowance of allowances) checks.push(await accept(copy, allowance));
       return checks;
     })),

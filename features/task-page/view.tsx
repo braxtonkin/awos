@@ -9,7 +9,7 @@ import type { Header, TaskPageData } from './read.ts';
 const streamOf = (key: string, cursor: Cursor | undefined): Stream => ({ path: `/tasks/${encodeURIComponent(key)}/stream`, after: cursor === undefined ? undefined : textOf(cursor) });
 
 function Facts({ header, zone }: { readonly header: Header; readonly zone: string }) {
-  const facts = [header.repository, header.runsAs === null ? null : `Runs as ${header.runsAs}`, `Found at ${clock(header.foundAt, zone)}`];
+  const facts = [header.repository, header.runsAs === null ? 'Runs as nobody yet' : `Runs as ${header.runsAs}`, `Found at ${clock(header.foundAt, zone)}`];
   return (
     <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px 16px', fontSize: 13, color: color('muted') }}>
       {facts.flatMap(fact => (fact === null ? [] : [<span key={fact}>{fact}</span>]))}
@@ -28,7 +28,7 @@ export function TaskPage({ page, actions, zone }: TaskPageProps) {
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 16, minHeight: 28 }}>
             <span style={{ fontSize: 13, color: color('muted') }}>
-              {header.routine} › <span className="mono">{header.key}</span>
+              {header.routine} › {header.key}
             </span>
           </div>
           <h1 style={{ margin: 0, fontSize: 24, lineHeight: '32px', fontWeight: 600 }}>{header.title}</h1>

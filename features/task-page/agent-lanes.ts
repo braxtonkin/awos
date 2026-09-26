@@ -389,7 +389,6 @@ const real: Lane = {
   unit,
   id: '9',
   seeds: ['running'],
-  agent: 'real',
   run: async (world, browser, shots) => {
     const key = keyOf(world, 'running');
     const message = 'Before you finish, name the files you read in one line.';

@@ -5,7 +5,7 @@ export type RunAsRule = (db: Database, task: string) => Promise<string | null>;
 
 export type ReadAssignee = (ticket: string, actsAs: string) => Promise<string | null>;
 
-export const nobodyToRunAs: Instruction = "Nobody to run this task as. Assign the ticket to someone who has connected a login, or set the routine's run-as person, then press Retry.";
+export const nobodyToRunAs: Instruction = 'Nobody can run this task yet. Assign the ticket to someone who has connected a login, or choose who the routine runs as, then press Retry.';
 
 export const coreRunAs =
   (readAssignee: ReadAssignee | null): RunAsRule =>

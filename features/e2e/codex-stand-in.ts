@@ -1,6 +1,6 @@
 import { existsSync } from 'node:fs';
 import { mkdir, writeFile } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { setTimeout as wait } from 'node:timers/promises';
 import { z } from 'zod';
@@ -84,11 +84,12 @@ const environment = (): Readonly<Record<string, string>> => Object.fromEntries(O
 
 type Ran = { readonly command: string; readonly exitCode: number; readonly output: string };
 
-async function run(text: string): Promise<Ran> {
-  const id = nextId('command');
+type CommandAction = { readonly type: 'unknown'; readonly command: string } | { readonly type: 'read'; readonly command: string; readonly name: string; readonly path: string };
+
+async function run(text: string, id: string = nextId('command'), action: CommandAction = { type: 'unknown', command: text }): Promise<Ran> {
   const cwd = process.cwd();
   const command = `sh -c ${quoted(text)}`;
-  const shape = { type: 'commandExecution', command, cwd, processId: null, commandActions: [{ type: 'unknown', command: text }] };
+  const shape = { type: 'commandExecution', command, cwd, processId: null, commandActions: [action] };
   started(id, { ...shape, status: 'inProgress', aggregatedOutput: null, exitCode: null, durationMs: null });
   const began = performance.now();
   const exit = await execute('sh', ['-c', text], { cwd, env: environment(), timeoutMs: commandTimeoutMs, signal: turnState.abort.signal }).catch((error: unknown) => ({
@@ -197,7 +198,7 @@ const fileExists: ScriptStep = (prompt, script) =>
 const asked: ScriptStep = (prompt, script) =>
   prompt.includes(answeredHeading)
     ? planned(prompt, script)
-    : Promise.resolve({ outcome: 'needs_input', summary: 'The ticket leaves the retry policy open.', blocks: [{ kind: 'text', title: null, body: 'The service documents no retry policy, so the stand-in needs a person to pick one.' }, retryQuestion] });
+    : Promise.resolve({ outcome: 'needs_input', summary: 'Which retry policy should the sandbox client use? The ticket leaves it open.', blocks: [{ kind: 'text', title: null, body: 'The service documents no retry policy, so the stand-in needs a person to pick one.' }, retryQuestion] });
 
 const stillWrong: ScriptStep = prompt => reproducing(prompt, 'echo "prices still keep fractions of a cent"\nexit 1\n', 'The stand-in wrote a script that checks the rounding.', 'The script fails while any price keeps a fraction of a cent.');
 
@@ -236,6 +237,58 @@ async function work(prompt: string): Promise<Review | undefined> {
   return step === 'implement' ? implement({ entry, solution }) : verify({ entry, solution }, prompt);
 }
 
+export const tickPrefix = 'stand-in-tick-';
+
+type Working = (id: string) => Promise<unknown>;
+
+const said = (body: object): Working => id => {
+  item(id, body);
+  return Promise.resolve();
+};
+
+const reasoning = (summary: string): Working => said({ type: 'reasoning', summary: [summary], content: [] });
+
+const saying = (text: string): Working => said({ type: 'agentMessage', text });
+
+const reading = (path: string, text: string): Working => id => run(text, id, { type: 'read', command: text, name: basename(path), path });
+
+const opening: readonly Working[] = [
+  reasoning('Finding where the sandbox logs on start.'),
+  id => run('ls src test', id),
+  reading('src/words.ts', "sed -n '1,40p' src/words.ts"),
+  saying('Nothing in src logs a start line yet. Checking the package scripts next.'),
+  reading('package.json', 'cat package.json'),
+  saying('I will add src/logging.ts to log the line once, with a test that counts it.'),
+];
+
+const checks: readonly Working[] = [id => run('git status --short', id), reading('test/words.test.ts', "sed -n '1,40p' test/words.test.ts"), id => run('ls src test', id), id => run('git diff --stat', id)];
+
+const thoughts: readonly string[] = [
+  'Checking the tests for a start test.',
+  'Comparing the start output with the ticket.',
+  'Looking for other places that log.',
+  'Confirming the package has no logger yet.',
+  'Deciding where the logging helper goes.',
+  'Checking how the tests import src.',
+  'Reading the last few commits.',
+  'Checking the working tree is clean.',
+  'Drafting the test that counts start lines.',
+  'Checking the ticket for other asks.',
+  'Making sure the plan covers the ticket.',
+  'Rereading the example in the ticket.',
+  'Listing the files the change will touch.',
+  'Checking nothing else prints on start.',
+  'Reviewing the plan once more.',
+  'Checking the test runner prints nothing extra.',
+];
+
+const workAt = (tick: number): Working | undefined => {
+  const after = tick - 1 - opening.length;
+  if (after < 0) return opening[tick - 1];
+  const turn = Math.floor(after / 2);
+  return after % 2 === 0 ? checks[turn % checks.length] : reasoning(thoughts[turn % thoughts.length] ?? '');
+};
+
 async function runTurn(params: Readonly<Record<string, unknown>>): Promise<void> {
   const prompt = promptOf(params);
   notify('turn/started', { threadId: thread, turn: { id: turn, status: 'inProgress', items: [] } });
@@ -248,7 +301,7 @@ async function runTurn(params: Readonly<Record<string, unknown>>): Promise<void>
     await wait(everyMs);
     if (stopped()) return;
     answerSteers();
-    item(`stand-in-tick-${String(tick)}`, { type: 'agentMessage', text: `tick ${String(tick)}` });
+    await workAt(tick)?.(`${tickPrefix}${String(tick)}`);
   }
   if (stopped()) return;
   const final = await work(prompt);
