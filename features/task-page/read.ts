@@ -3,6 +3,7 @@ import { jsonArrayFrom } from 'kysely/helpers/postgres';
 import { z } from 'zod';
 import type { Database } from '../../shared/db/client.ts';
 import { emptyTranscript } from '../../shared/items.ts';
+import { reproduction, type Reproduction } from '../../shared/reproduction.ts';
 import { answerFrom, payloads } from '../../shared/requests.ts';
 import { review, type Answer, type Review } from '../../shared/review.ts';
 import { saidKinds, type Said } from '../../shared/said.ts';
@@ -24,7 +25,9 @@ export type Step = { readonly name: string; readonly gate: boolean };
 
 export type Field = { readonly name: string; readonly text: string };
 
-export type Evidence = { readonly attempt: string; readonly step: string; readonly recordedAt: string; readonly blocks: readonly Field[]; readonly facts: readonly Field[] };
+export type Shown = { readonly kind: 'reproduction'; readonly reproduction: Reproduction } | { readonly kind: 'fields'; readonly blocks: readonly Field[]; readonly facts: readonly Field[] };
+
+export type Evidence = { readonly attempt: string; readonly step: string; readonly recordedAt: string; readonly shown: Shown };
 
 export type TaskRecord = {
   readonly steps: readonly Step[];
@@ -291,10 +294,15 @@ function leavesOf(value: unknown, path: readonly string[]): readonly Leaf[] {
   return [];
 }
 
-const fieldsOf = (body: unknown): Pick<Evidence, 'blocks' | 'facts'> => {
+const fieldsOf = (body: unknown): Shown => {
   const leaves = leavesOf(body, []);
   const bare = ({ name, text }: Leaf): Field => ({ name, text });
-  return { blocks: leaves.filter(leaf => leaf.block).map(bare), facts: leaves.filter(leaf => !leaf.block).map(bare) };
+  return { kind: 'fields', blocks: leaves.filter(leaf => leaf.block).map(bare), facts: leaves.filter(leaf => !leaf.block).map(bare) };
+};
+
+const shownOf = (body: unknown): Shown => {
+  const parsed = reproduction.safeParse(body);
+  return parsed.success ? { kind: 'reproduction', reproduction: parsed.data } : fieldsOf(body);
 };
 
 const mergeKind = 'pr.merge';
@@ -313,7 +321,7 @@ async function recordOf(db: Database, task: { readonly id: string; readonly work
   ]);
   return {
     steps: steps.map(step => ({ name: step.name, gate: task.gates.includes(step.name) })),
-    evidence: evidence.map(row => ({ attempt: row.attempt_id, step: row.step, recordedAt: row.recorded_at.toISOString(), ...fieldsOf(row.body) })),
+    evidence: evidence.map(row => ({ attempt: row.attempt_id, step: row.step, recordedAt: row.recorded_at.toISOString(), shown: shownOf(row.body) })),
     mergeQueued: merge !== undefined,
   };
 }
