@@ -1,7 +1,0 @@
-{
-  "why": "The screen measurer skips what a closed details hides, with a guardrail allowance and violation that prove it (FX-gates, C6)",
-  "raise": {
-    "characters/tools": 1047,
-    "lines/tools": 23
-  }
-}

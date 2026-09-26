@@ -72,8 +72,8 @@
         "tools/**",
         "eslint.config.ts"
       ],
-      "lines": 7227,
-      "characters": 330781,
+      "lines": 7250,
+      "characters": 331828,
       "longest-line": 547
     },
     {
@@ -94,8 +94,8 @@
         "services/**",
         "shared/**"
       ],
-      "lines": 13299,
-      "characters": 608943,
+      "lines": 13290,
+      "characters": 608830,
       "longest-line": 374
     }
   ],
