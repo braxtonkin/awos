@@ -27,7 +27,7 @@ export function Tabs({ initial, panels }: TabsProps) {
               setShown(tab);
               window.history.replaceState(null, '', `?tab=${tab}`);
             }}
-            style={{ padding: '8px 0', marginBottom: -1, fontSize: 14, fontWeight: 500, textDecoration: 'none', color: color(tab === shown ? 'ink' : 'muted'), borderBottom: `2px solid ${tab === shown ? color('ink') : 'transparent'}` }}
+            style={{ padding: '8px 0', fontSize: 14, fontWeight: 500, textDecoration: 'none', color: color(tab === shown ? 'ink' : 'muted'), boxShadow: tab === shown ? `inset 0 -2px 0 ${color('ink')}` : 'none' }}
           >
             {labels[tab]}
           </a>

@@ -1,5 +1,6 @@
 import { clock } from '../../shared/ui/clock.ts';
 import { color } from '../../shared/ui/tokens.ts';
+import { Folded } from './folded.tsx';
 import type { AttemptRow, Evidence } from './read.ts';
 import { stepName } from './time.ts';
 
@@ -35,12 +36,11 @@ export function EvidenceTab({ evidence, attempts, zone }: EvidenceTabProps) {
             </dl>
           )}
           {row.blocks.map(block => (
-            <details key={block.name} data-field={block.name} style={{ borderTop: `1px solid ${color('rule')}`, paddingTop: 8 }}>
-              <summary style={{ cursor: 'pointer', fontSize: 13, fontWeight: 500 }}>{block.name}</summary>
+            <Folded key={block.name} field={block.name} style={{ borderTop: `1px solid ${color('rule')}`, paddingTop: 8 }} summary={<summary style={{ cursor: 'pointer', fontSize: 13, fontWeight: 500 }}>{block.name}</summary>}>
               <pre style={code}>
                 <code>{block.text}</code>
               </pre>
-            </details>
+            </Folded>
           ))}
         </article>
       ))}

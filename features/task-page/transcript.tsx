@@ -1,12 +1,13 @@
 'use client';
 
-import { useState, type ReactNode } from 'react';
+import type { ReactNode } from 'react';
 import type { Item } from '../../shared/items.ts';
 import type { Review } from '../../shared/review.ts';
 import { deliveryOf, type Said } from '../../shared/said.ts';
 import { clock, day } from '../../shared/ui/clock.ts';
 import { DeliveryLine } from '../../shared/ui/delivery.tsx';
 import { color } from '../../shared/ui/tokens.ts';
+import { Folded } from './folded.tsx';
 import { reviewOf } from './now.ts';
 import type { AttemptSummary, AttemptTranscript, Kept } from './protocol.ts';
 import { stepName } from './time.ts';
@@ -52,23 +53,17 @@ function shownOf(item: Item, firstInTurn: boolean, action: Action | undefined, r
 const muted = { fontSize: 13, color: color('muted') } as const;
 
 function Details({ label, body }: { readonly label: ReactNode; readonly body: string }) {
-  const [open, setOpen] = useState(false);
   return (
-    <details
-      onToggle={event => {
-        setOpen(event.currentTarget.open);
-      }}
-    >
-      <summary style={{ cursor: 'pointer' }}>{label}</summary>
-      {open ? <pre style={{ margin: 0, marginTop: 8, padding: 12, maxHeight: 320, overflow: 'auto', whiteSpace: 'pre-wrap', borderRadius: 8, background: color('surface-2') }}>{body}</pre> : null}
-    </details>
+    <Folded summary={<summary style={{ cursor: 'pointer' }}>{label}</summary>}>
+      <pre style={{ margin: 0, marginTop: 8, padding: 12, maxHeight: 320, overflow: 'auto', whiteSpace: 'pre-wrap', borderRadius: 8, background: color('surface-2') }}>{body}</pre>
+    </Folded>
   );
 }
 
 function Body({ shown, step }: { readonly shown: Shown; readonly step: string }): ReactNode {
   switch (shown.kind) {
     case 'instructions':
-      return <Details label={`AutoWorker gave the agent its ${step} instructions`} body={shown.text} />;
+      return <Details label={`${step} instructions`} body={shown.text} />;
     case 'message':
     case 'agent':
       return <p style={{ margin: 0, whiteSpace: 'pre-wrap' }}>{shown.text}</p>;
@@ -156,7 +151,7 @@ function AttemptItems({ entries, times, step, zone }: { readonly entries: readon
       {entries.map((entry, index) => {
         if (entry.kind === 'said') return <PersonRow key={entry.entry.request} entry={entry.entry} item={entry.item} zone={zone} />;
         const before = entries[index - 1];
-        const heading = before?.kind !== 'item' || who[before.shown.kind] !== who[entry.shown.kind];
+        const heading = entry.shown.kind !== 'instructions' && (before?.kind !== 'item' || who[before.shown.kind] !== who[entry.shown.kind]);
         return <Row key={entry.item.id} item={entry.item} shown={entry.shown} running={entry.running} time={times[entry.item.id]} step={step} zone={zone} heading={heading} />;
       })}
     </ol>
@@ -167,7 +162,7 @@ const headingOf = (attempts: readonly AttemptSummary[], id: string, zone: string
   const found = attempts.find(each => each.id === id);
   if (found === undefined) return { step: 'this step', title: 'Starting' };
   const step = stepName(found.step);
-  return { step, title: `${step}, try ${String(numbered(attempts, id))} · started ${clock(found.startedAt, zone)}` };
+  return { step, title: `${step}, try ${String(numbered(attempts, id))} · ${clock(found.startedAt, zone)}` };
 };
 
 const shownSaid = (entry: Said): boolean => deliveryOf(entry) !== 'refused';

@@ -49,7 +49,7 @@ export function TaskPage({ page, actions, tab, zone }: TaskPageProps) {
         <StatusCard initial={live} landing={{ mergeQueued: record.mergeQueued, took: live.state === 'done' ? tookOf(record.attempts) : null }} stream={stream} zone={zone} />
         <Stepper initial={live} steps={record.steps} stream={stream} />
         <OpenReviews task={header.id} live={live} said={page.said} stream={stream} act={actions.review} zone={zone} />
-        <Tabs initial={tab} panels={{ evidence: <EvidenceTab evidence={record.evidence} attempts={record.attempts} zone={zone} />, attempts: <AttemptsTab attempts={record.attempts} zone={zone} /> }} />
+        <Tabs initial={tab} panels={{ evidence: <EvidenceTab evidence={record.evidence} attempts={record.attempts} zone={zone} />, attempts: <AttemptsTab attempts={record.attempts} runsAs={header.runsAs} /> }} />
       </main>
       <AgentPanel task={header.id} initial={page.attempts} live={live} said={page.said} kept={page.kept} stream={stream} actions={actions} zone={zone} />
     </div>

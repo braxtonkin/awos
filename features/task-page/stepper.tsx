@@ -57,7 +57,7 @@ export function Stepper({ initial, steps, stream }: StepperProps) {
             key={step.name}
             data-step-state={state}
             aria-current={current ? 'step' : undefined}
-            style={{ flex: '1 1 120px', display: 'flex', flexDirection: 'column', gap: 4, padding: '12px 16px', borderRadius: 8, background: color('surface'), border: `1px solid ${current ? color('rule-strong') : color('rule')}` }}
+            style={{ flex: '1 1 120px', display: 'flex', flexDirection: 'column', gap: 4 }}
           >
             <span style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 14, fontWeight: current ? 600 : 500 }}>
               <span aria-hidden="true" style={{ width: 8, height: 8, borderRadius: '50%', flex: 'none', background: look.filled ? color(look.tone) : 'transparent', border: `1px solid ${color(look.tone)}` }} />

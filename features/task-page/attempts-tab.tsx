@@ -1,5 +1,5 @@
 import type { Verdict } from '../../shared/db/types.ts';
-import { between, clock } from '../../shared/ui/clock.ts';
+import { between } from '../../shared/ui/clock.ts';
 import { color } from '../../shared/ui/tokens.ts';
 import { tryOf } from './evidence-tab.tsx';
 import type { AttemptRow } from './read.ts';
@@ -7,7 +7,7 @@ import { stepName } from './time.ts';
 
 const results: Readonly<Record<Verdict, string>> = {
   pass: 'Passed',
-  behavior_fail: 'Found the behavior still wrong',
+  behavior_fail: 'Behavior still wrong',
   environment_fail: 'The environment broke',
   fail: 'Failed',
   red_check: 'A check on the pull request went red',
@@ -26,10 +26,11 @@ const cell = { padding: '8px 12px', borderBottom: `1px solid ${color('rule')}`, 
 
 const head = { ...cell, fontSize: 12, fontWeight: 500, color: color('muted') } as const;
 
-type AttemptsTabProps = { readonly attempts: readonly AttemptRow[]; readonly zone: string };
+type AttemptsTabProps = { readonly attempts: readonly AttemptRow[]; readonly runsAs: string | null };
 
-export function AttemptsTab({ attempts, zone }: AttemptsTabProps) {
+export function AttemptsTab({ attempts, runsAs }: AttemptsTabProps) {
   if (attempts.length === 0) return <p style={{ margin: 0, color: color('muted') }}>No attempt has started yet.</p>;
+  const someoneElse = attempts.some(row => row.person !== runsAs);
   return (
     <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
       <thead>
@@ -40,12 +41,11 @@ export function AttemptsTab({ attempts, zone }: AttemptsTabProps) {
           <th scope="col" style={head}>
             Result
           </th>
-          <th scope="col" style={head}>
-            Ran as
-          </th>
-          <th scope="col" style={head}>
-            Started
-          </th>
+          {someoneElse ? (
+            <th scope="col" style={head}>
+              Ran as
+            </th>
+          ) : null}
           <th scope="col" style={head}>
             Length
           </th>
@@ -58,8 +58,7 @@ export function AttemptsTab({ attempts, zone }: AttemptsTabProps) {
             <td style={cell} data-result="true">
               {resultOf(row)}
             </td>
-            <td style={cell}>{row.person}</td>
-            <td style={cell}>{clock(row.startedAt, zone)}</td>
+            {someoneElse ? <td style={cell}>{row.person}</td> : null}
             <td style={cell}>{row.finishedAt === null ? 'Still running' : between(row.startedAt, row.finishedAt)}</td>
           </tr>
         ))}
