@@ -11,6 +11,7 @@ import { sql } from 'kysely';
 import { getContainerRuntimeClient } from 'testcontainers';
 import { z } from 'zod';
 import { connect, type Database } from '../../shared/db/client.ts';
+import { answerOf, request, type PayloadOf, type RequestAnswer } from '../../shared/requests.ts';
 import { fail, pass, type Check, type Scenario } from '../../tools/verify/check.ts';
 import { engineHandlesSigtermFrom, hangCeilingMs } from '../../tools/verify/engine.ts';
 import { withPostgres, type TestPostgres } from '../../tools/verify/postgres.ts';
@@ -777,6 +778,78 @@ async function convergesOnChanges(world: SetupWorld): Promise<Outcome> {
   };
 }
 
+async function engineAnswers(world: SetupWorld, ids: readonly string[]): Promise<{ readonly answers: readonly (RequestAnswer | undefined)[]; readonly said: string }> {
+  const child = spawn(process.execPath, [engineMain], { env: { ...unrelatedTo(['CREDENTIAL_', 'JOB_', 'DATABASE_']), DATABASE_URL: world.url, REQUESTS_EVERY_MS: '100' }, stdio: ['ignore', 'pipe', 'pipe'] });
+  let said = '';
+  child.stdout.on('data', (chunk: Buffer) => {
+    said += chunk.toString('utf8');
+  });
+  child.stderr.on('data', (chunk: Buffer) => {
+    said += chunk.toString('utf8');
+  });
+  const exited = new Promise<void>(done => {
+    child.on('exit', () => {
+      done();
+    });
+  });
+  const answered = async (): Promise<readonly (RequestAnswer | undefined)[]> => Promise.all(ids.map(id => answerOf(world.engine, id)));
+  const deadline = performance.now() + hangCeilingMs;
+  let answers = await answered();
+  while (answers.some(answer => answer === undefined || answer === 'waiting') && child.exitCode === null && performance.now() < deadline) {
+    await wait(100);
+    answers = await answered();
+  }
+  if (child.exitCode === null && performance.now() >= deadline) said += `\nThe verify tool stopped waiting for the engine to answer after ${String(hangCeilingMs / 1000)} s.`;
+  child.kill(said.includes(engineHandlesSigtermFrom) ? 'SIGTERM' : 'SIGKILL');
+  await Promise.race([exited, wait(hangCeilingMs).then(() => child.kill('SIGKILL'))]);
+  return { answers, said };
+}
+
+async function savesThroughTheEngine(world: SetupWorld): Promise<Outcome> {
+  await world.apply(setupFile);
+  const routine = await world.engine.selectFrom('routine').select('id').executeTakeFirstOrThrow();
+  const person = await world.engine.selectFrom('person').select('id').executeTakeFirstOrThrow();
+  const repository = await world.engine.selectFrom('repository').select('id').executeTakeFirstOrThrow();
+  const goal = 'Take each sandbox ticket to a merged pull request, and list each changed file.';
+  const draft: PayloadOf<'save_routine'> = {
+    from: 1,
+    name: sandboxRoutine.name,
+    goal,
+    workflow: sandboxRoutine.workflow,
+    source: sandboxRoutine.source,
+    jiraStartStatus: sandboxRoutine.jiraStartStatus,
+    jiraEndStatus: sandboxRoutine.jiraEndStatus,
+    ignoreLaterReviews: sandboxRoutine.ignoreLaterReviews,
+    everyMinutes: sandboxRoutine.everyMinutes,
+    repository: repository.id,
+    runAs: null,
+    gates: sandboxRoutine.gates,
+    lastStep: null,
+    steps: sandboxRoutine.steps,
+  };
+  const saved = randomUUID();
+  const planted = randomUUID();
+  const unpublished = 'unpublished-workflow';
+  await request(world.engine, { id: saved, person: person.id, at: new Date(), kind: 'save_routine', target: routine.id, payload: draft });
+  await request(world.engine, { id: planted, person: person.id, at: new Date(), kind: 'save_routine', target: null, payload: { ...draft, from: null, name: 'Planted', workflow: unpublished } });
+  const { answers, said } = await engineAnswers(world, [saved, planted]);
+  const [savedAnswer, plantedAnswer] = answers;
+  const versions = await world.engine.selectFrom('routine_version').select(['routine_id', 'version', 'goal', 'action_id']).orderBy('routine_id').orderBy('version').execute();
+  const action = await world.engine.selectFrom('human_action').select(['kind', 'person_id']).where('id', '=', saved).executeTakeFirst();
+  const routines = await world.engine.selectFrom('routine').select('id').execute();
+  const refusedPlant = typeof plantedAnswer === 'object' && 'refused' in plantedAnswer ? plantedAnswer.refused : undefined;
+  return {
+    problems: [
+      ...(isDeepStrictEqual(savedAnswer, { recorded: saved }) ? [] : [`the save was answered ${JSON.stringify(savedAnswer)}; the engine said: ${said.trim().replaceAll('\n', ' | ')}`]),
+      ...(versions.length === 2 && versions[1]?.version === 2 && versions[1].goal === goal && versions[1].action_id === saved ? [] : [`the routine versions are ${JSON.stringify(versions)}`]),
+      ...(action?.kind === 'edit_routine' && action.person_id === person.id ? [] : [`the save's action is ${JSON.stringify(action)}`]),
+      ...(refusedPlant?.includes(unpublished) === true && refusedPlant.includes('does not run') ? [] : [`the planted routine was answered ${JSON.stringify(plantedAnswer)}`]),
+      ...(routines.length === 1 ? [] : [`${String(routines.length)} routines exist after the planted save, not 1`]),
+    ],
+    detail: `saveRoutine, run by the engine's save_routine handler, saved version 2 with the new goal under an edit_routine action whose id is the request's; the planted routine was refused: ${refusedPlant ?? 'no refusal'}`,
+  };
+}
+
 async function refusesBadSettings(world: SetupWorld): Promise<Outcome> {
   const { jql, ...noJql } = sandboxRoutine.source;
   const scheduled = { ...sandboxRoutine, source: { kind: 'schedule' }, jiraStartStatus: undefined, jiraEndStatus: undefined };
@@ -912,6 +985,7 @@ const setupChecks: readonly Entry[] = [
   { name: 'a changed person and repository are updated, a changed routine saves a new version beside the old one, and a repeat changes nothing', run: inSetup(convergesOnChanges) },
   { name: 'a Jira search without JQL, a tagged image, a blank command or status, an unknown Verify provider, and an unknown repository field are refused by field name, and nothing is written', run: inSetup(refusesBadSettings) },
   { name: 'a run-as person the file does not list is refused by name, and nothing is written', run: inSetup(refusesUnknownRunAs) },
+  { name: 'the engine saves a routine through a save_routine request as version 2, and refuses a planted routine naming a workflow it did not publish', run: inSetup(savesThroughTheEngine) },
   { name: 'two people with one Jira account id are refused by Postgres, and the people section rolls back', run: inSetup(duplicateAccountRollsBack) },
   { name: 'after setup, the dashboard role cannot select a sealed column', run: inSetup(dashboardCannotReadSetupLogins) },
   { name: repeatLimit, run: postgres => setupSpeed(postgres) },

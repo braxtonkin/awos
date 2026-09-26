@@ -14,10 +14,12 @@
     "select on published_provider",
     "select on published_workflow_step",
     "select on repository (branch, github, id)",
-    "select on routine (creator_id, id, paused_by)",
-    "select on routine_version (every, name, routine_id, version)",
+    "select on routine (creator_id, id, paused_by, run_as_id)",
+    "select on routine_version (action_id, every, gates, goal, ignore_later_reviews, jira_end_status, jira_start_status, last_step, name, repository_id, routine_id, source, version, workflow)",
     "select on task (assignee_account_id, found_at, found_version, id, key, repository_id, review_attempt, routine_id, state, step, stopped_by, title, waiting_on, waiting_reason, workflow)",
-    "select on attempt_command (acted_at, action_id, attempt_id, client_message_id, kind, received_at, seq)"
+    "select on attempt_command (acted_at, action_id, attempt_id, client_message_id, kind, received_at, seq)",
+    "select on routine_run (finished_at, id, outcome, pressed_by, reason, routine_id, slot, started_at, version)",
+    "select on routine_step (instructions, routine_id, skills, step, version)"
   ],
   "never": [
     "credential.ciphertext",

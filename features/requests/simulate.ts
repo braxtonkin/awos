@@ -5,7 +5,7 @@ import { sql } from 'kysely';
 import { z } from 'zod';
 import { connect, type Database } from '../../shared/db/client.ts';
 import { neverStops, runLoop, type Clock, type Loop } from '../../shared/loop.ts';
-import { request, requestKinds, type Asked, type RequestKind, type TargetKind } from '../../shared/requests.ts';
+import { request, requestKinds, type Asked, type PayloadOf, type RequestKind, type TargetKind } from '../../shared/requests.ts';
 import { note } from '../../shared/review.ts';
 import { inTransaction, type Transacting } from '../../shared/transaction.ts';
 import type { TestPostgres } from '../../tools/verify/postgres.ts';
@@ -171,7 +171,26 @@ const traceTail = 40;
 
 const realWaitMs = 5_000;
 
-const kindsOn: Readonly<Record<TargetKind, readonly RequestKind[]>> = { task: ['stop', 'retry', 'approve'], routine: ['pause', 'resume', 'run_now'] };
+const kindsOn: Readonly<Record<TargetKind, readonly RequestKind[]>> = { task: ['stop', 'retry', 'approve'], routine: ['pause', 'resume', 'run_now', 'save_routine'] };
+
+const newRoutineOdds = 0.3;
+
+const draft: PayloadOf<'save_routine'> = {
+  from: 1,
+  name: 'Held',
+  goal: 'Hold requests.',
+  workflow: 'post',
+  source: { kind: 'tickets' },
+  jiraStartStatus: null,
+  jiraEndStatus: null,
+  ignoreLaterReviews: false,
+  everyMinutes: 1,
+  repository: null,
+  runAs: null,
+  gates: [],
+  lastStep: null,
+  steps: {},
+};
 
 function seeded(seed: number): Random {
   let state = seed >>> 0;
@@ -301,6 +320,8 @@ const askFor = (world: World, id: string, target: Target, kind: RequestKind): As
       return { ...base, kind, payload: { review: '7', answer: { kind: 'pick', block: 0, option: 'a' } } };
     case 'steer':
       return { ...base, kind, payload: { message: 'Also check the edge case.' } };
+    case 'save_routine':
+      return world.random() < newRoutineOdds ? { ...base, target: null, kind, payload: { ...draft, from: null } } : { ...base, kind, payload: draft };
   }
 };
 
@@ -322,7 +343,7 @@ async function send(world: World, db: Database, asked: Asked): Promise<string> {
   if ('refused' in sent) throw new Error(`a fresh request ${asked.id} was refused as id-taken`);
   world.sent.push(asked);
   count(world, `sent ${fate}`);
-  return `sent ${asked.kind} on ${requestKinds[asked.kind].on} ${asked.target} as ${asked.id}, fated to ${fate}`;
+  return `sent ${asked.kind} on ${requestKinds[asked.kind].on} ${asked.target ?? 'new'} as ${asked.id}, fated to ${fate}`;
 }
 
 async function repeat(world: World): Promise<string> {
@@ -457,7 +478,7 @@ async function crashInside(world: World, index: number, tx: Transacting): Promis
   throw new Crashed(`engine ${String(index + 1)} crashed inside its transaction`);
 }
 
-async function innerMove(world: World, index: number, tx: Transacting, target: Target, move: InnerMove): Promise<string> {
+async function innerMove(world: World, index: number, tx: Transacting, target: Target | undefined, move: InnerMove): Promise<string> {
   switch (move) {
     case 'none':
       return 'nothing happened while it applied';
@@ -490,7 +511,7 @@ const fakeHandler =
         for (let made = 0; made < moves && world.failure === undefined; made += 1) {
           world.virtual.advance(now(world).getTime() + 1);
           const move = weighted(world.random, world.profile.inner) ?? 'none';
-          const detail = await innerMove(world, index, tx, { on, id: applying.target }, move);
+          const detail = await innerMove(world, index, tx, applying.target === null ? undefined : { on, id: applying.target }, move);
           await checkStep(world, `while engine ${String(index + 1)} applied ${applying.action}: ${move}`, detail);
           if (world.pendingCrash !== undefined) break;
         }
@@ -500,9 +521,10 @@ const fakeHandler =
     }
     if (fate === 'throw') throw new Error('The seeded handler failed.');
     if (fate === 'refuse') return { refused: 'The seeded handler refused the request.' };
+    const acted = applying.target ?? world.targets.find(each => each.on === on)?.id ?? null;
     await tx
       .insertInto('human_action')
-      .values({ id: applying.action, at: applying.at, person_id: applying.person, kind: on === 'task' ? 'retry_task' : 'resume_routine', ...(on === 'task' ? { task_id: applying.target } : { routine_id: applying.target }) })
+      .values({ id: applying.action, at: applying.at, person_id: applying.person, kind: on === 'task' ? 'retry_task' : 'resume_routine', ...(on === 'task' ? { task_id: acted } : { routine_id: acted }) })
       .onConflict(conflict => conflict.column('id').doNothing())
       .execute();
     return 'recorded';
@@ -511,7 +533,7 @@ const fakeHandler =
 function handlersFor(world: World, index: number): Handlers<RequestKind> {
   const onTask = fakeHandler(world, index, 'task');
   const onRoutine = fakeHandler(world, index, 'routine');
-  return { stop: onTask, retry: onTask, approve: onTask, send_back: onTask, answer: onTask, steer: onTask, pause: onRoutine, resume: onRoutine, run_now: onRoutine };
+  return { stop: onTask, retry: onTask, approve: onTask, send_back: onTask, answer: onTask, steer: onTask, pause: onRoutine, resume: onRoutine, run_now: onRoutine, save_routine: onRoutine };
 }
 
 const apartPass =

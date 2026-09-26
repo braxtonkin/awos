@@ -11,6 +11,7 @@ export const links: readonly Link[] = [
   { href: '/', label: 'Needs you' },
   { href: '/tasks', label: 'Tasks', also: ['/board'] },
   { href: '/people', label: 'People' },
+  { href: '/routines', label: 'Routines' },
 ];
 
 const isCurrent = (link: Link, path: string): boolean => [link.href, ...(link.also ?? [])].some(href => path === href || (href !== '/' && path.startsWith(`${href}/`)));
