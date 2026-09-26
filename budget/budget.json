@@ -28,7 +28,7 @@
         "features/e2e/**"
       ],
       "lines": 5917,
-      "characters": 297893,
+      "characters": 297858,
       "longest-line": 471
     },
     {
@@ -52,7 +52,7 @@
         "{features,services,shared}/**/*.test.ts"
       ],
       "lines": 19919,
-      "characters": 958096,
+      "characters": 958063,
       "longest-line": 504
     },
     {
