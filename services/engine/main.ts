@@ -35,6 +35,7 @@ import { sourcesByKind } from '../../features/routines/source.ts';
 import { actWithin, advance, approveFromOutside, handOff, refusalOf, steerWithin, type PersonAction, type SteerTurn, type StopTurn } from '../../features/tasks/advance.ts';
 import { claim, renew } from '../../features/tasks/claim.ts';
 import { reaper } from '../../features/tasks/reaper.ts';
+import { saveRoutine } from '../../features/tasks/setup.ts';
 import { coreRunAs, type RunAsRule } from '../../features/tasks/run-as.ts';
 import { finishStep, type StepRunner } from '../../features/tasks/step-runner.ts';
 import { publishWorkflows, startProblems } from '../../features/tasks/start.ts';
@@ -122,7 +123,7 @@ const steerTurn: SteerTurn = async (writer, attempt, message, action, now) => {
 
 const byWhom = (request: Applying<RequestKind>): RoutineAction => ({ id: request.action, person: request.person, at: request.at });
 
-const onTask = async (tx: Transacting, request: Applying<RequestKind>, action: PersonAction): Promise<Applied> => {
+const onTask = async (tx: Transacting, request: Applying<PersonAction['kind']>, action: PersonAction): Promise<Applied> => {
   const acted = await actWithin(tx, workflows, request.target, byWhom(request), action, stopTurn);
   return 'recorded' in acted ? 'recorded' : { refused: refusalOf(action.kind, acted.refused) };
 };
@@ -144,6 +145,10 @@ const handlers = {
   run_now: async (tx, request) => {
     const pressed = await runNowWithin(tx, request.target, byWhom(request));
     return typeof pressed === 'object' ? pressed : recordedOr(pressed === 'pressed', 'A Run now press already waits for this routine to start.');
+  },
+  save_routine: async (tx, request) => {
+    const saved = await saveRoutine(tx, workflows, { action: request.action, person: request.person, at: request.at, routine: request.target, draft: request.payload });
+    return 'version' in saved ? 'recorded' : saved;
   },
 } satisfies Handlers<RequestKind>;
 

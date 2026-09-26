@@ -4,6 +4,7 @@ import { refusal, type Database } from '../../shared/db/client.ts';
 import type { Now } from '../../shared/db/now.ts';
 import type { RunReason } from '../../shared/db/types.ts';
 import type { Loop } from '../../shared/loop.ts';
+import { slotOrigin } from '../../shared/routine-source.ts';
 import type { Workflow } from '../../shared/workflow.ts';
 import { record, type Recorded, type Search } from './record.ts';
 import type { Claimed, Sources } from './source.ts';
@@ -17,8 +18,6 @@ export type SchedulerSettings = {
 };
 
 type Claim = { readonly run: Claimed | undefined; readonly closed: number };
-
-export const origin = new Date('2000-01-01T00:00:00.000Z');
 
 const later = (now: Date, ms: number): Date => new Date(now.getTime() + ms);
 
@@ -35,7 +34,7 @@ const newest = (db: Database, routine: string) =>
     .orderBy('version', 'desc')
     .limit(1);
 
-const dueSlot = (now: Date) => sql<Date>`date_bin(due.every, ${now}::timestamptz, ${origin}::timestamptz)`;
+const dueSlot = (now: Date) => sql<Date>`date_bin(due.every, ${now}::timestamptz, ${slotOrigin}::timestamptz)`;
 
 async function closeCollapsed(db: Database, routine: string, now: Date): Promise<number> {
   const { numUpdatedRows } = await db

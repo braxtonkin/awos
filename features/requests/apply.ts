@@ -2,12 +2,12 @@ import { sql } from 'kysely';
 import { z } from 'zod';
 import type { Database } from '../../shared/db/client.ts';
 import type { Loop } from '../../shared/loop.ts';
-import { payloads, requestKind, requestKinds, type PayloadOf, type RequestKind } from '../../shared/requests.ts';
+import { payloads, requestKind, requestKinds, targets, type PayloadOf, type RequestKind, type TargetOf } from '../../shared/requests.ts';
 import { inTransaction, type Transacting } from '../../shared/transaction.ts';
 
 export type Applied = 'recorded' | { readonly refused: string };
 
-export type Applying<K extends RequestKind> = { readonly action: string; readonly person: string; readonly at: Date; readonly target: string; readonly payload: PayloadOf<K> };
+export type Applying<K extends RequestKind> = { readonly action: string; readonly person: string; readonly at: Date; readonly target: TargetOf<K>; readonly payload: PayloadOf<K> };
 
 export type Handler<K extends RequestKind> = (tx: Transacting, request: Applying<K>) => Promise<Applied>;
 
@@ -15,7 +15,7 @@ export type Handlers<K extends RequestKind> = { readonly [Kind in K]: Handler<Ki
 
 export type RequestSettings = { readonly everyMs: number; readonly timeoutMs: number; readonly handlers: Handlers<RequestKind>; readonly now: () => Date };
 
-export type Claimed = { readonly id: string; readonly kind: string; readonly person: string; readonly target: string; readonly payload: unknown };
+export type Claimed = { readonly id: string; readonly kind: string; readonly person: string; readonly target: string | null; readonly payload: unknown };
 
 export type Claim = (tx: Transacting) => Promise<Claimed | undefined>;
 
@@ -39,7 +39,7 @@ export const claimOldest: Claim = tx =>
       'request.id',
       'request.kind',
       'request.person_id as person',
-      eb.fn.coalesce('request.task_id', 'request.routine_id').$castTo<string>().as('target'),
+      eb.fn.coalesce('request.task_id', 'request.routine_id').$castTo<string | null>().as('target'),
       'request.payload',
     ])
     .where('request.answer', 'is', null)
@@ -66,8 +66,11 @@ function handle<K extends RequestKind>(tx: Transacting, handlers: Handlers<K>, k
   const schema: z.ZodType<PayloadOf<K>> = payloads[kind];
   const payload = schema.safeParse(claimed.payload);
   if (!payload.success) return Promise.resolve({ refused: `The request's details do not fit a ${kind} request, so AutoWorker cannot apply it.` });
+  const targetSchema: z.ZodType<TargetOf<K>> = targets[kind];
+  const target = targetSchema.safeParse(claimed.target);
+  if (!target.success) return Promise.resolve({ refused: `A ${kind} request must name its ${requestKinds[kind].on}, so AutoWorker cannot apply this one.` });
   const handler: Handler<K> = handlers[kind];
-  return handler(tx, { action: claimed.id, person: claimed.person, at: now, target: claimed.target, payload: payload.data });
+  return handler(tx, { action: claimed.id, person: claimed.person, at: now, target: target.data, payload: payload.data });
 }
 
 export function applyClaimed(tx: Transacting, handlers: Handlers<RequestKind>, claimed: Claimed, now: Date): Promise<Applied> {
@@ -103,7 +106,8 @@ const detailOf = (error: unknown): string => (error instanceof Error ? error.mes
 
 const targetOf = (claimed: Claimed): string => {
   const kind = requestKind.safeParse(claimed.kind);
-  return `${kind.success ? requestKinds[kind.data].on : 'target'} ${claimed.target}`;
+  const on = kind.success ? requestKinds[kind.data].on : 'target';
+  return claimed.target === null ? `a new ${on}` : `${on} ${claimed.target}`;
 };
 
 const said = (claimed: Claimed, applied: Applied): string =>

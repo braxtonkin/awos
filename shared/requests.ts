@@ -3,6 +3,7 @@ import { sql } from 'kysely';
 import { z } from 'zod';
 import { refusal, type Database } from './db/client.ts';
 import { answer, note } from './review.ts';
+import { routineDraft } from './routine-draft.ts';
 
 const review = z.string().regex(/^[1-9]\d*$/, { error: 'must be the id of the attempt whose review the request names' });
 
@@ -20,6 +21,7 @@ export const requestKinds = {
   pause: { on: 'routine', payload: nothing },
   resume: { on: 'routine', payload: nothing },
   run_now: { on: 'routine', payload: nothing },
+  save_routine: { on: 'routine', payload: routineDraft },
 } as const;
 
 export type RequestKind = keyof typeof requestKinds;
@@ -29,6 +31,23 @@ export const requestKind = z.enum(Object.keys(requestKinds) as [RequestKind, ...
 export type PayloadOf<K extends RequestKind> = z.output<(typeof requestKinds)[K]['payload']>;
 
 export type TargetKind = (typeof requestKinds)[RequestKind]['on'];
+
+export type TargetOf<K extends RequestKind> = K extends 'save_routine' ? string | null : string;
+
+const target = z.string().regex(/^[1-9]\d*$/, { error: 'must be the id of the task or routine the request names' });
+
+export const targets: { readonly [K in RequestKind]: z.ZodType<TargetOf<K>> } = {
+  stop: target,
+  retry: target,
+  approve: target,
+  send_back: target,
+  answer: target,
+  steer: target,
+  pause: target,
+  resume: target,
+  run_now: target,
+  save_routine: target.nullable(),
+};
 
 export const payloads: { readonly [K in RequestKind]: z.ZodType<PayloadOf<K>> } = {
   stop: requestKinds.stop.payload,
@@ -40,9 +59,10 @@ export const payloads: { readonly [K in RequestKind]: z.ZodType<PayloadOf<K>> } 
   pause: requestKinds.pause.payload,
   resume: requestKinds.resume.payload,
   run_now: requestKinds.run_now.payload,
+  save_routine: requestKinds.save_routine.payload,
 };
 
-type AskedAs<K extends RequestKind> = { readonly id: string; readonly person: string; readonly at: Date; readonly kind: K; readonly target: string; readonly payload: PayloadOf<K> };
+type AskedAs<K extends RequestKind> = { readonly id: string; readonly person: string; readonly at: Date; readonly kind: K; readonly target: TargetOf<K>; readonly payload: PayloadOf<K> };
 
 export type Asked = { readonly [K in RequestKind]: AskedAs<K> }[RequestKind];
 
@@ -71,7 +91,7 @@ async function sameRequest(db: Database, asked: Asked, payload: string): Promise
     .where('id', '=', asked.id)
     .where('person_id', '=', asked.person)
     .where('kind', '=', asked.kind)
-    .where(columnOf(asked.kind), '=', asked.target)
+    .where(columnOf(asked.kind), 'is not distinct from', asked.target)
     .where(sql<boolean>`payload = ${payload}::jsonb`)
     .executeTakeFirst();
   return found !== undefined;

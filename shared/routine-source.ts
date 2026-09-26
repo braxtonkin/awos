@@ -1,5 +1,7 @@
 import type { Json, RunReason } from './db/types.ts';
 
+export const slotOrigin = new Date('2000-01-01T00:00:00.000Z');
+
 export type WorkItem = { readonly key: string; readonly title: string; readonly assignee: string | null };
 
 export type RoutineRun = {
