@@ -1,0 +1,8 @@
+{
+  "why": "FX-ci: the requests race draws asks in the target line, and the stand-in check steers after the first tick",
+  "raise": {
+    "characters/e2e-harness": 29,
+    "characters/feature-verification": 165,
+    "lines/feature-verification": 2
+  }
+}
