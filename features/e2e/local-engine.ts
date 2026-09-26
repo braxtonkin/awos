@@ -8,6 +8,7 @@ import { setTimeout as wait } from 'node:timers/promises';
 import { createInterface } from 'node:readline';
 import { parseArgs, promisify } from 'node:util';
 import { sql } from 'kysely';
+import { z } from 'zod';
 import type { Database } from '../../shared/db/client.ts';
 import type { CredentialState, TaskState, WaitingOn } from '../../shared/db/types.ts';
 import { review } from '../../shared/review.ts';
@@ -323,6 +324,8 @@ async function holdWithCommands(engine: Supervised, signal: AbortSignal, out: (l
 
 type Options = { readonly wanted: readonly SeedName[]; readonly check: boolean; readonly plant: SeedName | undefined; readonly agent: Agent };
 
+const sharedKey = z.object({ CREDENTIAL_KEY: z.base64().optional() });
+
 const optionsSpec = { seed: { type: 'string', multiple: true }, check: { type: 'boolean', default: false }, plant: { type: 'string' }, agent: { type: 'string', default: 'stand-in' } } as const;
 
 function optionsOf(args: readonly string[]): Options | Check {
@@ -447,7 +450,7 @@ async function hold(signal: AbortSignal, out: (line: string) => void, options: O
     await local.github.seedBranch(repositoryBranch, await sandboxSeed(), 'Seed the local sandbox');
     return await withPostgres(async postgres => {
       const scratch = await postgres.scratch();
-      const store = await openStore(scratch.url);
+      const store = await openStore(scratch.url, sharedKey.parse(process.env).CREDENTIAL_KEY);
       try {
         const { planted, counts } = await plantAll(store, local, options.wanted, options.agent, out);
         const settings = { ...driverSettings(local.engine.settings, image, namespace, address), CHECKS_EVERY_MS: '5000' };

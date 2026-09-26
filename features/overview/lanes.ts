@@ -324,7 +324,7 @@ const login: Lane = {
       const fix = 'GitHub no longer accepts your login, so replace it with a new one.';
       return [
         said.includes(fix) ? pass('the login shows in Needs you with the exact fix', fix) : fail('the login shows in Needs you with the exact fix', said),
-        href === '/people' ? pass('its link goes to the People page', `${href}, ${path}`) : fail('its link goes to the People page', href ?? 'no link'),
+        href === '/people?login=github' ? pass('its link goes to the login on the People page', `${href}, ${path}`) : fail('its link goes to the login on the People page', href ?? 'no link'),
       ];
     }),
 };
