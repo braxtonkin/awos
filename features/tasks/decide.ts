@@ -30,10 +30,10 @@ type Charged = Extract<Failure, { readonly counter: string }>;
 const titled = (step: string): string => `${step.charAt(0).toUpperCase()}${step.slice(1)}`;
 
 const failedTooOften = (step: string): Instruction =>
-  `${titled(step)} failed ${String(caps.stageRetries + 1)} times in a row. Read its attempts on this page, fix what stopped them, then press Retry to run it again.`;
+  `The ${titled(step)} step failed ${String(caps.stageRetries + 1)} times in a row. Read its attempts on this page, fix what stopped them, then press Retry to run it again.`;
 
 const gatesFirst = (step: string): Instruction =>
-  `${titled(step)} owes an action that cannot be undone, and a gate before it was never approved, so AutoWorker holds it. Stop this task and report it, because only a fault lets a task pass a gate without Approve.`;
+  `The ${titled(step)} step owes an action that cannot be undone, and a gate before it was never approved, so AutoWorker holds it. Stop this task and report it, because only a fault lets a task pass a gate without Approve.`;
 
 const approveOrSendBack = (step: string, next: string): Instruction =>
   `Approve ${titled(step)} to go on to ${titled(next)}, or send it back with a note to run ${titled(step)} again.`;
