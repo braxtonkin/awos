@@ -1,13 +1,16 @@
 'use client';
 
-import { useEffect, useRef, useState, type ReactNode } from 'react';
-import type { Item, Transcript as Reduced } from '../../shared/items.ts';
-import { review, type Review } from '../../shared/review.ts';
+import { useState, type ReactNode } from 'react';
+import type { Item } from '../../shared/items.ts';
+import type { Review } from '../../shared/review.ts';
+import { deliveryOf, type Said } from '../../shared/said.ts';
+import { clock, day } from '../../shared/ui/clock.ts';
+import { DeliveryLine } from '../../shared/ui/delivery.tsx';
 import { color } from '../../shared/ui/tokens.ts';
-import { useFrames, type Stream } from '../../shared/ui/use-frames.ts';
-import { frame, type AttemptSummary, type AttemptTranscript, type TaskLive } from './protocol.ts';
-import { clock, stepName } from './time.ts';
-import { extend, numbered } from './timeline.ts';
+import { reviewOf, shownCommand } from './now.ts';
+import type { AttemptSummary, AttemptTranscript, Kept } from './protocol.ts';
+import { stepName } from './time.ts';
+import { numbered } from './timeline.ts';
 
 type Shown =
   | { readonly kind: 'instructions'; readonly text: string }
@@ -15,20 +18,13 @@ type Shown =
   | { readonly kind: 'agent'; readonly text: string }
   | { readonly kind: 'finished'; readonly outcome: Outcome; readonly summary: string }
   | { readonly kind: 'thinking'; readonly text: string }
-  | { readonly kind: 'command'; readonly output: string }
+  | { readonly kind: 'command'; readonly command: string | undefined; readonly output: string }
   | { readonly kind: 'tool'; readonly what: string };
 
 const tools: Readonly<Record<string, string>> = { fileChange: 'Changed files', mcpToolCall: 'Used a tool', webSearch: 'Searched the web', imageView: 'Looked at an image' };
 
 type Outcome = Review['outcome'];
 
-const reviewOf = (text: string): Review | undefined => {
-  try {
-    return review.safeParse(JSON.parse(text)).data;
-  } catch {
-    return undefined;
-  }
-};
 
 const endings: Readonly<Record<Outcome, (step: string) => string>> = {
   done: step => `Finished ${step}`,
@@ -36,7 +32,7 @@ const endings: Readonly<Record<Outcome, (step: string) => string>> = {
   blocked: step => `Could not finish ${step}`,
 };
 
-function shownOf(item: Item, firstInTurn: boolean): Shown {
+function shownOf(item: Item, firstInTurn: boolean, command: string | undefined): Shown {
   switch (item.type) {
     case 'userMessage':
       return firstInTurn ? { kind: 'instructions', text: item.text } : { kind: 'message', text: item.text };
@@ -47,7 +43,7 @@ function shownOf(item: Item, firstInTurn: boolean): Shown {
     case 'reasoning':
       return { kind: 'thinking', text: item.text };
     case 'commandExecution':
-      return { kind: 'command', output: item.text };
+      return { kind: 'command', command, output: item.text };
     default:
       return { kind: 'tool', what: tools[item.type] ?? 'Used a tool' };
   }
@@ -55,7 +51,7 @@ function shownOf(item: Item, firstInTurn: boolean): Shown {
 
 const muted = { fontSize: 13, color: color('muted') } as const;
 
-function Details({ label, body }: { readonly label: string; readonly body: string }) {
+function Details({ label, body }: { readonly label: ReactNode; readonly body: string }) {
   const [open, setOpen] = useState(false);
   return (
     <details
@@ -74,7 +70,6 @@ function Body({ shown, step }: { readonly shown: Shown; readonly step: string })
     case 'instructions':
       return <Details label={`AutoWorker gave the agent its ${step} instructions`} body={shown.text} />;
     case 'message':
-      return <p style={{ margin: 0, whiteSpace: 'pre-wrap' }}>{shown.text}</p>;
     case 'agent':
       return <p style={{ margin: 0, whiteSpace: 'pre-wrap' }}>{shown.text}</p>;
     case 'finished':
@@ -82,7 +77,16 @@ function Body({ shown, step }: { readonly shown: Shown; readonly step: string })
     case 'thinking':
       return <p style={{ ...muted, margin: 0, whiteSpace: 'pre-wrap' }}>{shown.text === '' ? 'Thinking' : shown.text}</p>;
     case 'command':
-      return <Details label="Ran a command" body={shown.output === '' ? 'No output yet.' : shown.output} />;
+      return (
+        <Details
+          label={
+            <span data-command="true">
+              Ran <span className="mono">{shown.command === undefined ? 'a command' : shownCommand(shown.command)}</span>
+            </span>
+          }
+          body={shown.output === '' ? 'No output yet.' : shown.output}
+        />
+      );
     case 'tool':
       return <span>{shown.what}</span>;
   }
@@ -108,15 +112,52 @@ function Row({ item, shown, time, step, zone, heading }: RowProps) {
   );
 }
 
-function AttemptItems({ transcript, times, step, zone }: { readonly transcript: Reduced; readonly times: Readonly<Record<string, string>>; readonly step: string; readonly zone: string }) {
-  const firsts = new Set(transcript.turns.flatMap(turn => turn.items.filter(id => transcript.items.find(item => item.id === id)?.type === 'userMessage').slice(0, 1)));
+const noted: Readonly<Record<Said['kind'], string>> = { steer: '', retry: 'Retry note · ', send_back: 'Sent back · ', answer: '', approve: '', stop: '' };
+
+const pressed: Readonly<Record<Said['kind'], string>> = { steer: 'sent a message', retry: 'pressed Retry', send_back: 'sent it back', answer: 'answered', approve: 'approved it', stop: 'stopped the task' };
+
+function PersonRow({ entry, item, zone }: { readonly entry: Said; readonly item: string | undefined; readonly zone: string }) {
+  if (entry.words === null) {
+    return (
+      <li data-action={entry.kind} style={{ ...muted, padding: '12px 12px 4px', display: 'flex', gap: 8 }}>
+        <span>{`${entry.person} ${pressed[entry.kind]}`}</span>
+        <span style={{ marginLeft: 'auto', fontSize: 12 }}>{clock(entry.at, zone)}</span>
+      </li>
+    );
+  }
+  return (
+    <li data-item={item} data-msg="person" data-delivery={deliveryOf(entry)} data-request={entry.request} style={{ display: 'flex', flexDirection: 'column', gap: 4, margin: '8px 0', padding: '8px 12px', borderLeft: `2px solid ${color('ink')}` }}>
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, fontSize: 12, color: color('muted') }}>
+        <span style={{ fontSize: 13, fontWeight: 600, color: color('ink') }}>{entry.person}</span>
+        <span style={{ marginLeft: 'auto' }}>{clock(entry.at, zone)}</span>
+      </div>
+      <p style={{ margin: 0, whiteSpace: 'pre-wrap' }}>{`${noted[entry.kind]}${entry.words}`}</p>
+      <DeliveryLine entry={entry} zone={zone} />
+    </li>
+  );
+}
+
+type Entry = { readonly kind: 'item'; readonly item: Item; readonly shown: Shown } | { readonly kind: 'said'; readonly entry: Said; readonly item: string | undefined };
+
+function entriesOf(each: AttemptTranscript, said: readonly Said[]): readonly Entry[] {
+  const { transcript } = each;
+  const byId = new Map(transcript.items.map(item => [item.id, item]));
+  const firsts = new Set(transcript.turns.flatMap(turn => turn.items.filter(id => byId.get(id)?.type === 'userMessage').slice(0, 1)));
+  const byClient = new Map(said.flatMap(entry => (entry.clientId === null ? [] : [[entry.clientId, entry] as const])));
+  return transcript.items.map(item => {
+    const entry = item.type === 'userMessage' && item.clientId !== null ? byClient.get(item.clientId) : undefined;
+    return entry === undefined ? { kind: 'item', item, shown: shownOf(item, firsts.has(item.id), each.commands[item.id]) } : { kind: 'said', entry, item: item.id };
+  });
+}
+
+function AttemptItems({ entries, times, step, zone }: { readonly entries: readonly Entry[]; readonly times: Readonly<Record<string, string>>; readonly step: string; readonly zone: string }) {
   return (
     <ol style={{ listStyle: 'none', margin: 0, padding: 0, display: 'flex', flexDirection: 'column' }}>
-      {transcript.items.map((item, index) => {
-        const shown = shownOf(item, firsts.has(item.id));
-        const before = transcript.items[index - 1];
-        const heading = before === undefined || who[shownOf(before, firsts.has(before.id)).kind] !== who[shown.kind];
-        return <Row key={item.id} item={item} shown={shown} time={times[item.id]} step={step} zone={zone} heading={heading} />;
+      {entries.map((entry, index) => {
+        if (entry.kind === 'said') return <PersonRow key={entry.entry.request} entry={entry.entry} item={entry.item} zone={zone} />;
+        const before = entries[index - 1];
+        const heading = before?.kind !== 'item' || who[before.shown.kind] !== who[entry.shown.kind];
+        return <Row key={entry.item.id} item={entry.item} shown={entry.shown} time={times[entry.item.id]} step={step} zone={zone} heading={heading} />;
       })}
     </ol>
   );
@@ -129,49 +170,55 @@ const headingOf = (attempts: readonly AttemptSummary[], id: string, zone: string
   return { step, title: `${step} ${String(numbered(attempts, id))} · started ${clock(found.startedAt, zone)}` };
 };
 
-type TranscriptProps = { readonly initial: readonly AttemptTranscript[]; readonly live: TaskLive; readonly stream: Stream; readonly zone: string };
+const shownSaid = (entry: Said): boolean => deliveryOf(entry) !== 'refused';
 
-export function Transcript({ initial, live, stream, zone }: TranscriptProps) {
-  const [attempts, setAttempts] = useState(initial);
-  const [task, setTask] = useState(live);
-  const scroller = useRef<HTMLDivElement>(null);
-  const pinned = useRef(true);
-  useFrames(stream, frame, next => {
-    if (next.kind === 'line') setAttempts(known => extend(known, [next]));
-    if (next.kind === 'task') setTask(next.task);
-  });
-  useEffect(() => {
-    const box = scroller.current;
-    if (box !== null && pinned.current) box.scrollTop = box.scrollHeight;
-  }, [attempts]);
-  const onScroll = (): void => {
-    const box = scroller.current;
-    if (box !== null) pinned.current = box.scrollHeight - box.scrollTop - box.clientHeight < 32;
-  };
-  const streaming = task.state === 'ready' && task.attempts.at(-1)?.finishedAt === null;
+function placed(attempts: readonly AttemptTranscript[], summaries: readonly AttemptSummary[], said: readonly Said[]): ReadonlyMap<string, readonly Said[]> {
+  const inline = new Set(attempts.flatMap(each => each.transcript.items.flatMap(item => (item.clientId === null ? [] : [item.clientId]))));
+  const starts = summaries.map(each => ({ id: each.id, at: each.startedAt }));
+  const places = new Map<string, Said[]>();
+  for (const entry of said) {
+    if (!shownSaid(entry) || (entry.clientId !== null && inline.has(entry.clientId))) continue;
+    const under = starts.findLast(start => start.at <= entry.at)?.id ?? '';
+    places.set(under, [...(places.get(under) ?? []), entry]);
+  }
+  return places;
+}
+
+export type TranscriptProps = {
+  readonly attempts: readonly AttemptTranscript[];
+  readonly summaries: readonly AttemptSummary[];
+  readonly said: readonly Said[];
+  readonly kept: Kept;
+  readonly zone: string;
+};
+
+export function Transcript({ attempts, summaries, said, kept, zone }: TranscriptProps) {
+  const visible = said.filter(shownSaid);
+  const places = placed(attempts, summaries, visible);
+  const early = places.get('') ?? [];
+  const extra = (entries: readonly Said[]): readonly Entry[] => entries.map(entry => ({ kind: 'said', entry, item: undefined }));
   return (
-    <aside aria-label="Agent" style={{ position: 'sticky', top: 0, height: 'calc(100vh - 56px)', display: 'flex', flexDirection: 'column', background: color('surface'), borderLeft: `1px solid ${color('rule')}` }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '16px 20px', borderBottom: `1px solid ${color('rule')}` }}>
-        <h2 style={{ margin: 0, fontSize: 15, fontWeight: 600 }}>Agent</h2>
-        {streaming ? (
-          <span data-live="true" style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12, fontWeight: 500, color: color('run') }}>
-            <span aria-hidden="true" className="pulse" style={{ width: 6, height: 6, borderRadius: '50%', background: color('run') }} />
-            Live
-          </span>
-        ) : null}
-      </div>
-      <div ref={scroller} onScroll={onScroll} data-transcript="true" style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: 8 }}>
-        {attempts.length === 0 ? <p style={{ ...muted, margin: 0, padding: '8px 12px' }}>The agent has not started on this task yet.</p> : null}
-        {attempts.map(each => {
-          const heading = headingOf(task.attempts, each.attempt, zone);
-          return (
-            <section key={each.attempt} data-attempt={each.attempt} style={{ display: 'flex', flexDirection: 'column', gap: 4, paddingBottom: 16 }}>
-              <h3 style={{ margin: 0, padding: '8px 12px', fontSize: 12, fontWeight: 600, color: color('muted') }}>{heading.title}</h3>
-              <AttemptItems transcript={each.transcript} times={each.times} step={heading.step} zone={zone} />
-            </section>
-          );
-        })}
-      </div>
-    </aside>
+    <>
+      {kept === null ? null : (
+        <p data-expired="true" style={{ ...muted, margin: 0, padding: '8px 12px' }}>
+          {`The transcript expired on ${day(kept.transcriptUntil, zone)}. Attempts and evidence stay until ${day(kept.historyUntil, zone)}.`}
+        </p>
+      )}
+      {attempts.length === 0 && early.length === 0 && kept === null ? <p style={{ ...muted, margin: 0, padding: '8px 12px' }}>The agent has not started on this task yet.</p> : null}
+      {early.length === 0 ? null : <AttemptItems entries={extra(early)} times={{}} step="this step" zone={zone} />}
+      {attempts.map(each => {
+        const heading = headingOf(summaries, each.attempt, zone);
+        const summary = summaries.find(found => found.id === each.attempt);
+        const entries = [...entriesOf(each, visible), ...extra(places.get(each.attempt) ?? [])];
+        const replayed = kept === null ? entries : entries.filter(entry => entry.kind === 'said');
+        return (
+          <section key={each.attempt} data-attempt={each.attempt} style={{ display: 'flex', flexDirection: 'column', gap: 4, paddingBottom: 16 }}>
+            <h3 style={{ position: 'sticky', top: -8, zIndex: 1, margin: 0, padding: '8px 12px', fontSize: 12, fontWeight: 600, color: color('muted'), background: color('surface') }}>{heading.title}</h3>
+            {each.transcript.items.length === 0 && summary !== undefined && summary.summary !== null ? <p style={{ margin: 0, padding: '4px 12px' }}>{summary.summary}</p> : null}
+            <AttemptItems entries={replayed} times={each.times} step={heading.step} zone={zone} />
+          </section>
+        );
+      })}
+    </>
   );
 }

@@ -3,7 +3,8 @@
   "held": [
     "execute on replace_credential",
     "insert on person_request (at, id, kind, payload, person_id, routine_id, task_id)",
-    "select on attempt (finished_at, id, run_as_id, started_at, step, task_id, verdict)",
+    "select on attempt (finished_at, id, output, run_as_id, started_at, step, task_id, verdict)",
+    "select on attempt_command (acted_at, action_id, attempt_id, client_message_id, kind, received_at, seq)",
     "select on attempt_event (attempt_id, body, kind, seq, stored_at)",
     "select on connector",
     "select on credential (action_id, checked_at, connector, expires_at, id, key_version, person_id, scope, state)",
@@ -15,7 +16,7 @@
     "select on published_workflow_step",
     "select on repository (branch, github, id)",
     "select on routine_version (name, routine_id, version)",
-    "select on task (found_at, found_version, id, key, repository_id, routine_id, state, step, stopped_by, title, waiting_on, waiting_reason, workflow)"
+    "select on task (found_at, found_version, id, key, repository_id, review_attempt, routine_id, state, step, stopped_by, title, waiting_on, waiting_reason, workflow)"
   ],
   "never": ["credential.ciphertext", "attempt.bridge_token_hash"]
 }

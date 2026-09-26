@@ -5,7 +5,8 @@ import { StatusMarks } from '../../shared/ui/status.tsx';
 import { color } from '../../shared/ui/tokens.ts';
 import { useFrames, type Stream } from '../../shared/ui/use-frames.ts';
 import { frame, type TaskLive } from './protocol.ts';
-import { clock, stepName } from './time.ts';
+import { clock } from '../../shared/ui/clock.ts';
+import { stepName } from './time.ts';
 import { numbered } from './timeline.ts';
 
 const sentenceOf = (task: TaskLive, zone: string): string => {

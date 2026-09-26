@@ -4,13 +4,16 @@ import { connect, type Database } from '../../shared/db/client.ts';
 import { emptyTranscript, reduce } from '../../shared/items.ts';
 import { fail, pass, type Check, type Scenario } from '../../tools/verify/check.ts';
 import { withPostgres } from '../../tools/verify/postgres.ts';
+import type { Lane } from '../../tools/verify/dashboard.ts';
 import type { Screen } from '../../tools/verify/screens/screens.ts';
-import { lanes, localPeople } from './lanes.ts';
+import { agentLanes } from './agent-lanes.ts';
+import { lanes as taskLanes, localPeople } from './lanes.ts';
+import { reviewAnswers } from './review-answers.ts';
 import type { Cursor, Frame, Line } from './protocol.ts';
 import { frames, type Pace } from './stream.ts';
 import { extend } from './timeline.ts';
 
-const fast: Pace = { pollMs: 20, linesPerPoll: 3, answersForMs: 60_000 };
+const fast: Pace = { pollMs: 20, linesPerPoll: 3 };
 const settleMs = 10_000;
 
 const worldRows = (now: Date) => [
@@ -92,7 +95,7 @@ async function storedItems(db: Database, attempts: readonly string[]): Promise<s
 }
 
 const streamed = (lines: readonly Line[], attempts: readonly string[]): string => {
-  const made = extend(attempts.map(attempt => ({ attempt, transcript: emptyTranscript, times: {} })), lines);
+  const made = extend(attempts.map(attempt => ({ attempt, transcript: emptyTranscript, times: {}, commands: {} })), lines);
   return JSON.stringify(made.map(each => each.transcript.items));
 };
 
@@ -151,9 +154,16 @@ export const scenarios: readonly Scenario[] = [
     summary: 'streams the stored lines of two attempts through frames, prunes fragments, reconnects from the last cursor, and checks the frames reduce to the transcript that reduce gives over the stored lines; a plant that drops one line must differ',
     run: streamScenario,
   },
+  {
+    name: 'review-answers',
+    summary: "starts local-engine with the question seed, adds a checklist and a draft to the waiting review, sends a pick, an untick, and an edit through request, and checks the engine records each as its action; the plant answers a block that does not exist, which the engine must refuse",
+    run: reviewAnswers,
+  },
 ];
 
 const task = (name: string, seed: string, steps: Screen['steps'] = []): Screen => ({ name, group: 'chrome', path: '/tasks/{key}', seed, steps, height: 900, names: localPeople });
+
+const agent = (name: string, seed: string, steps: Screen['steps'] = []): Screen => ({ name, group: 'agent', path: '/tasks/{key}', seed, steps, height: 900, names: localPeople });
 
 export const screens: readonly Screen[] = [
   task('task-running', 'running', [{ waitFor: '[data-live="true"]' }]),
@@ -162,6 +172,15 @@ export const screens: readonly Screen[] = [
   task('task-stopped', 'stopped'),
   task('acting-menu', 'running', [{ click: 'summary[aria-label="Acting as"]' }]),
   { name: 'task-not-found', group: 'chrome', path: '/tasks/NOPE-1', seed: 'running', steps: [], height: 900, names: localPeople },
+  agent('agent-running', 'running', [{ waitFor: '[data-live="true"]' }]),
+  agent('agent-steered', 'steer-acted', [{ waitFor: '[data-request][data-delivery="acted"]' }]),
+  agent('agent-question', 'question', [{ waitFor: '[data-question="open"]' }]),
+  agent('agent-failed', 'failed-behavior'),
+  agent('agent-environment', 'failed-environment'),
+  agent('agent-stopped', 'stopped'),
+  agent('agent-empty', 'nobody-to-run-as'),
+  agent('agent-replay', 'done'),
+  agent('agent-expired', 'expired'),
 ];
 
-export { lanes };
+export const lanes: readonly Lane[] = [...taskLanes, ...agentLanes];

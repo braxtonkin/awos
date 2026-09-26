@@ -1,11 +1,10 @@
+import { clock } from '../../shared/ui/clock.ts';
 import { color } from '../../shared/ui/tokens.ts';
-import { LiveStatus } from './live-status.tsx';
 import type { Stream } from '../../shared/ui/use-frames.ts';
-import { textOf, type Cursor, type StopAction } from './protocol.ts';
+import { AgentPanel, type PanelActions } from './agent-panel.tsx';
+import { LiveStatus } from './live-status.tsx';
+import { textOf, type Cursor } from './protocol.ts';
 import type { Header, TaskPageData } from './read.ts';
-import { Stop } from './stop.tsx';
-import { clock } from './time.ts';
-import { Transcript } from './transcript.tsx';
 
 const streamOf = (key: string, cursor: Cursor | undefined): Stream => ({ path: `/tasks/${encodeURIComponent(key)}/stream`, after: cursor === undefined ? undefined : textOf(cursor) });
 
@@ -18,9 +17,9 @@ function Facts({ header, zone }: { readonly header: Header; readonly zone: strin
   );
 }
 
-type TaskPageProps = { readonly page: TaskPageData; readonly stop: StopAction; readonly zone: string };
+type TaskPageProps = { readonly page: TaskPageData; readonly actions: PanelActions; readonly zone: string };
 
-export function TaskPage({ page, stop, zone }: TaskPageProps) {
+export function TaskPage({ page, actions, zone }: TaskPageProps) {
   const { header, live } = page;
   const stream = streamOf(header.key, page.cursor);
   return (
@@ -31,16 +30,13 @@ export function TaskPage({ page, stop, zone }: TaskPageProps) {
             <span style={{ fontSize: 13, color: color('muted') }}>
               {header.routine} › <span className="mono">{header.key}</span>
             </span>
-            <span style={{ marginLeft: 'auto' }}>
-              <Stop task={header.id} action={stop} stream={stream} running={live.state === 'ready' || live.state === 'waiting'} />
-            </span>
           </div>
           <h1 style={{ margin: 0, fontSize: 24, lineHeight: '32px', fontWeight: 600 }}>{header.title}</h1>
           <Facts header={header} zone={zone} />
         </div>
         <LiveStatus initial={live} stream={stream} zone={zone} />
       </main>
-      <Transcript initial={page.attempts} live={live} stream={stream} zone={zone} />
+      <AgentPanel task={header.id} initial={page.attempts} live={live} said={page.said} kept={page.kept} stream={stream} actions={actions} zone={zone} />
     </div>
   );
 }

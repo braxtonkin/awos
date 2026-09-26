@@ -121,8 +121,10 @@ async function loginUrl(owner: Kysely<unknown>, ownerUrl: string): Promise<strin
   return url.toString();
 }
 
-export async function withWorld<T>(seeds: readonly string[], echo: (line: string) => void, work: (world: World) => Promise<T>): Promise<T> {
-  const engine = startChild([process.execPath, join(root, 'tools/verify/main.ts'), 'local-engine', ...seeds.flatMap(seed => ['--seed', seed])], {}, line => {
+export type Agent = 'stand-in' | 'real';
+
+export async function withWorld<T>(seeds: readonly string[], echo: (line: string) => void, work: (world: World) => Promise<T>, agent: Agent = 'stand-in'): Promise<T> {
+  const engine = startChild([process.execPath, join(root, 'tools/verify/main.ts'), 'local-engine', ...seeds.flatMap(seed => ['--seed', seed]), '--agent', agent], {}, line => {
     echo(`local-engine: ${line}`);
   });
   let dashboard: Child | undefined;
@@ -166,7 +168,7 @@ export async function withWorld<T>(seeds: readonly string[], echo: (line: string
   }
 }
 
-export type Lane = { readonly unit: string; readonly id: string; readonly seeds: readonly string[]; readonly run: (world: World, browser: Browser, shots: string) => Promise<readonly Line[]> };
+export type Lane = { readonly unit: string; readonly id: string; readonly seeds: readonly string[]; readonly agent?: Agent; readonly run: (world: World, browser: Browser, shots: string) => Promise<readonly Line[]> };
 
 export const isLane = (value: unknown): value is Lane =>
   typeof value === 'object' && value !== null && 'unit' in value && typeof value.unit === 'string' && 'id' in value && typeof value.id === 'string' && 'seeds' in value && Array.isArray(value.seeds) && 'run' in value && typeof value.run === 'function';
@@ -188,7 +190,7 @@ export const dashboardLane = (declared: readonly Lane[]): Scenario => ({
     const lines: Line[] = [info('next build', 'passed', built.seconds === undefined ? built.output : `${built.seconds.toFixed(1)} s`)];
     await withBrowser(async browser => {
       for (const lane of lanes) {
-        const ran = await withWorld(lane.seeds, echo, world => lane.run(world, browser, shotsFolder(lane.unit))).catch((error: unknown) => [fail(`lane ${lane.id} runs to completion`, error instanceof Error ? error.message : String(error))]);
+        const ran = await withWorld(lane.seeds, echo, world => lane.run(world, browser, shotsFolder(lane.unit)), lane.agent).catch((error: unknown) => [fail(`lane ${lane.id} runs to completion`, error instanceof Error ? error.message : String(error))]);
         lines.push(...ran.map(line => ({ ...line, name: `${lane.unit} lane ${lane.id}: ${line.name}` })));
       }
     });

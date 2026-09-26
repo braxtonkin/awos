@@ -86,4 +86,6 @@ export const pageCss = [
   '@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }',
   '@media (prefers-reduced-motion: reduce) { .pulse { animation: none; } }',
   'p { text-wrap: pretty; }',
+  '::placeholder { color: var(--muted); opacity: 1; }',
+  'input[type="radio"], input[type="checkbox"] { margin: 0; accent-color: var(--ink); }',
 ].join('\n');

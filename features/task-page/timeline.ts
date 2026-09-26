@@ -2,20 +2,20 @@ import { z } from 'zod';
 import { emptyTranscript, reduce } from '../../shared/items.ts';
 import type { AttemptSummary, AttemptTranscript, Line } from './protocol.ts';
 
-const itemOf = z.looseObject({ params: z.looseObject({ item: z.looseObject({ id: z.string() }).optional(), itemId: z.string().optional() }) });
-
-const itemIdOf = (body: unknown): string | undefined => {
-  const parsed = itemOf.safeParse(body);
-  return parsed.success ? (parsed.data.params.item?.id ?? parsed.data.params.itemId) : undefined;
-};
+const itemOf = z.looseObject({ params: z.looseObject({ item: z.looseObject({ id: z.string(), command: z.string().optional() }).optional(), itemId: z.string().optional() }) });
 
 function extendOne(start: AttemptTranscript, lines: readonly Line[]): AttemptTranscript {
   const times: Record<string, string> = { ...start.times };
+  const commands: Record<string, string> = { ...start.commands };
   for (const line of lines) {
-    const item = itemIdOf(line.body);
-    if (item !== undefined) times[item] ??= line.at;
+    const parsed = itemOf.safeParse(line.body);
+    if (!parsed.success) continue;
+    const { item, itemId } = parsed.data.params;
+    const id = item?.id ?? itemId;
+    if (id !== undefined) times[id] ??= line.at;
+    if (item?.command !== undefined) commands[item.id] ??= item.command;
   }
-  return { attempt: start.attempt, transcript: reduce(lines, start.transcript), times };
+  return { attempt: start.attempt, transcript: reduce(lines, start.transcript), times, commands };
 }
 
 export function extend(attempts: readonly AttemptTranscript[], lines: readonly Line[]): readonly AttemptTranscript[] {
@@ -26,7 +26,7 @@ export function extend(attempts: readonly AttemptTranscript[], lines: readonly L
   });
   const fresh = [...byAttempt]
     .filter(([id]) => !attempts.some(each => each.attempt === id))
-    .map(([id, added]) => extendOne({ attempt: id, transcript: emptyTranscript, times: {} }, added));
+    .map(([id, added]) => extendOne({ attempt: id, transcript: emptyTranscript, times: {}, commands: {} }, added));
   return [...known, ...fresh].toSorted((a, b) => Number(a.attempt) - Number(b.attempt));
 }
 

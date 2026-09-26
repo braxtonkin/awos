@@ -59,15 +59,15 @@ const shown = async (page: Page): Promise<readonly string[]> => {
   return Array.isArray(found) ? found.filter(each => typeof each === 'string') : [];
 };
 
-const view = (world: World, path: string, theme: Theme, acting: boolean): View => ({ url: `${world.origin}${path}`, width, height, theme, steps: acting ? actAs(actingPerson) : [] });
+export const view = (world: World, path: string, theme: Theme, acting: boolean): View => ({ url: `${world.origin}${path}`, width, height, theme, steps: acting ? actAs(actingPerson) : [] });
 
-const keyOf = (world: World, seed: string): string => {
+export const keyOf = (world: World, seed: string): string => {
   const key = world.keys.get(seed);
   if (key === undefined) throw new Error(`local-engine printed no key for the seed ${seed}`);
   return key;
 };
 
-async function withDatabase<T>(world: World, work: (db: Database) => Promise<T>): Promise<T> {
+export async function withDatabase<T>(world: World, work: (db: Database) => Promise<T>): Promise<T> {
   const db = connect(world.ownerUrl, 2);
   try {
     return await work(db);
@@ -76,7 +76,7 @@ async function withDatabase<T>(world: World, work: (db: Database) => Promise<T>)
   }
 }
 
-async function until<T>(what: string, found: () => Promise<T | undefined>, limitMs = waitMs): Promise<T> {
+export async function until<T>(what: string, found: () => Promise<T | undefined>, limitMs = waitMs): Promise<T> {
   const deadline = Date.now() + limitMs;
   while (Date.now() < deadline) {
     const value = await found();
@@ -133,7 +133,7 @@ const stoppedBy = async (db: Database, key: string): Promise<{ readonly state: s
 const requestsOf = (db: Database, key: string) =>
   db.selectFrom('person_request').innerJoin('task', 'task.id', 'person_request.task_id').select(['person_request.id', 'person_request.answer', 'person_request.reason', 'person_request.answered_at']).where('task.key', '=', key).orderBy('person_request.position').execute();
 
-const percentile = (values: readonly number[], share: number): number => values.toSorted((a, b) => a - b)[Math.min(values.length - 1, Math.floor(share * values.length))] ?? Number.NaN;
+export const percentile = (values: readonly number[], share: number): number => values.toSorted((a, b) => a - b)[Math.min(values.length - 1, Math.floor(share * values.length))] ?? Number.NaN;
 
 const regression: Lane = {
   unit,
