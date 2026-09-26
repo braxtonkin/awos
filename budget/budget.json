@@ -27,7 +27,7 @@
         "features/e2e/**"
       ],
       "lines": 5828,
-      "characters": 293653,
+      "characters": 293652,
       "longest-line": 471
     },
     {
@@ -83,7 +83,7 @@
         "*.md"
       ],
       "lines": 691,
-      "characters": 174883
+      "characters": 174879
     },
     {
       "name": "product",
