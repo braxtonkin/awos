@@ -2,7 +2,10 @@
 alter table person_request add column repository_id bigint constraint request_on_repository references repository;
 
 alter table person_request drop constraint request_names_one_target;
-alter table person_request add constraint request_names_one_target check (num_nonnulls(task_id, routine_id, repository_id) = 1 or (kind in ('save_routine', 'save_repository') and num_nonnulls(task_id, routine_id, repository_id) = 0));
+alter table person_request add constraint request_names_one_target check (
+  num_nonnulls(task_id, routine_id, repository_id) = 1
+  or (kind in ('save_routine', 'save_repository') and num_nonnulls(task_id, routine_id, repository_id) = 0)
+);
 
 alter table person_request drop constraint request_kind_fits_target;
 alter table person_request add constraint request_kind_fits_target check (case
