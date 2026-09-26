@@ -13,7 +13,7 @@
     "select on person_request",
     "select on published_provider",
     "select on published_workflow_step",
-    "select on repository (branch, github, id)",
+    "select on repository (branch, draft_leaves, fast_test_command, github, id, ignorable_checks, ignored_reviewers, job_image, saved_by, setup_command, verify_provider)",
     "select on routine (creator_id, id, paused_by, run_as_id)",
     "select on routine_version (action_id, every, gates, goal, ignore_later_reviews, jira_end_status, jira_start_status, last_step, name, repository_id, routine_id, source, version, workflow)",
     "select on task (assignee_account_id, found_at, found_version, id, key, repository_id, review_attempt, routine_id, state, step, stopped_by, title, waiting_on, waiting_reason, workflow)",
