@@ -198,7 +198,7 @@ const fileExists: ScriptStep = (prompt, script) =>
 const asked: ScriptStep = (prompt, script) =>
   prompt.includes(answeredHeading)
     ? planned(prompt, script)
-    : Promise.resolve({ outcome: 'needs_input', summary: 'The ticket leaves the retry policy open.', blocks: [{ kind: 'text', title: null, body: 'The service documents no retry policy, so the stand-in needs a person to pick one.' }, retryQuestion] });
+    : Promise.resolve({ outcome: 'needs_input', summary: 'Which retry policy should the sandbox client use? The ticket leaves it open.', blocks: [{ kind: 'text', title: null, body: 'The service documents no retry policy, so the stand-in needs a person to pick one.' }, retryQuestion] });
 
 const stillWrong: ScriptStep = prompt => reproducing(prompt, 'echo "prices still keep fractions of a cent"\nexit 1\n', 'The stand-in wrote a script that checks the rounding.', 'The script fails while any price keeps a fraction of a cent.');
 
