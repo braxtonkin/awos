@@ -1,0 +1,17 @@
+{
+  "why": "The agent panel adds the message box, Retry with a note, the review component, each message's delivery states, the panel's grants migration, and ten browser lanes with the review-answers scenario.",
+  "raise": {
+    "characters/docs": 1406,
+    "characters/feature-verification": 1106,
+    "characters/migrations": 355,
+    "characters/product": 65101,
+    "characters/tools": 223,
+    "lines/docs": 1,
+    "lines/feature-verification": 18,
+    "lines/migrations": 8,
+    "lines/product": 1363,
+    "lines/tools": 2,
+    "structure/migrations": 1,
+    "structure/verify-scenarios": 1
+  }
+}
