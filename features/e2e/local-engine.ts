@@ -93,7 +93,7 @@ export const seeds: Readonly<Record<SeedName, Seed>> = {
   },
   question: {
     plant: { kind: 'ticket', routine: 'work', work: 'question', assigned: true },
-    expect: { kind: 'task', state: 'waiting', step: 'specify', ...quiet, waitingOn: 'answer', reason: 'Answer the question Specify asked in its review', choice: true },
+    expect: { kind: 'task', state: 'waiting', step: 'specify', ...quiet, waitingOn: 'answer', reason: 'Answer the question Specify asked', choice: true },
   },
   'waiting-gate': {
     plant: { kind: 'ticket', routine: 'gated', work: 'catalog', assigned: true },
@@ -104,7 +104,7 @@ export const seeds: Readonly<Record<SeedName, Seed>> = {
   stopped: { plant: { kind: 'ticket', routine: 'work', work: 'longStream', assigned: true, then: 'stop' }, expect: { kind: 'task', state: 'stopped', step: 'specify', ...quiet } },
   done: { plant: { kind: 'past', key: 'PAST-1' }, expect: { kind: 'task', state: 'done', step: 'land', ...quiet } },
   expired: { plant: { kind: 'past', key: 'PAST-2' }, expect: { kind: 'task', state: 'done', step: 'land', ...quiet, aged: true } },
-  'nobody-to-run-as': { plant: { kind: 'ticket', routine: 'unassigned', work: 'longStream', assigned: false }, expect: waitsForRetry('specify', 'Nobody to run this task as.') },
+  'nobody-to-run-as': { plant: { kind: 'ticket', routine: 'unassigned', work: 'longStream', assigned: false }, expect: waitsForRetry('specify', 'Nobody can run this task yet.') },
   'login-expired': { plant: { kind: 'login' }, expect: { kind: 'login', state: 'invalid' } },
   'no-tasks': { plant: { kind: 'empty', routines: true }, expect: { kind: 'world', routines: true, tasks: 0 } },
   'no-routines': { plant: { kind: 'empty', routines: false }, expect: { kind: 'world', routines: false, tasks: 0 } },

@@ -39,7 +39,7 @@ const approveOrSendBack = (step: string, key: string, next: string): Instruction
 const titled = (step: string): string => `${step.charAt(0).toUpperCase()}${step.slice(1)}`;
 
 const answerAndApprove = (step: string): Instruction =>
-  `Answer the question ${titled(step)} asked in its review, then press Approve to run ${titled(step)} again with your answer, or send it back with a note.`;
+  `Answer the question ${titled(step)} asked, then press Approve to run it again, or send it back with a note.`;
 
 const after = (workflow: Workflow, name: string): string | undefined => workflow.steps[workflow.steps.findIndex(kind => kind.name === name) + 1]?.name;
 
