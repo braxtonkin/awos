@@ -237,6 +237,7 @@ function setupFile(login: string, wanted: readonly SeedName[], withRoutines: boo
       ...person,
       logins: { github: { env: expired && person === actingPerson ? expiredTokenVariable : 'GITHUB_TOKEN' }, codex: { file: login }, jira: { env: 'AUTOWORKER_JIRA_LOGIN' } },
     })),
+    teamAccounts: [{ name: 'Release team', email: 'release-team@example.com', logins: { github: { env: 'GITHUB_TOKEN' }, codex: { file: login } } }],
     repositories: [{ github: repository, branch: repositoryBranch }],
     routines: withRoutines
       ? Object.values(routines).map(routine => ({
@@ -505,7 +506,7 @@ export const localEngineScenario: Scenario = {
   summary: [
     'starts Postgres, a fake GitHub, a fake Jira, the git daemon, and the engine with Jobs on kind in its own JOB_NAMESPACE,',
     'with the Codex stand-in, or real Codex under --agent real in the live service,',
-    'applies a setup with Braxton Kinney and three made-up people, plants each --seed (or all), prints local engine ready,',
+    'applies a setup with Braxton Kinney, three made-up people, and a team account, plants each --seed (or all), prints local engine ready,',
     'and holds until SIGTERM, restarting the engine whenever it exits and taking stop-engine and start-engine on its standard input to kill and hold the engine and then release it;',
     '--check reads every seed back and exits instead, and --plant <seed> stops that seeded task first so the check must name it',
   ].join(' '),

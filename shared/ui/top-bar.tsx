@@ -6,11 +6,11 @@ import { color } from './tokens.ts';
 
 export type Link = { readonly href: string; readonly label: string };
 
-export const links: readonly Link[] = [];
+export const links: readonly Link[] = [{ href: '/people', label: 'People' }];
 
 type TopBarProps = { readonly people: readonly Person[]; readonly acting: Person | undefined; readonly pick: (form: FormData) => Promise<void> };
 
-function Avatar({ name }: { readonly name: string }) {
+export function Avatar({ name }: { readonly name: string }) {
   const box = { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: 20, height: 20, borderRadius: '50%', flex: 'none' } as const;
   return <span aria-hidden="true" style={{ ...box, background: color('surface-2'), border: `1px solid ${color('rule')}`, color: color('muted'), fontSize: 11, fontWeight: 600 }}>{initials(name)}</span>;
 }

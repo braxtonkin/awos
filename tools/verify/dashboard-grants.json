@@ -9,7 +9,7 @@
     "select on credential (action_id, checked_at, connector, expires_at, id, key_version, person_id, scope, state)",
     "select on credential_check",
     "select on human_action (at, id, kind, person_id, task_id)",
-    "select on person (id, kind, name)",
+    "select on person (email, id, jira_account_id, kind, name)",
     "select on person_request",
     "select on published_provider",
     "select on published_workflow_step",
