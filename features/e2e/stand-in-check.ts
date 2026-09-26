@@ -10,7 +10,7 @@ import { behaviorOf, outputLimit, reproductionPath, type Behavior, type RanScrip
 import { review as reviewSchema } from '../../shared/review.ts';
 import { fail, pass, type Check, type Scenario } from '../../tools/verify/check.ts';
 import { catalog, scripts, type Entry, type Script, type ScriptName } from './catalog.ts';
-import { answeredHeading, scriptFiles, scriptPlan, standInPlan, steerReply, ticking } from './codex-stand-in.ts';
+import { answeredHeading, scriptFiles, scriptPlan, standInPlan, steerReply, tickPrefix, ticking } from './codex-stand-in.ts';
 import { execute, type Exit } from './process.ts';
 import { tokenUsageMethod } from './report.ts';
 import { sandboxCommands, writeSandbox } from './sandbox-seed.ts';
@@ -36,7 +36,7 @@ async function shellOk(command: string, cwd: string): Promise<string> {
 
 const line = z.looseObject({ method: z.string().optional(), params: z.unknown().optional() });
 
-const completedItem = z.object({ method: z.literal('item/completed'), params: z.object({ item: z.looseObject({ type: z.string() }) }) });
+const completedItem = z.object({ method: z.literal('item/completed'), params: z.object({ item: z.looseObject({ id: z.string(), type: z.string() }) }) });
 
 const commandItem = z.looseObject({ type: z.literal('commandExecution'), command: z.string(), exitCode: z.int(), aggregatedOutput: z.string() });
 
@@ -78,7 +78,7 @@ function session(prompt: string, steer?: Steer): Promise<Session> {
       if (!parsed.success) return;
       const done = completedItem.safeParse(parsed.data);
       if (done.success) items.push(done.data.params.item);
-      if (done.success && steer !== undefined && !steered && done.data.params.item.type === 'agentMessage') {
+      if (done.success && steer !== undefined && !steered && done.data.params.item.id.startsWith(tickPrefix)) {
         steered = true;
         child.stdin.write(`${JSON.stringify({ id: 4, method: 'turn/steer', params: { threadId: 'stand-in-thread', expectedTurnId: 'stand-in-turn', clientUserMessageId: steer.id, input: [{ type: 'text', text: steer.text, text_elements: [] }] } })}\n`);
       }
