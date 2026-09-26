@@ -5,7 +5,8 @@
     "ci-local/**",
     "traces/**",
     "**/package-lock.json",
-    "shared/db/types.ts"
+    "shared/db/types.ts",
+    "**/next-env.d.ts"
   ],
   "breakable": [
     "**/*.{ts,tsx,mts,cts,js,mjs,cjs,sql,tla,cfg}"
