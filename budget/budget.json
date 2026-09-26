@@ -83,7 +83,7 @@
         "*.md"
       ],
       "lines": 708,
-      "characters": 193893
+      "characters": 194007
     },
     {
       "name": "product",
@@ -93,8 +93,8 @@
         "services/**",
         "shared/**"
       ],
-      "lines": 13251,
-      "characters": 607925,
+      "lines": 13272,
+      "characters": 608483,
       "longest-line": 374
     }
   ],
