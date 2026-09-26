@@ -1,6 +1,6 @@
 import { existsSync } from 'node:fs';
 import { mkdir, writeFile } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { setTimeout as wait } from 'node:timers/promises';
 import { z } from 'zod';
@@ -84,11 +84,12 @@ const environment = (): Readonly<Record<string, string>> => Object.fromEntries(O
 
 type Ran = { readonly command: string; readonly exitCode: number; readonly output: string };
 
-async function run(text: string): Promise<Ran> {
-  const id = nextId('command');
+type CommandAction = { readonly type: 'unknown'; readonly command: string } | { readonly type: 'read'; readonly command: string; readonly name: string; readonly path: string };
+
+async function run(text: string, id: string = nextId('command'), action: CommandAction = { type: 'unknown', command: text }): Promise<Ran> {
   const cwd = process.cwd();
   const command = `sh -c ${quoted(text)}`;
-  const shape = { type: 'commandExecution', command, cwd, processId: null, commandActions: [{ type: 'unknown', command: text }] };
+  const shape = { type: 'commandExecution', command, cwd, processId: null, commandActions: [action] };
   started(id, { ...shape, status: 'inProgress', aggregatedOutput: null, exitCode: null, durationMs: null });
   const began = performance.now();
   const exit = await execute('sh', ['-c', text], { cwd, env: environment(), timeoutMs: commandTimeoutMs, signal: turnState.abort.signal }).catch((error: unknown) => ({
@@ -236,6 +237,32 @@ async function work(prompt: string): Promise<Review | undefined> {
   return step === 'implement' ? implement({ entry, solution }) : verify({ entry, solution }, prompt);
 }
 
+export const tickPrefix = 'stand-in-tick-';
+
+type Working = (id: string) => Promise<unknown>;
+
+const said = (body: object): Working => id => {
+  item(id, body);
+  return Promise.resolve();
+};
+
+const reasoning = (summary: string): Working => said({ type: 'reasoning', summary: [summary], content: [] });
+
+const saying = (text: string): Working => said({ type: 'agentMessage', text });
+
+const reading = (path: string, text: string): Working => id => run(text, id, { type: 'read', command: text, name: basename(path), path });
+
+const working: readonly Working[] = [
+  reasoning('Looking for where the sandbox writes its start line.'),
+  id => run('ls src test', id),
+  reading('src/words.ts', "sed -n '1,40p' src/words.ts"),
+  saying('The src folder holds only words.ts, and nothing there writes a start line. Next I will check what the package runs on start.'),
+  reasoning('Reading the package scripts to see what runs on start.'),
+  reading('package.json', 'cat package.json'),
+  id => run('git log --oneline -5', id),
+  saying('Nothing in the package writes a start line yet. The plan is to add src/logging.ts, which writes the line once, and a test that counts it.'),
+];
+
 async function runTurn(params: Readonly<Record<string, unknown>>): Promise<void> {
   const prompt = promptOf(params);
   notify('turn/started', { threadId: thread, turn: { id: turn, status: 'inProgress', items: [] } });
@@ -248,7 +275,7 @@ async function runTurn(params: Readonly<Record<string, unknown>>): Promise<void>
     await wait(everyMs);
     if (stopped()) return;
     answerSteers();
-    item(`stand-in-tick-${String(tick)}`, { type: 'agentMessage', text: `tick ${String(tick)}` });
+    await working[(tick - 1) % working.length]?.(`${tickPrefix}${String(tick)}`);
   }
   if (stopped()) return;
   const final = await work(prompt);
