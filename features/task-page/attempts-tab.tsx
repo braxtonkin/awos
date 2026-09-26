@@ -1,32 +1,35 @@
-import type { Verdict } from '../../shared/db/types.ts';
 import { between } from '../../shared/ui/clock.ts';
 import { color } from '../../shared/ui/tokens.ts';
-import { tryOf } from './evidence-tab.tsx';
-import type { AttemptRow } from './read.ts';
+import { resultOf } from './ending.ts';
+import { Folded } from './folded.tsx';
+import type { AttemptSummary } from './protocol.ts';
 import { stepName } from './time.ts';
-
-const results: Readonly<Record<Verdict, string>> = {
-  pass: 'Passed',
-  behavior_fail: 'Behavior still wrong',
-  environment_fail: 'The environment broke',
-  fail: 'Failed',
-  red_check: 'A check on the pull request went red',
-  lost: 'Lost, because the agent stopped answering',
-  not_launched: 'Could not start',
-  needs_input: 'Asked a question',
-  changes_requested: 'Changes were requested',
-  review_required: 'Waited for a review',
-  handed_off: 'Handed off',
-  stopped: 'Stopped by a person',
-};
-
-const resultOf = (row: AttemptRow): string => (row.verdict === null ? (row.finishedAt === null ? 'Still running' : 'Ended with no result') : results[row.verdict]);
+import { numbered } from './timeline.ts';
 
 const cell = { padding: '8px 12px', borderBottom: `1px solid ${color('rule')}`, textAlign: 'left', verticalAlign: 'top' } as const;
 
 const head = { ...cell, fontSize: 12, fontWeight: 500, color: color('muted') } as const;
 
-type AttemptsTabProps = { readonly attempts: readonly AttemptRow[]; readonly runsAs: string | null };
+const stepCell = { ...cell, whiteSpace: 'nowrap' } as const;
+
+const told = { margin: '8px 0 0', color: color('muted'), whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' } as const;
+
+function Result({ row }: { readonly row: AttemptSummary }) {
+  const line = resultOf(row);
+  const rest = [...new Set([row.summary, row.body])].filter((words): words is string => words !== null && words !== line);
+  if (rest.length === 0) return line;
+  return (
+    <Folded field="words" summary={<summary style={{ cursor: 'pointer' }}>{line}</summary>}>
+      {rest.map(words => (
+        <p key={words} style={told}>
+          {words}
+        </p>
+      ))}
+    </Folded>
+  );
+}
+
+type AttemptsTabProps = { readonly attempts: readonly AttemptSummary[]; readonly runsAs: string | null };
 
 export function AttemptsTab({ attempts, runsAs }: AttemptsTabProps) {
   if (attempts.length === 0) return <p style={{ margin: 0, color: color('muted') }}>No attempt has started yet.</p>;
@@ -54,9 +57,9 @@ export function AttemptsTab({ attempts, runsAs }: AttemptsTabProps) {
       <tbody>
         {attempts.map(row => (
           <tr key={row.id} data-attempt-row={row.id} data-verdict={row.verdict ?? 'none'}>
-            <td style={cell}>{`${stepName(row.step)}, try ${String(tryOf(attempts, row.id))}`}</td>
+            <td style={stepCell}>{`${stepName(row.step)}, try ${String(numbered(attempts, row.id))}`}</td>
             <td style={cell} data-result="true">
-              {resultOf(row)}
+              <Result row={row} />
             </td>
             {someoneElse ? <td style={cell}>{row.person}</td> : null}
             <td style={cell}>{row.finishedAt === null ? 'Still running' : between(row.startedAt, row.finishedAt)}</td>

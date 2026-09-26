@@ -5,8 +5,8 @@ import { AgentPanel, type PanelActions } from './agent-panel.tsx';
 import { AttemptsTab } from './attempts-tab.tsx';
 import { EvidenceTab } from './evidence-tab.tsx';
 import { OpenReviews } from './open-reviews.tsx';
-import { textOf, type Cursor } from './protocol.ts';
-import type { AttemptRow, Header, TaskPageData } from './read.ts';
+import { textOf, type AttemptSummary, type Cursor } from './protocol.ts';
+import type { Header, TaskPageData } from './read.ts';
 import { StatusCard } from './status-card.tsx';
 import { Stepper } from './stepper.tsx';
 import type { Tab } from './tab.ts';
@@ -23,7 +23,7 @@ function Facts({ header, zone }: { readonly header: Header; readonly zone: strin
   );
 }
 
-const tookOf = (attempts: readonly AttemptRow[]): string | null => {
+const tookOf = (attempts: readonly AttemptSummary[]): string | null => {
   const first = attempts[0];
   const last = attempts.findLast(each => each.finishedAt !== null)?.finishedAt;
   return first === undefined || last === undefined || last === null ? null : between(first.startedAt, last);
@@ -46,10 +46,10 @@ export function TaskPage({ page, actions, tab, zone }: TaskPageProps) {
           <h1 style={{ margin: 0, fontSize: 24, lineHeight: '32px', fontWeight: 600 }}>{header.title}</h1>
           <Facts header={header} zone={zone} />
         </div>
-        <StatusCard initial={live} landing={{ mergeQueued: record.mergeQueued, took: live.state === 'done' ? tookOf(record.attempts) : null }} stream={stream} zone={zone} />
+        <StatusCard initial={live} landing={{ mergeQueued: record.mergeQueued, took: live.state === 'done' ? tookOf(live.attempts) : null }} stream={stream} zone={zone} />
         <Stepper initial={live} steps={record.steps} stream={stream} />
         <OpenReviews task={header.id} live={live} said={page.said} stream={stream} act={actions.review} zone={zone} />
-        <Tabs initial={tab} panels={{ evidence: <EvidenceTab evidence={record.evidence} attempts={record.attempts} zone={zone} />, attempts: <AttemptsTab attempts={record.attempts} runsAs={header.runsAs} /> }} />
+        <Tabs initial={tab} panels={{ evidence: <EvidenceTab evidence={record.evidence} attempts={live.attempts} zone={zone} />, attempts: <AttemptsTab attempts={live.attempts} runsAs={header.runsAs} /> }} />
       </main>
       <AgentPanel task={header.id} initial={page.attempts} live={live} said={page.said} kept={page.kept} stream={stream} actions={actions} zone={zone} />
     </div>

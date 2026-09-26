@@ -1,17 +1,14 @@
 import { clock } from '../../shared/ui/clock.ts';
 import { color } from '../../shared/ui/tokens.ts';
 import { Folded } from './folded.tsx';
-import type { AttemptRow, Evidence } from './read.ts';
+import type { AttemptSummary } from './protocol.ts';
+import type { Evidence } from './read.ts';
 import { stepName } from './time.ts';
-
-export const tryOf = (attempts: readonly AttemptRow[], attempt: string): number => {
-  const shown = attempts.find(each => each.id === attempt);
-  return attempts.filter(each => each.step === shown?.step && BigInt(each.id) <= BigInt(attempt)).length;
-};
+import { numbered } from './timeline.ts';
 
 const code = { margin: '8px 0 0', padding: '12px 16px', borderRadius: 8, background: color('surface-2'), fontSize: 12, lineHeight: '20px', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', maxHeight: 480, overflow: 'auto' } as const;
 
-type EvidenceTabProps = { readonly evidence: readonly Evidence[]; readonly attempts: readonly AttemptRow[]; readonly zone: string };
+type EvidenceTabProps = { readonly evidence: readonly Evidence[]; readonly attempts: readonly AttemptSummary[]; readonly zone: string };
 
 export function EvidenceTab({ evidence, attempts, zone }: EvidenceTabProps) {
   if (evidence.length === 0) return <p style={{ margin: 0, color: color('muted') }}>No step has recorded evidence yet. A step records it when its attempt ends.</p>;
@@ -20,7 +17,7 @@ export function EvidenceTab({ evidence, attempts, zone }: EvidenceTabProps) {
       {evidence.map(row => (
         <article key={row.attempt} data-evidence={row.attempt} style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
           <h3 style={{ margin: 0, fontSize: 14, fontWeight: 600 }}>
-            {`${stepName(row.step)}, try ${String(tryOf(attempts, row.attempt))}`}
+            {`${stepName(row.step)}, try ${String(numbered(attempts, row.attempt))}`}
             <span style={{ fontWeight: 400, color: color('muted') }}>{` · recorded at ${clock(row.recordedAt, zone)}`}</span>
           </h3>
           {row.facts.length === 0 ? null : (
