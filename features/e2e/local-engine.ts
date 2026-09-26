@@ -14,6 +14,7 @@ import { review } from '../../shared/review.ts';
 import { checksOf, fail, info, pass, type Check, type Line, type Scenario } from '../../tools/verify/check.ts';
 import { buildAttemptImage, ensureRegistry, jobNamespace, kindAddress, kubernetes, registry, repositoryRoot } from '../../tools/verify/cluster.ts';
 import { kind } from '../../tools/verify/kind.ts';
+import { agents, type Agent } from '../../tools/verify/dashboard.ts';
 import { withPostgres } from '../../tools/verify/postgres.ts';
 import { accessCopy, actAs, applySetup, closeStore, driverSettings, fakeCodexLogin, openStore, standInImage, startEngine, type Engine, type Store } from './autoworker.ts';
 import { catalog, scripts, type Entry, type Script, type ScriptName } from './catalog.ts';
@@ -318,10 +319,6 @@ async function holdWithCommands(engine: Supervised, signal: AbortSignal, out: (l
     commands.close();
   }
 }
-
-const agents = ['stand-in', 'real'] as const;
-
-type Agent = (typeof agents)[number];
 
 type Options = { readonly wanted: readonly SeedName[]; readonly check: boolean; readonly plant: SeedName | undefined; readonly agent: Agent };
 
