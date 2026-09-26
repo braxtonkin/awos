@@ -261,9 +261,33 @@ const opening: readonly Working[] = [
   saying('I will add src/logging.ts to log the line once, with a test that counts it.'),
 ];
 
-const checking: readonly Working[] = [id => run('git status --short', id), reading('test/words.test.ts', "sed -n '1,40p' test/words.test.ts")];
+const checks: readonly Working[] = [id => run('git status --short', id), reading('test/words.test.ts', "sed -n '1,40p' test/words.test.ts"), id => run('ls src test', id), id => run('git diff --stat', id)];
 
-const workAt = (tick: number): Working | undefined => opening[tick - 1] ?? checking[(tick - 1 - opening.length) % checking.length];
+const thoughts: readonly string[] = [
+  'Checking the tests for a start test.',
+  'Comparing the start output with the ticket.',
+  'Looking for other places that log.',
+  'Confirming the package has no logger yet.',
+  'Deciding where the logging helper goes.',
+  'Checking how the tests import src.',
+  'Reading the last few commits.',
+  'Checking the working tree is clean.',
+  'Drafting the test that counts start lines.',
+  'Checking the ticket for other asks.',
+  'Making sure the plan covers the ticket.',
+  'Rereading the example in the ticket.',
+  'Listing the files the change will touch.',
+  'Checking nothing else prints on start.',
+  'Reviewing the plan once more.',
+  'Checking the test runner prints nothing extra.',
+];
+
+const workAt = (tick: number): Working | undefined => {
+  const after = tick - 1 - opening.length;
+  if (after < 0) return opening[tick - 1];
+  const turn = Math.floor(after / 2);
+  return after % 2 === 0 ? checks[turn % checks.length] : reasoning(thoughts[turn % thoughts.length] ?? '');
+};
 
 async function runTurn(params: Readonly<Record<string, unknown>>): Promise<void> {
   const prompt = promptOf(params);
