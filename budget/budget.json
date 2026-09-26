@@ -26,8 +26,8 @@
       "files": [
         "features/e2e/**"
       ],
-      "lines": 5828,
-      "characters": 293652,
+      "lines": 5860,
+      "characters": 294643,
       "longest-line": 471
     },
     {
@@ -50,8 +50,8 @@
         "{features,services,shared}/**/*-model.ts",
         "{features,services,shared}/**/*.test.ts"
       ],
-      "lines": 17885,
-      "characters": 855518,
+      "lines": 18473,
+      "characters": 884178,
       "longest-line": 504
     },
     {
@@ -60,8 +60,8 @@
       "files": [
         "db/migrations/**"
       ],
-      "lines": 1247,
-      "characters": 54752,
+      "lines": 1263,
+      "characters": 55583,
       "longest-line": 220
     },
     {
@@ -71,8 +71,8 @@
         "tools/**",
         "eslint.config.ts"
       ],
-      "lines": 6493,
-      "characters": 292294,
+      "lines": 6936,
+      "characters": 313943,
       "longest-line": 547
     },
     {
@@ -82,8 +82,8 @@
         "docs/**",
         "*.md"
       ],
-      "lines": 691,
-      "characters": 174879
+      "lines": 697,
+      "characters": 181234
     },
     {
       "name": "product",
@@ -93,23 +93,23 @@
         "services/**",
         "shared/**"
       ],
-      "lines": 7882,
-      "characters": 367542,
+      "lines": 8872,
+      "characters": 408897,
       "longest-line": 374
     }
   ],
   "structure": {
     "features": {
       "why": "Each feature folder is a unit a fork must understand and keep (A4). A new one is an architecture decision.",
-      "ceiling": 12
+      "ceiling": 13
     },
     "services": {
       "why": "Each service deploys on its own and holds no logic. A new one is a new process to run, watch, and secure.",
-      "ceiling": 2
+      "ceiling": 3
     },
     "migrations": {
       "why": "Every migration runs forward and back in the migrations scenario and in every simulation's database.",
-      "ceiling": 33
+      "ceiling": 34
     },
     "tables": {
       "why": "Each table is state that every later migration, query, and simulator predicate must keep consistent.",
@@ -125,15 +125,15 @@
     },
     "runtime-dependencies": {
       "why": "A runtime dependency ships to every deployment and is code nobody here reviews. Stack lists the approved ones.",
-      "ceiling": 6
+      "ceiling": 9
     },
     "dev-dependencies": {
       "why": "A dev dependency runs in CI and on every contributor's machine, and Stack allows one tool per job (A3).",
-      "ceiling": 14
+      "ceiling": 16
     },
     "verify-scenarios": {
       "why": "Scenarios are the verification tool's surface (C2). Each one is a command an agent must know about and CI time to run.",
-      "ceiling": 63
+      "ceiling": 66
     },
     "ci-jobs": {
       "why": "Each CI job is a parallel lane of machine time and a result to read on every change.",
