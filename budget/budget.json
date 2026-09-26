@@ -26,8 +26,8 @@
       "files": [
         "features/e2e/**"
       ],
-      "lines": 5904,
-      "characters": 296905,
+      "lines": 5917,
+      "characters": 297850,
       "longest-line": 471
     },
     {
@@ -50,8 +50,8 @@
         "{features,services,shared}/**/*-model.ts",
         "{features,services,shared}/**/*.test.ts"
       ],
-      "lines": 19897,
-      "characters": 956973,
+      "lines": 19914,
+      "characters": 957807,
       "longest-line": 504
     },
     {
@@ -71,8 +71,8 @@
         "tools/**",
         "eslint.config.ts"
       ],
-      "lines": 7094,
-      "characters": 323098,
+      "lines": 7227,
+      "characters": 330811,
       "longest-line": 547
     },
     {
@@ -83,7 +83,7 @@
         "*.md"
       ],
       "lines": 708,
-      "characters": 192386
+      "characters": 193694
     },
     {
       "name": "product",
@@ -93,8 +93,8 @@
         "services/**",
         "shared/**"
       ],
-      "lines": 13235,
-      "characters": 607342,
+      "lines": 13237,
+      "characters": 607366,
       "longest-line": 374
     }
   ],
@@ -133,7 +133,7 @@
     },
     "verify-scenarios": {
       "why": "Scenarios are the verification tool's surface (C2). Each one is a command an agent must know about and CI time to run.",
-      "ceiling": 70
+      "ceiling": 71
     },
     "ci-jobs": {
       "why": "Each CI job is a parallel lane of machine time and a result to read on every change.",
