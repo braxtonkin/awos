@@ -1,10 +1,16 @@
-import { clock } from '../../shared/ui/clock.ts';
+import { between, clock } from '../../shared/ui/clock.ts';
 import { color } from '../../shared/ui/tokens.ts';
 import type { Stream } from '../../shared/ui/use-frames.ts';
 import { AgentPanel, type PanelActions } from './agent-panel.tsx';
-import { LiveStatus } from './live-status.tsx';
+import { AttemptsTab } from './attempts-tab.tsx';
+import { EvidenceTab } from './evidence-tab.tsx';
+import { OpenReviews } from './open-reviews.tsx';
 import { textOf, type Cursor } from './protocol.ts';
-import type { Header, TaskPageData } from './read.ts';
+import type { AttemptRow, Header, TaskPageData } from './read.ts';
+import { StatusCard } from './status-card.tsx';
+import { Stepper } from './stepper.tsx';
+import type { Tab } from './tab.ts';
+import { Tabs } from './tabs.tsx';
 
 const streamOf = (key: string, cursor: Cursor | undefined): Stream => ({ path: `/tasks/${encodeURIComponent(key)}/stream`, after: cursor === undefined ? undefined : textOf(cursor) });
 
@@ -17,10 +23,16 @@ function Facts({ header, zone }: { readonly header: Header; readonly zone: strin
   );
 }
 
-type TaskPageProps = { readonly page: TaskPageData; readonly actions: PanelActions; readonly zone: string };
+const tookOf = (attempts: readonly AttemptRow[]): string | null => {
+  const first = attempts[0];
+  const last = attempts.findLast(each => each.finishedAt !== null)?.finishedAt;
+  return first === undefined || last === undefined || last === null ? null : between(first.startedAt, last);
+};
 
-export function TaskPage({ page, actions, zone }: TaskPageProps) {
-  const { header, live } = page;
+type TaskPageProps = { readonly page: TaskPageData; readonly actions: PanelActions; readonly tab: Tab; readonly zone: string };
+
+export function TaskPage({ page, actions, tab, zone }: TaskPageProps) {
+  const { header, live, record } = page;
   const stream = streamOf(header.key, page.cursor);
   return (
     <div key={header.key} style={{ flex: 1, display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 520px', alignItems: 'start' }}>
@@ -34,7 +46,10 @@ export function TaskPage({ page, actions, zone }: TaskPageProps) {
           <h1 style={{ margin: 0, fontSize: 24, lineHeight: '32px', fontWeight: 600 }}>{header.title}</h1>
           <Facts header={header} zone={zone} />
         </div>
-        <LiveStatus initial={live} stream={stream} zone={zone} />
+        <StatusCard initial={live} landing={{ mergeQueued: record.mergeQueued, took: live.state === 'done' ? tookOf(record.attempts) : null }} stream={stream} zone={zone} />
+        <Stepper initial={live} steps={record.steps} stream={stream} />
+        <OpenReviews task={header.id} live={live} said={page.said} stream={stream} act={actions.review} zone={zone} />
+        <Tabs initial={tab} panels={{ evidence: <EvidenceTab evidence={record.evidence} attempts={record.attempts} zone={zone} />, attempts: <AttemptsTab attempts={record.attempts} zone={zone} /> }} />
       </main>
       <AgentPanel task={header.id} initial={page.attempts} live={live} said={page.said} kept={page.kept} stream={stream} actions={actions} zone={zone} />
     </div>

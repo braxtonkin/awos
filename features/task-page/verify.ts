@@ -9,6 +9,7 @@ import type { Screen } from '../../tools/verify/screens/screens.ts';
 import { agentLanes } from './agent-lanes.ts';
 import { lanes as taskLanes, localPeople } from './lanes.ts';
 import { reviewAnswers } from './review-answers.ts';
+import { stateLanes } from './state-lanes.ts';
 import type { Cursor, Frame, Line } from './protocol.ts';
 import { frames, type Pace } from './stream.ts';
 import { extend } from './timeline.ts';
@@ -165,7 +166,15 @@ const task = (name: string, seed: string, steps: Screen['steps'] = []): Screen =
 
 const agent = (name: string, seed: string, steps: Screen['steps'] = []): Screen => ({ name, group: 'agent', path: '/tasks/{key}', seed, steps, height: 900, names: localPeople });
 
+const state = (name: string, seed: string, tab: string | null): Screen => ({ name, group: 'task', path: tab === null ? '/tasks/{key}' : `/tasks/{key}?tab=${tab}`, seed, steps: [], height: 900, names: localPeople });
+
 export const screens: readonly Screen[] = [
+  state('task-gate', 'waiting-gate', null),
+  state('task-failed-card', 'failed-behavior', null),
+  state('task-nobody-card', 'nobody-to-run-as', null),
+  state('task-done', 'done', null),
+  state('task-evidence', 'failed-behavior', 'evidence'),
+  state('task-attempts', 'failed-behavior', 'attempts'),
   task('task-running', 'running', [{ waitFor: '[data-live="true"]' }]),
   task('task-waiting', 'question'),
   task('task-empty', 'nobody-to-run-as'),
@@ -183,4 +192,4 @@ export const screens: readonly Screen[] = [
   agent('agent-expired', 'expired'),
 ];
 
-export const lanes: readonly Lane[] = [...taskLanes, ...agentLanes];
+export const lanes: readonly Lane[] = [...taskLanes, ...agentLanes, ...stateLanes];
