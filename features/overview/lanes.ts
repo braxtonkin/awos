@@ -139,10 +139,24 @@ const needsYou: Lane = {
         box !== null && box.y + box.height <= height ? pass('the task that needs your approval shows above the fold under Approve', `${key} at y ${String(Math.round(box.y))} under "${heading}", ${path}`) : fail('the task that needs your approval shows above the fold under Approve', box === null ? 'no gate row' : `its row ends at y ${String(Math.round(box.y + box.height))}`),
         action === 'Approve' ? pass('its action link says Approve', action) : fail('its action link says Approve', action),
         JSON.stringify(sections) === JSON.stringify(['waiting', 'gates', 'logins', 'running']) ? pass('Needs you orders waiting tasks, gates, logins, then running work', sections.join(', ')) : fail('Needs you orders waiting tasks, gates, logins, then running work', sections.join(', ')),
+        ...(await Promise.all(
+          seenWhere.map(async ([seed, section, what]) => {
+            const found = section === 'logins' ? '[data-row="login-github"]' : `[data-row="${keyOf(world, seed)}"]`;
+            const shown = (await page.locator(`[data-section="${section}"] ${found}`).count()) === 1;
+            return (shown ? pass : fail)(`${what} shows under ${section} for Braxton Kinney`, shown ? found : `${found} is missing from ${section}`);
+          }),
+        )),
       ];
     });
   },
 };
+
+const seenWhere: readonly (readonly [string, string, string])[] = [
+  ['question', 'waiting', 'the question'],
+  ['failed-behavior', 'waiting', 'the failed task'],
+  ['login-expired', 'logins', 'the broken login'],
+  ['running', 'running', 'the running task'],
+];
 
 const answeredAt = async (db: Database, id: string): Promise<Date | undefined> => {
   const row = await db.selectFrom('person_request').select(['answer', 'answered_at']).where('id', '=', id).executeTakeFirst();
