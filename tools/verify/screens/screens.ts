@@ -2,6 +2,7 @@ import { mkdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
+import { sql } from 'kysely';
 import type { Browser } from 'playwright-core';
 import { z } from 'zod';
 import { open, record, run, shoot, withBrowser, type Script, type Served, type Step, type Theme } from '../browser.ts';
@@ -283,13 +284,15 @@ export const screens = (declared: readonly Screen[]): Scenario => ({
       const taken = await capture(browser, fixtureTarget(control), limits, folder);
       const lines: Line[] = [renders(taken), ...controlStillFails(taken, limits)];
       if (selected.length === 0) return [...lines, info(`no feature declares a screen in ${group ?? 'all'}`, 'n/a', 'a feature adds screens by exporting them from its verify.ts')];
-      for (const shot of await captureDeclared(browser, selected, limits, folder)) lines.push(renders(shot), ...gateLines(shot, limits));
+      for (const shot of (await captureDeclared(browser, selected, limits, folder)).captures) lines.push(renders(shot), ...gateLines(shot, limits));
       return lines;
     });
   },
 });
 
-export async function captureDeclared(browser: Browser, selected: readonly Screen[], limits: Limits, folder: string): Promise<readonly Capture[]> {
+export type Declared = { readonly captures: readonly Capture[]; readonly people: readonly string[] };
+
+export async function captureDeclared(browser: Browser, selected: readonly Screen[], limits: Limits, folder: string): Promise<Declared> {
   const echo = (line: string): void => {
     process.stdout.write(`${line}\n`);
   };
@@ -302,6 +305,7 @@ export async function captureDeclared(browser: Browser, selected: readonly Scree
       const url = `${world.origin}${each.path.replace('{key}', encodeURIComponent(key))}`;
       taken.push(await capture(browser, { name: each.name, url, steps: [...actAs(actingPerson), ...each.steps], height: each.height, names: each.names ?? people }, limits, folder));
     }
-    return taken;
+    const seeded = await sql<{ name: string }>`select name from person where kind = 'person' order by name`.execute(world.owner);
+    return { captures: taken, people: seeded.rows.map(row => row.name) };
   });
 }

@@ -5,6 +5,7 @@ import { readdirSync, statSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { parseArgs } from 'node:util';
 import { setTimeout as wait } from 'node:timers/promises';
 import { sql, type Kysely } from 'kysely';
 import type { Browser } from 'playwright-core';
@@ -121,8 +122,12 @@ async function loginUrl(owner: Kysely<unknown>, ownerUrl: string): Promise<strin
   return url.toString();
 }
 
-export async function withWorld<T>(seeds: readonly string[], echo: (line: string) => void, work: (world: World) => Promise<T>): Promise<T> {
-  const engine = startChild([process.execPath, join(root, 'tools/verify/main.ts'), 'local-engine', ...seeds.flatMap(seed => ['--seed', seed])], {}, line => {
+export const agents = ['stand-in', 'real'] as const;
+
+export type Agent = (typeof agents)[number];
+
+export async function withWorld<T>(seeds: readonly string[], echo: (line: string) => void, work: (world: World) => Promise<T>, agent: Agent = 'stand-in'): Promise<T> {
+  const engine = startChild([process.execPath, join(root, 'tools/verify/main.ts'), 'local-engine', ...seeds.flatMap(seed => ['--seed', seed]), '--agent', agent], {}, line => {
     echo(`local-engine: ${line}`);
   });
   let dashboard: Child | undefined;
@@ -175,9 +180,12 @@ const shotsFolder = (unit: string): string => join(root, '.shots', unit);
 
 export const dashboardLane = (declared: readonly Lane[]): Scenario => ({
   name: 'dashboard-lane',
-  summary: "builds the dashboard when its sources changed, starts local-engine with the lane's seeds and the dashboard as child processes, runs the named lanes of a unit in a browser, and saves their screenshots under .shots/<unit>/; dashboard-lane <unit> <lane>... or all",
+  summary: "builds the dashboard when its sources changed, starts local-engine with the lane's seeds and the dashboard as child processes, runs the named lanes of a unit in a browser, and saves their screenshots under .shots/<unit>/; dashboard-lane <unit> <lane>... or all, and --agent real runs real Codex from the live service's login",
   run: async args => {
-    const [unit, ...wanted] = args;
+    const { values, positionals } = parseArgs({ args: [...args], options: { agent: { type: 'string', default: 'stand-in' } }, strict: true, allowPositionals: true });
+    const agent = agents.find(name => name === values.agent);
+    if (agent === undefined) throw new Error(`--agent takes ${agents.join(' or ')}`);
+    const [unit, ...wanted] = positionals;
     const ofUnit = declared.filter(lane => lane.unit === unit);
     const lanes = wanted.includes('all') ? ofUnit : ofUnit.filter(lane => wanted.includes(lane.id));
     if (unit === undefined || lanes.length === 0) throw new Error(`name a unit and its lanes; the declared lanes are ${declared.map(lane => `${lane.unit} ${lane.id}`).join(', ')}`);
@@ -188,7 +196,7 @@ export const dashboardLane = (declared: readonly Lane[]): Scenario => ({
     const lines: Line[] = [info('next build', 'passed', built.seconds === undefined ? built.output : `${built.seconds.toFixed(1)} s`)];
     await withBrowser(async browser => {
       for (const lane of lanes) {
-        const ran = await withWorld(lane.seeds, echo, world => lane.run(world, browser, shotsFolder(lane.unit))).catch((error: unknown) => [fail(`lane ${lane.id} runs to completion`, error instanceof Error ? error.message : String(error))]);
+        const ran = await withWorld(lane.seeds, echo, world => lane.run(world, browser, shotsFolder(lane.unit)), agent).catch((error: unknown) => [fail(`lane ${lane.id} runs to completion`, error instanceof Error ? error.message : String(error))]);
         lines.push(...ran.map(line => ({ ...line, name: `${lane.unit} lane ${lane.id}: ${line.name}` })));
       }
     });

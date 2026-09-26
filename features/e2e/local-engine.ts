@@ -14,6 +14,7 @@ import { review } from '../../shared/review.ts';
 import { checksOf, fail, info, pass, type Check, type Line, type Scenario } from '../../tools/verify/check.ts';
 import { buildAttemptImage, ensureRegistry, jobNamespace, kindAddress, kubernetes, registry, repositoryRoot } from '../../tools/verify/cluster.ts';
 import { kind } from '../../tools/verify/kind.ts';
+import { agents, type Agent } from '../../tools/verify/dashboard.ts';
 import { withPostgres } from '../../tools/verify/postgres.ts';
 import { accessCopy, actAs, applySetup, closeStore, driverSettings, fakeCodexLogin, openStore, standInImage, startEngine, type Engine, type Store } from './autoworker.ts';
 import { catalog, scripts, type Entry, type Script, type ScriptName } from './catalog.ts';
@@ -92,7 +93,7 @@ export const seeds: Readonly<Record<SeedName, Seed>> = {
   },
   question: {
     plant: { kind: 'ticket', routine: 'work', work: 'question', assigned: true },
-    expect: { kind: 'task', state: 'waiting', step: 'specify', ...quiet, waitingOn: 'answer', reason: 'Answer the review specify left for task', choice: true },
+    expect: { kind: 'task', state: 'waiting', step: 'specify', ...quiet, waitingOn: 'answer', reason: 'Answer the question Specify asked', choice: true },
   },
   'waiting-gate': {
     plant: { kind: 'ticket', routine: 'gated', work: 'catalog', assigned: true },
@@ -103,7 +104,7 @@ export const seeds: Readonly<Record<SeedName, Seed>> = {
   stopped: { plant: { kind: 'ticket', routine: 'work', work: 'longStream', assigned: true, then: 'stop' }, expect: { kind: 'task', state: 'stopped', step: 'specify', ...quiet } },
   done: { plant: { kind: 'past', key: 'PAST-1' }, expect: { kind: 'task', state: 'done', step: 'land', ...quiet } },
   expired: { plant: { kind: 'past', key: 'PAST-2' }, expect: { kind: 'task', state: 'done', step: 'land', ...quiet, aged: true } },
-  'nobody-to-run-as': { plant: { kind: 'ticket', routine: 'unassigned', work: 'longStream', assigned: false }, expect: waitsForRetry('specify', 'Nobody to run this task as.') },
+  'nobody-to-run-as': { plant: { kind: 'ticket', routine: 'unassigned', work: 'longStream', assigned: false }, expect: waitsForRetry('specify', 'Nobody can run this task yet.') },
   'login-expired': { plant: { kind: 'login' }, expect: { kind: 'login', state: 'invalid' } },
   'no-tasks': { plant: { kind: 'empty', routines: true }, expect: { kind: 'world', routines: true, tasks: 0 } },
   'no-routines': { plant: { kind: 'empty', routines: false }, expect: { kind: 'world', routines: false, tasks: 0 } },
@@ -318,10 +319,6 @@ async function holdWithCommands(engine: Supervised, signal: AbortSignal, out: (l
     commands.close();
   }
 }
-
-const agents = ['stand-in', 'real'] as const;
-
-type Agent = (typeof agents)[number];
 
 type Options = { readonly wanted: readonly SeedName[]; readonly check: boolean; readonly plant: SeedName | undefined; readonly agent: Agent };
 
