@@ -50,8 +50,8 @@
         "{features,services,shared}/**/*-model.ts",
         "{features,services,shared}/**/*.test.ts"
       ],
-      "lines": 19591,
-      "characters": 941918,
+      "lines": 19599,
+      "characters": 942429,
       "longest-line": 504
     },
     {
@@ -60,8 +60,8 @@
       "files": [
         "db/migrations/**"
       ],
-      "lines": 1349,
-      "characters": 59351,
+      "lines": 1357,
+      "characters": 59665,
       "longest-line": 220
     },
     {
@@ -71,8 +71,8 @@
         "tools/**",
         "eslint.config.ts"
       ],
-      "lines": 7092,
-      "characters": 322876,
+      "lines": 7094,
+      "characters": 322969,
       "longest-line": 547
     },
     {
@@ -82,8 +82,8 @@
         "docs/**",
         "*.md"
       ],
-      "lines": 706,
-      "characters": 189178
+      "lines": 707,
+      "characters": 190524
     },
     {
       "name": "product",
@@ -93,8 +93,8 @@
         "services/**",
         "shared/**"
       ],
-      "lines": 12218,
-      "characters": 562749,
+      "lines": 12673,
+      "characters": 582298,
       "longest-line": 374
     }
   ],
@@ -109,7 +109,7 @@
     },
     "migrations": {
       "why": "Every migration runs forward and back in the migrations scenario and in every simulation's database.",
-      "ceiling": 39
+      "ceiling": 40
     },
     "tables": {
       "why": "Each table is state that every later migration, query, and simulator predicate must keep consistent.",
