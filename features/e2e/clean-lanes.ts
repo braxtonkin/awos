@@ -292,7 +292,7 @@ async function inWorld<T>(postgres: TestPostgres, world: World, work: (db: Datab
 }
 
 async function cleanLane(args: readonly string[]): Promise<readonly Check[]> {
-  const { values } = parseArgs({ args: [...args], options: { repository: { type: 'string', default: 'braxtonkdev/autoworker-oss' }, 'read-github': { type: 'boolean', default: false } } });
+  const { values } = parseArgs({ args: [...args], options: { repository: { type: 'string', default: 'braxtonkin/awos' }, 'read-github': { type: 'boolean', default: false } } });
   if (values['read-github'] && (process.env['GITHUB_TOKEN'] ?? '') === '') return [fail('GITHUB_TOKEN is set', '--read-github runs in the live service, which reads GitHub with the sandbox token')];
   const checks: Check[] = [...(checksOf(await kind.run(['up'])))];
   if (!checks.every(check => check.passed)) return checks;

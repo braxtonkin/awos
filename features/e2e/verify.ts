@@ -24,7 +24,7 @@ import { standInSolutionsScenario } from './stand-in-check.ts';
 import { localEngineScenario } from './local-engine.ts';
 import { localReadScenario } from './local-read.ts';
 
-const defaultRepository = 'braxtonkdev/autoworker-oss';
+const defaultRepository = 'braxtonkin/awos';
 const defaultProject = 'SBX';
 
 const schemas: Readonly<Record<string, z.ZodType>> = {
@@ -37,18 +37,18 @@ const agentNames = ['stand-in', 'real'] as const;
 
 type AgentName = (typeof agentNames)[number];
 
-const openWorld = (name: WorldName, repository: string, agent: AgentName): Promise<World> => {
+async function openWorld(name: WorldName, repository: string, agent: AgentName): Promise<World> {
+  const broken = (checksOf(await kind.run(['up']))).find(check => !check.passed);
+  if (broken !== undefined) throw new Error(`kind did not come up: ${broken.name}, ${broken.detail}`);
   switch (name) {
     case 'sandbox':
-      return Promise.resolve(sandboxWorld(repository, accessCopy));
+      return sandboxWorld(repository, accessCopy);
     case 'local':
       return localWorld(repository, agent);
   }
-};
+}
 
 async function localWorld(repository: string, agent: AgentName): Promise<World> {
-  const broken = (checksOf(await kind.run(['up']))).find(check => !check.passed);
-  if (broken !== undefined) throw new Error(`kind did not come up: ${broken.name}, ${broken.detail}`);
   const local = await startLocalWorld(await kindAddress(), repository);
   return {
     name: 'local',
