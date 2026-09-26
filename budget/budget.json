@@ -50,8 +50,8 @@
         "{features,services,shared}/**/*-model.ts",
         "{features,services,shared}/**/*.test.ts"
       ],
-      "lines": 19279,
-      "characters": 925779,
+      "lines": 19472,
+      "characters": 935267,
       "longest-line": 504
     },
     {
@@ -60,8 +60,8 @@
       "files": [
         "db/migrations/**"
       ],
-      "lines": 1285,
-      "characters": 56517,
+      "lines": 1349,
+      "characters": 59351,
       "longest-line": 220
     },
     {
@@ -71,8 +71,8 @@
         "tools/**",
         "eslint.config.ts"
       ],
-      "lines": 7089,
-      "characters": 322487,
+      "lines": 7091,
+      "characters": 322780,
       "longest-line": 547
     },
     {
@@ -82,8 +82,8 @@
         "docs/**",
         "*.md"
       ],
-      "lines": 705,
-      "characters": 186747
+      "lines": 706,
+      "characters": 187862
     },
     {
       "name": "product",
@@ -93,15 +93,15 @@
         "services/**",
         "shared/**"
       ],
-      "lines": 11092,
-      "characters": 514112,
+      "lines": 11968,
+      "characters": 550290,
       "longest-line": 374
     }
   ],
   "structure": {
     "features": {
       "why": "Each feature folder is a unit a fork must understand and keep (A4). A new one is an architecture decision.",
-      "ceiling": 15
+      "ceiling": 16
     },
     "services": {
       "why": "Each service deploys on its own and holds no logic. A new one is a new process to run, watch, and secure.",
@@ -109,7 +109,7 @@
     },
     "migrations": {
       "why": "Every migration runs forward and back in the migrations scenario and in every simulation's database.",
-      "ceiling": 37
+      "ceiling": 39
     },
     "tables": {
       "why": "Each table is state that every later migration, query, and simulator predicate must keep consistent.",
