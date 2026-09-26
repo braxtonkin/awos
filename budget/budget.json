@@ -50,8 +50,8 @@
         "{features,services,shared}/**/*-model.ts",
         "{features,services,shared}/**/*.test.ts"
       ],
-      "lines": 19914,
-      "characters": 957807,
+      "lines": 19917,
+      "characters": 957929,
       "longest-line": 504
     },
     {
@@ -83,7 +83,7 @@
         "*.md"
       ],
       "lines": 708,
-      "characters": 193694
+      "characters": 193893
     },
     {
       "name": "product",
@@ -93,8 +93,8 @@
         "services/**",
         "shared/**"
       ],
-      "lines": 13237,
-      "characters": 607366,
+      "lines": 13251,
+      "characters": 607925,
       "longest-line": 374
     }
   ],
