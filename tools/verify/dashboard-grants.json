@@ -9,13 +9,14 @@
     "select on credential (action_id, checked_at, connector, expires_at, id, key_version, person_id, scope, state)",
     "select on credential_check",
     "select on human_action (at, id, kind, person_id, task_id)",
-    "select on person (id, kind, name)",
+    "select on person (id, jira_account_id, kind, name)",
     "select on person_request",
     "select on published_provider",
     "select on published_workflow_step",
     "select on repository (branch, github, id)",
-    "select on routine_version (name, routine_id, version)",
-    "select on task (found_at, found_version, id, key, repository_id, routine_id, state, step, stopped_by, title, waiting_on, waiting_reason, workflow)"
+    "select on routine (creator_id, id, paused_by)",
+    "select on routine_version (every, name, routine_id, version)",
+    "select on task (assignee_account_id, found_at, found_version, id, key, repository_id, routine_id, state, step, stopped_by, title, waiting_on, waiting_reason, workflow)"
   ],
   "never": ["credential.ciphertext", "attempt.bridge_token_hash"]
 }

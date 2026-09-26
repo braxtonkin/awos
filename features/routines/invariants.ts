@@ -2,7 +2,7 @@ import { sql, type RawBuilder } from 'kysely';
 import { z } from 'zod';
 import { connect, type Database } from '../../shared/db/client.ts';
 import type { TestPostgres } from '../../tools/verify/postgres.ts';
-import { origin } from './scheduler.ts';
+import { slotOrigin } from '../../shared/slots.ts';
 
 type Moment = 'each-step' | 'after-quiet-phase';
 
@@ -18,7 +18,7 @@ const plantedAt = new Date('2026-01-01T00:00:30.000Z');
 
 const plantedSlackMs = 10_000;
 
-const since = sql`${sql.lit(origin.toISOString())}::timestamptz`;
+const since = sql`${sql.lit(slotOrigin.toISOString())}::timestamptz`;
 
 export const ticketTable = sql`create table sim_ticket (key text primary key, assignee text, changed_at timestamptz not null, routines bigint[] not null)`;
 

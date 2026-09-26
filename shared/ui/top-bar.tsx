@@ -1,12 +1,21 @@
 'use client';
 
+import { usePathname } from 'next/navigation';
 import { useRef } from 'react';
 import { initials, type Person } from '../people.ts';
 import { color } from './tokens.ts';
 
-export type Link = { readonly href: string; readonly label: string };
+export type Link = { readonly href: string; readonly label: string; readonly also?: readonly string[] };
 
-export const links: readonly Link[] = [];
+export const links: readonly Link[] = [
+  { href: '/', label: 'Needs you' },
+  { href: '/tasks', label: 'Tasks', also: ['/board'] },
+];
+
+const isCurrent = (link: Link, path: string): boolean => [link.href, ...(link.also ?? [])].some(href => path === href || (href !== '/' && path.startsWith(`${href}/`)));
+
+const linkStyle = (current: boolean) =>
+  ({ height: 32, display: 'inline-flex', alignItems: 'center', padding: '0 12px', borderRadius: 6, textDecoration: 'none', fontWeight: 500, color: color(current ? 'ink' : 'muted'), background: current ? color('surface-2') : 'transparent' }) as const;
 
 type TopBarProps = { readonly people: readonly Person[]; readonly acting: Person | undefined; readonly pick: (form: FormData) => Promise<void> };
 
@@ -43,6 +52,7 @@ function Mark() {
 
 export function TopBar({ people, acting, pick }: TopBarProps) {
   const menu = useRef<HTMLDetailsElement>(null);
+  const path = usePathname();
   const close = (): void => {
     if (menu.current !== null) menu.current.open = false;
   };
@@ -55,7 +65,7 @@ export function TopBar({ people, acting, pick }: TopBarProps) {
       </span>
       <nav style={{ display: 'flex', gap: 2 }}>
         {links.map(link => (
-          <a key={link.href} href={link.href} style={{ height: 32, display: 'inline-flex', alignItems: 'center', padding: '0 12px', color: color('muted') }}>
+          <a key={link.href} href={link.href} aria-current={isCurrent(link, path) ? 'page' : undefined} style={linkStyle(isCurrent(link, path))}>
             {link.label}
           </a>
         ))}

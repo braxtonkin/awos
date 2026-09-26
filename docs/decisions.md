@@ -688,6 +688,15 @@ Rejected options:
 - **The board first.** Every task by step, at a glance.
 - **Every task first.** The full list, sortable.
 
+### A task waits on its assignee, or else on its routine's creator
+
+Decided 25 Sep 2026 in U6. Needs you and the task list's person filter need one person per task. A task belongs to the person whose Jira account is the ticket's assignee, and to the routine's creator when no person has that account. `one_person_per_jira_account` makes the assignee match at most one person, so every task has exactly one, and `npm run verify -- overview-read` plants a second person on one account to prove the check would catch two. Running work shows for everyone, because anyone may need to watch or stop it.
+
+Rejected options:
+
+- **The person an attempt runs as.** A routine that runs as a teammate, or as a team account, would send every waiting task to that account instead of to the person who owns the ticket, and a task that never ran has no such person.
+- **Everyone sees every waiting task.** Needs you would then not say who has to act.
+
 ### A person gives AutoWorker a Codex login by pasting an auth.json
 
 Decided 25 Sep 2026 by the owner, as Q10 of the dashboard plan. A person pastes a Codex login file and marks it as made for AutoWorker. A copied login can sign out the person's own Codex when AutoWorker refreshes it. The owner would prefer the Connect button if company policy allows the device login, and notes that the agent layer may need to support other coding agents, such as Cursor, later.
