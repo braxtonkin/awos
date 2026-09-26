@@ -26,8 +26,8 @@ const actCommand = join(repositoryRoot, 'services/engine/act.ts');
 
 export type Store = { readonly url: string; readonly db: Database; readonly key: string; readonly folder: string };
 
-export async function openStore(url: string): Promise<Store> {
-  return { url, db: connect(url, 4), key: randomBytes(32).toString('base64'), folder: await mkdtemp(join(tmpdir(), 'autoworker-')) };
+export async function openStore(url: string, key: string = randomBytes(32).toString('base64')): Promise<Store> {
+  return { url, db: connect(url, 4), key, folder: await mkdtemp(join(tmpdir(), 'autoworker-')) };
 }
 
 export async function closeStore(store: Store): Promise<void> {

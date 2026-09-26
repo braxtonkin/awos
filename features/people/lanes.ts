@@ -120,7 +120,7 @@ const peopleListed: Lane = {
       const bar = await menuText(page);
       const rows = await page.locator('[data-people="table"] tbody tr').all();
       const stored = await sql<{ name: string }>`select name from person order by name`.execute(world.owner);
-      const byName = new Map(await Promise.all(rows.map(async row => [(await row.getAttribute('data-name')) ?? '', (await row.locator('td').last().innerText()).trim()] as const)));
+      const byName = new Map(await Promise.all(rows.map(async row => [(await row.getAttribute('data-name')) ?? '', (await row.locator('td[data-column="Kind"]').innerText()).trim()] as const)));
       const wrongKinds = seededAccounts.flatMap(account => (byName.get(account.name) === account.kind ? [] : [`${account.name} shows ${byName.get(account.name) ?? 'nothing'}, not ${account.kind}`]));
       const missing = stored.rows.filter(row => !byName.has(row.name)).map(row => row.name);
       return [

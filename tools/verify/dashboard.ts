@@ -127,7 +127,8 @@ export const agents = ['stand-in', 'real'] as const;
 export type Agent = (typeof agents)[number];
 
 export async function withWorld<T>(seeds: readonly string[], echo: (line: string) => void, work: (world: World) => Promise<T>, agent: Agent = 'stand-in'): Promise<T> {
-  const engine = startChild([process.execPath, join(root, 'tools/verify/main.ts'), 'local-engine', ...seeds.flatMap(seed => ['--seed', seed]), '--agent', agent], {}, line => {
+  const key = { CREDENTIAL_KEY: randomBytes(32).toString('base64'), CREDENTIAL_KEY_VERSION: '1' };
+  const engine = startChild([process.execPath, join(root, 'tools/verify/main.ts'), 'local-engine', ...seeds.flatMap(seed => ['--seed', seed]), '--agent', agent], key, line => {
     echo(`local-engine: ${line}`);
   });
   let dashboard: Child | undefined;
@@ -151,7 +152,7 @@ export async function withWorld<T>(seeds: readonly string[], echo: (line: string
     const port = await freePort();
     const origin = `http://127.0.0.1:${String(port)}`;
     const database = await loginUrl(owner, ownerUrl);
-    const started = startChild([process.execPath, next, 'start', dashboardFolder, '-p', String(port), '-H', '127.0.0.1'], { DATABASE_URL: database, NEXT_TELEMETRY_DISABLED: '1' }, line => {
+    const started = startChild([process.execPath, next, 'start', dashboardFolder, '-p', String(port), '-H', '127.0.0.1'], { DATABASE_URL: database, NEXT_TELEMETRY_DISABLED: '1', ...key }, line => {
       echo(`dashboard: ${line}`);
     });
     dashboard = started;

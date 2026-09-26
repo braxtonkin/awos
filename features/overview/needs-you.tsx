@@ -62,7 +62,7 @@ function Logins({ logins, zone }: { readonly logins: readonly Login[]; readonly 
   return (
     <Section name="logins" title="Your logins" count={logins.length}>
       {logins.map((login, index) => (
-        <Row key={login.connector} divided={index > 0} id={`login-${login.connector}`} marks={['needs-you']} title={`${connectorNames[login.connector]} login`} detail={loginSentence(login, zone)} since={null} href={peoplePage} action="Replace login" />
+        <Row key={login.connector} divided={index > 0} id={`login-${login.connector}`} marks={['needs-you']} title={`${connectorNames[login.connector]} login`} detail={loginSentence(login, zone)} since={null} href={`${peoplePage}?login=${login.connector}`} action="Replace login" />
       ))}
     </Section>
   );

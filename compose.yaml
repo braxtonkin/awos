@@ -37,6 +37,8 @@ services:
     environment:
       DASHBOARD_URL: http://127.0.0.1:4850
       DATABASE_URL: ${DASHBOARD_DATABASE_URL:-}
+      CREDENTIAL_KEY: ${CREDENTIAL_KEY:-}
+      CREDENTIAL_KEY_VERSION: ${CREDENTIAL_KEY_VERSION:-}
       NEXT_TELEMETRY_DISABLED: "1"
     extra_hosts:
       - host.docker.internal:host-gateway
