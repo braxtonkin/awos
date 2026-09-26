@@ -1,0 +1,23 @@
+{
+  "why": "U4 adds the dashboard: its service, the task page feature with its read, stream, and components, the shared UI tokens and stream helpers, the grants migration, the contrast check, the dashboard lane and grants scenarios, and Next.js and React as its runtime dependencies with their type packages.",
+  "raise": {
+    "characters/docs": 6355,
+    "characters/e2e-harness": 991,
+    "characters/feature-verification": 28660,
+    "characters/migrations": 831,
+    "characters/product": 41616,
+    "characters/tools": 21649,
+    "lines/docs": 6,
+    "lines/e2e-harness": 32,
+    "lines/feature-verification": 588,
+    "lines/migrations": 16,
+    "lines/product": 996,
+    "lines/tools": 443,
+    "structure/dev-dependencies": 2,
+    "structure/features": 1,
+    "structure/migrations": 1,
+    "structure/runtime-dependencies": 3,
+    "structure/services": 1,
+    "structure/verify-scenarios": 3
+  }
+}

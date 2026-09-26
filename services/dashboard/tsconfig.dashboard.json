@@ -1,0 +1,10 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "lib": ["es2024", "dom", "dom.iterable"],
+    "module": "preserve",
+    "moduleResolution": "bundler"
+  },
+  "include": ["**/*.ts", "**/*.tsx", "../../shared/ui/**/*.ts", "../../shared/ui/**/*.tsx", "../../shared/types/pg.d.ts", "../../features/*/**/*.tsx"],
+  "exclude": [".next", "next-env.d.ts"]
+}

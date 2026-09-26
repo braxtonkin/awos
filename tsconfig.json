@@ -23,5 +23,6 @@
     "forceConsistentCasingInFileNames": true,
     "jsx": "preserve"
   },
-  "include": ["eslint.config.ts", "tools/**/*.ts", "features/**/*.ts", "features/**/*.tsx", "services/**/*.ts", "shared/**/*.ts"]
+  "include": ["eslint.config.ts", "tools/**/*.ts", "features/**/*.ts", "services/**/*.ts", "shared/**/*.ts"],
+  "exclude": ["services/dashboard", "shared/ui", "**/next-env.d.ts", "**/.next"]
 }

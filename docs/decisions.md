@@ -404,6 +404,8 @@ Rejected option:
 
 Decided 23 Sep 2026. The dashboard is neutral grey, and color marks only state: amber for work that needs a person, blue for running, green for landed, and red for failed. The build checks every color pair against contrast floors in light and dark mode.
 
+The palettes live in `shared/ui/tokens.ts`, one for light and one for dark, with the values the revised task page used in the prototype. `npm run contrast` checks every pair the pages draw: ink, muted, and faint text and the state colors on the page, surface, and raised surface, each state color on its soft fill, and surface text on ink, against 4.5 to 1, and the landed green as an icon against 3 to 1. Borders are not text, so the strong border color, which measures about 2 to 1, is never the only thing that marks a control. A task that failed and waits for a person shows a red Failed mark beside the amber Needs you mark, each with its own word, as the owner picked for Q3.
+
 Rejected options:
 
 - **Cobalt.** Running work and clickable controls would share one blue.

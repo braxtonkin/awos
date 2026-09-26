@@ -3,6 +3,8 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
 import { accounts } from './accounts.ts';
+import { dashboardGrants } from './dashboard-grants.ts';
+import { dashboardLane, isLane, type Lane } from './dashboard.ts';
 import { checksOf, fail, pass, type Line, type Scenario } from './check.ts';
 import { doctor } from './doctor.ts';
 import { guardrails } from './guardrails.ts';
@@ -32,13 +34,14 @@ const exists = (path: string): Promise<boolean> =>
     () => false,
   );
 
-type Declared = { readonly scenarios: readonly Scenario[]; readonly screens: readonly Screen[] };
+type Declared = { readonly scenarios: readonly Scenario[]; readonly screens: readonly Screen[]; readonly lanes: readonly Lane[] };
 
 async function featureModules(root: string): Promise<Declared> {
   const features = join(root, 'features');
-  if (!(await exists(features))) return { scenarios: [], screens: [] };
+  if (!(await exists(features))) return { scenarios: [], screens: [], lanes: [] };
   const found: Scenario[] = [];
   const declared: Screen[] = [];
+  const lanes: Lane[] = [];
   for (const folder of await readdir(features, { withFileTypes: true })) {
     const file = join(features, folder.name, 'verify.ts');
     if (!folder.isDirectory() || !(await exists(file))) continue;
@@ -58,8 +61,12 @@ async function featureModules(root: string): Promise<Declared> {
       if (!parsed.success) throw new Error(`${file} must export screens, a list of screens as tools/verify/screens/screens.ts declares them: ${parsed.error.message}`);
       declared.push(...parsed.data);
     }
+    if ('lanes' in loaded) {
+      if (!Array.isArray(loaded.lanes) || !loaded.lanes.every(isLane)) throw new Error(`${file} must export lanes, a list of dashboard lanes as tools/verify/dashboard.ts declares them`);
+      lanes.push(...loaded.lanes);
+    }
   }
-  return { scenarios: found, screens: declared };
+  return { scenarios: found, screens: declared, lanes };
 }
 
 export async function runScenario(scenario: Scenario, args: readonly string[]): Promise<readonly Line[]> {
@@ -126,9 +133,9 @@ const sims = (features: readonly Scenario[]): Scenario => ({
 });
 
 export async function loadScenarios(root: string): Promise<ReadonlyMap<string, Scenario>> {
-  const { scenarios: features, screens: declared } = await featureModules(root);
+  const { scenarios: features, screens: declared, lanes } = await featureModules(root);
   const registry = new Map<string, Scenario>();
-  for (const scenario of [guardrails, doctor, migrations, kind, accounts, screens(declared), screenGates, screenReview, models(features), sims(features), ...features]) {
+  for (const scenario of [guardrails, doctor, migrations, kind, accounts, screens(declared), screenGates, screenReview(declared), dashboardLane(lanes), dashboardGrants, models(features), sims(features), ...features]) {
     if (registry.has(scenario.name)) throw new Error(`two scenarios are named ${scenario.name}`);
     registry.set(scenario.name, scenario);
   }

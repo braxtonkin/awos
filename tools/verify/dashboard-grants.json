@@ -1,0 +1,21 @@
+{
+  "why": "Every privilege the dashboard role holds. A page unit that needs a new read adds its grants migration and its lines here in the same commit, so a reviewer sees each widening.",
+  "held": [
+    "execute on replace_credential",
+    "insert on person_request (at, id, kind, payload, person_id, routine_id, task_id)",
+    "select on attempt (finished_at, id, run_as_id, started_at, step, task_id, verdict)",
+    "select on attempt_event (attempt_id, body, kind, seq, stored_at)",
+    "select on connector",
+    "select on credential (action_id, checked_at, connector, expires_at, id, key_version, person_id, scope, state)",
+    "select on credential_check",
+    "select on human_action (at, id, kind, person_id, task_id)",
+    "select on person (id, kind, name)",
+    "select on person_request",
+    "select on published_provider",
+    "select on published_workflow_step",
+    "select on repository (branch, github, id)",
+    "select on routine_version (name, routine_id, version)",
+    "select on task (found_at, found_version, id, key, repository_id, routine_id, state, step, stopped_by, title, waiting_on, waiting_reason, workflow)"
+  ],
+  "never": ["credential.ciphertext", "attempt.bridge_token_hash"]
+}
