@@ -1,0 +1,6 @@
+{
+  "why": "FX-copy: the tasks-sim bad-end check matches the capitalized end step in the park instruction",
+  "raise": {
+    "characters/feature-verification": 2
+  }
+}
