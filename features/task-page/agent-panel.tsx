@@ -30,9 +30,9 @@ export type AgentPanelProps = {
   readonly zone: string;
 };
 
-const tones: Readonly<Record<Tone, ColorName>> = { run: 'run', attn: 'attn', fail: 'fail', muted: 'ink' };
+const tones: Readonly<Record<Tone, ColorName>> = { run: 'run', attn: 'attn', muted: 'ink' };
 
-const marked: Readonly<Partial<Record<Tone, Mark>>> = { attn: 'needs-you', fail: 'failed' };
+const marked: Readonly<Partial<Record<Tone, Mark>>> = { attn: 'needs-you' };
 
 const merged = (known: readonly Said[], entry: Said): readonly Said[] => (known.some(each => each.request === entry.request) ? known : [...known, entry]);
 
@@ -46,7 +46,7 @@ const dockOf = (task: TaskLive, draft: string): Dock => {
 };
 
 const adviceOf = (task: TaskLive): string =>
-  task.attempts.at(-1)?.verdict === 'environment_fail' ? 'Fix the environment first. A note is optional.' : 'The next attempt gets your note with its instructions.';
+  task.attempts.at(-1)?.verdict === 'environment_fail' ? 'Fix the environment first. A note is optional.' : 'Your note goes to the next attempt.';
 
 function Docked({ children, label }: { readonly children: ReactNode; readonly label: string }) {
   return (
@@ -82,7 +82,7 @@ export function AgentPanel({ task: taskId, initial, live, said: saidFirst, kept,
   const newest = task.attempts.at(-1);
   const streaming = task.state === 'ready' && newest !== undefined && newest.finishedAt === null;
   const now = nowOf(task, attempts, zone);
-  const mark = marked[now.tone];
+  const mark = now === null ? undefined : marked[now.tone];
   const dock = dockOf(task, draft);
   const latest = said.findLast(entry => entry.words !== null && entry.kind !== 'answer' && deliveryOf(entry) !== 'refused');
   const failed = isFailed({ state: task.state, waitingOn: task.waitingOn, newestVerdict: newest?.verdict ?? null });
@@ -100,22 +100,28 @@ export function AgentPanel({ task: taskId, initial, live, said: saidFirst, kept,
           <Stop task={taskId} action={actions.stop} said={said} stoppable={streaming} onSent={onSent} />
         </span>
       </div>
-      <div data-now={now.tone} style={{ display: 'flex', flexDirection: 'column', gap: 4, padding: '8px 20px 16px', borderBottom: `1px solid ${color('rule')}` }}>
-        {mark === undefined ? null : <StatusMarks marks={[mark]} />}
-        <p style={{ margin: 0, fontSize: 15, fontWeight: 500, color: color(tones[now.tone]), overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: now.tone === 'run' ? 'nowrap' : 'normal' }}>
-          {now.lead === null ? null : <span style={{ color: color('muted'), fontWeight: 400 }}>{`${now.lead} · `}</span>}
-          {now.line}
-        </p>
-        {now.detail === null ? null : <p style={{ margin: 0, fontSize: 13, color: color('muted') }}>{now.detail}</p>}
-        {latest === undefined ? null : (
-          <p data-msg="person" data-delivery={deliveryOf(latest)} data-latest="true" style={{ margin: 0, fontSize: 13, display: 'flex', gap: 8, alignItems: 'baseline', minWidth: 0 }}>
-            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0 }}>{`${latest.person}: “${latest.words ?? ''}”`}</span>
-            <span style={{ flex: 'none' }}>
-              <DeliveryLine entry={latest} zone={zone} />
-            </span>
-          </p>
-        )}
-      </div>
+      {now === null && latest === undefined ? null : (
+        <div data-now={now?.tone} style={{ display: 'flex', flexDirection: 'column', gap: 4, padding: '8px 20px 16px', borderBottom: `1px solid ${color('rule')}` }}>
+          {now === null ? null : (
+            <>
+              {mark === undefined ? null : <StatusMarks marks={[mark]} />}
+              <p style={{ margin: 0, fontSize: 15, fontWeight: 500, color: color(tones[now.tone]), overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: now.tone === 'run' ? 'nowrap' : 'normal' }}>
+                {now.lead === null ? null : <span style={{ color: color('muted'), fontWeight: 400 }}>{`${now.lead} · `}</span>}
+                {now.line}
+              </p>
+              {now.detail === null ? null : <p style={{ margin: 0, fontSize: 13, color: color('muted') }}>{now.detail}</p>}
+            </>
+          )}
+          {latest === undefined ? null : (
+            <p data-msg="person" data-delivery={deliveryOf(latest)} data-latest="true" style={{ margin: 0, fontSize: 13, display: 'flex', gap: 8, alignItems: 'baseline', minWidth: 0 }}>
+              <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0 }}>{`${latest.person}: “${latest.words ?? ''}”`}</span>
+              <span style={{ flex: 'none' }}>
+                <DeliveryLine entry={latest} zone={zone} />
+              </span>
+            </p>
+          )}
+        </div>
+      )}
       <div ref={scroller} onScroll={onScroll} data-transcript="true" style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: 8 }}>
         <Transcript attempts={attempts} summaries={task.attempts} said={said} kept={kept} zone={zone} />
       </div>

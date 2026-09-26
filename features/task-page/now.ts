@@ -1,4 +1,3 @@
-import type { Verdict } from '../../shared/db/types.ts';
 import type { Item } from '../../shared/items.ts';
 import { review, type Review } from '../../shared/review.ts';
 import { isFailed } from '../../shared/task-status.ts';
@@ -8,7 +7,7 @@ import { stepName } from './time.ts';
 import { numbered } from './timeline.ts';
 import { actionLine, type Action } from './tool-actions.ts';
 
-export type Tone = 'run' | 'attn' | 'fail' | 'muted';
+export type Tone = 'run' | 'attn' | 'muted';
 
 export type Now = { readonly tone: Tone; readonly lead: string | null; readonly line: string; readonly detail: string | null };
 
@@ -47,22 +46,7 @@ function doing(item: Item | undefined, action: Action | undefined): string {
   }
 }
 
-export const failures: Readonly<Record<Verdict, ((step: string) => string) | null>> = {
-  behavior_fail: step => `${step} found the change still does not do what the ticket asks.`,
-  environment_fail: step => `${step} could not run because the environment broke, not the change.`,
-  fail: step => `${step} failed.`,
-  red_check: () => 'A check on the pull request is red.',
-  lost: step => `The agent stopped answering during ${step}.`,
-  not_launched: step => `The agent could not start ${step}.`,
-  changes_requested: null,
-  handed_off: null,
-  needs_input: null,
-  pass: null,
-  review_required: null,
-  stopped: null,
-};
-
-export function nowOf(live: TaskLive, attempts: readonly AttemptTranscript[], zone: string): Now {
+export function nowOf(live: TaskLive, attempts: readonly AttemptTranscript[], zone: string): Now | null {
   const newest = live.attempts.at(-1);
   const step = stepName(newest?.step ?? live.step);
   if (live.state === 'ready' && newest !== undefined && newest.finishedAt === null) {
@@ -81,13 +65,7 @@ export function nowOf(live: TaskLive, attempts: readonly AttemptTranscript[], zo
     case 'waiting':
       break;
   }
-  if (newest?.verdict !== undefined && newest.verdict !== null && isFailed({ state: live.state, waitingOn: live.waitingOn, newestVerdict: newest.verdict })) {
-    const why = failures[newest.verdict];
-    const tried = live.attempts.findLast(each => each.step !== newest.step && each.summary !== null)?.summary ?? null;
-    const found = newest.summary === null ? [] : [`${step} found: ${newest.summary}`];
-    const detail = [...(tried === null ? [] : [`What it tried: ${tried}`]), ...found].join(' ');
-    return { tone: 'fail', lead: null, line: why === null ? `${step} failed.` : why(step), detail: detail === '' ? null : detail };
-  }
+  if (isFailed({ state: live.state, waitingOn: live.waitingOn, newestVerdict: newest?.verdict ?? null })) return null;
   switch (live.waitingOn) {
     case 'answer':
       return { tone: 'attn', lead: null, line: 'The agent asked a question. Answer it below.', detail: null };

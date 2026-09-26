@@ -46,7 +46,7 @@
   },
   "agent": {
     "shows": [
-      "A line at the top of the panel that says what the agent is doing now, with its step and try, or why the task waits, stopped, or failed, and on a failed task what the agent tried and what the check found.",
+      "A line at the top of the panel that says what the agent is doing now, with its step and try, or why the task waits or stopped. The status card says why a task failed.",
       "The newest message a person sent, under that line, with its delivery states.",
       "Who said what, in order, with times, grouped by step and try, with each tool call collapsed and named by its command or file, and the output one click away.",
       "Every message a person sent, a steer, a Retry note, or an answer, with Sent, Received, and Acted on and their times, and a Stop, an Approve, or a bare Retry as the person's action with its time.",

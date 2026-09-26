@@ -258,8 +258,9 @@ const retryNote: Lane = {
     const note = 'Round half up to the cent before you add the totals.';
     return withDatabase(world, db =>
       open(browser, view(world, `/tasks/${key}`, 'light', true), async ({ page, errors }) => {
-        const reason = (await page.locator('[data-now="fail"] p').first().textContent()) ?? '';
-        const tried = (await page.locator('[data-now="fail"] p').nth(1).textContent()) ?? '';
+        const reason = (await page.locator('[data-card="headline"]').textContent()) ?? '';
+        const tried = (await page.locator('[data-card="note"]').first().textContent()) ?? '';
+        const repeated = await page.locator('[aria-label="Agent"]').getByText(reason.trim(), { exact: true }).count();
         const before = await saved(page, shots, 'u7-failed.png');
         const waiting = await db.selectFrom('task').select('waiting_reason').where('key', '=', key).executeTakeFirstOrThrow();
         const retried = new Date();
@@ -274,7 +275,8 @@ const retryNote: Lane = {
         const named = /Retry starts again at (\w+)/.exec(waiting.waiting_reason ?? '')?.[1]?.toLowerCase();
         return [
           check(/^[^.]+\.$/.test(reason.trim()), 'the reason the task failed is one sentence', reason),
-          check(tried.startsWith('What it tried: '), 'the panel says what the agent tried', tried),
+          check(tried.startsWith('What it tried: '), 'the status card says what the agent tried', tried),
+          check(repeated === 0, 'the agent panel does not repeat the reason', `${String(repeated)} copies in the panel`),
           check(stamp.test(line), 'the note shows sent, received, and acted on', line),
           check(start?.input.includes(note) ?? false, "the next attempt's first turn holds the note", `${start?.step ?? 'no attempt'} prompt holds the note: ${String(start?.input.includes(note) ?? false)}`),
           check(named === undefined || start?.step === named, 'the note reaches the step the waiting reason names', `reason names ${named ?? 'no step'}, the attempt ran ${start?.step ?? 'nothing'}`),
@@ -292,7 +294,7 @@ const environment: Lane = {
   run: async (world, browser, shots) => {
     const key = keyOf(world, 'failed-environment');
     return open(browser, view(world, `/tasks/${key}`, 'light', true), async ({ page }) => {
-      const reason = (await page.locator('[data-now="fail"] p').first().textContent()) ?? '';
+      const reason = (await page.locator('[data-card="headline"]').textContent()) ?? '';
       const path = await saved(page, shots, 'u7-env.png');
       return [check(reason.includes('the environment broke, not the change'), 'the reason says the environment broke, not the change', `${reason} (${path})`)];
     });

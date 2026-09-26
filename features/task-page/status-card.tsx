@@ -1,12 +1,12 @@
 'use client';
 
 import { useState } from 'react';
+import type { Verdict } from '../../shared/db/types.ts';
 import { isFailed } from '../../shared/task-status.ts';
 import { clock } from '../../shared/ui/clock.ts';
 import { StatusMarks } from '../../shared/ui/status.tsx';
 import { color } from '../../shared/ui/tokens.ts';
 import { useFrames, type Stream } from '../../shared/ui/use-frames.ts';
-import { failures } from './now.ts';
 import { frame, type TaskLive } from './protocol.ts';
 import { stepName } from './time.ts';
 import { numbered } from './timeline.ts';
@@ -23,27 +23,48 @@ type Card = { readonly headline: string; readonly instruction: string | null; re
 
 type Landing = { readonly mergeQueued: boolean; readonly took: string | null };
 
+const failures: Readonly<Record<Verdict, ((step: string) => string) | null>> = {
+  behavior_fail: step => `${step} found the behavior still wrong.`,
+  environment_fail: step => `${step} could not run because the environment broke, not the change.`,
+  fail: step => `${step} failed.`,
+  red_check: () => 'A check on the pull request is red.',
+  lost: step => `The agent stopped answering during ${step}.`,
+  not_launched: step => `The agent could not start ${step}.`,
+  changes_requested: null,
+  handed_off: null,
+  needs_input: null,
+  pass: null,
+  review_required: null,
+  stopped: null,
+};
+
+const triedOf = (live: TaskLive): string | null => {
+  const newest = live.attempts.at(-1);
+  return newest === undefined ? null : (live.attempts.findLast(each => each.step !== newest.step && each.summary !== null)?.summary ?? null);
+};
+
 const mergeQueueNote = 'Stop does not recall a pull request from the merge queue.';
 
-function waitingCard(task: TaskLive): Omit<Card, 'notes'> {
+function waitingCard(task: TaskLive, notes: readonly string[]): Card {
   const newest = task.attempts.at(-1);
   const step = stepName(task.step);
   const instruction = task.waitingReason;
   const verdict = newest?.verdict ?? null;
   if (verdict !== null && newest !== undefined && isFailed({ state: task.state, waitingOn: task.waitingOn, newestVerdict: verdict })) {
     const failed = failures[verdict];
-    return { headline: failed === null ? `${stepName(newest.step)} failed.` : failed(stepName(newest.step)), instruction };
+    const tried = triedOf(task);
+    return { headline: failed === null ? `${stepName(newest.step)} failed.` : failed(stepName(newest.step)), instruction, notes: tried === null ? notes : [`What it tried: ${tried}`, ...notes] };
   }
   switch (task.waitingOn) {
     case 'approval':
-      return { headline: `Waiting for your approval of ${step}.`, instruction };
+      return { headline: `Waiting for your approval of ${step}.`, instruction, notes };
     case 'answer':
-      return { headline: `Waiting for your answer to the question ${step} asked.`, instruction };
+      return { headline: `Waiting for your answer to the question ${step} asked.`, instruction, notes };
     case 'outside_approval':
-      return { headline: 'Waiting for an approval outside AutoWorker.', instruction };
+      return { headline: 'Waiting for an approval outside AutoWorker.', instruction, notes };
     case 'retry':
     case null:
-      return { headline: `${step} waits for you.`, instruction };
+      return { headline: `${step} waits for you.`, instruction, notes };
   }
 }
 
@@ -69,7 +90,7 @@ function cardOf(task: TaskLive, landing: Landing, zone: string): Card {
       return { headline, instruction: 'Follow the agent on the right, and stop it there if it goes wrong.', notes };
     }
     case 'waiting':
-      return { ...waitingCard(task), notes };
+      return waitingCard(task, notes);
     case 'stopped':
       return { headline: task.stoppedBy === null ? `This task stopped during ${stepName(task.step)}.` : `${task.stoppedBy.name} stopped this task at ${clock(task.stoppedBy.at, zone)}.`, instruction: stoppedNext(task), notes };
     case 'done':
