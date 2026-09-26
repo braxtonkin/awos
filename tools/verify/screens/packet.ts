@@ -84,7 +84,7 @@ const questionsFile = z.strictObject({ ownerSays: z.string(), groups: z.record(z
 
 const scope = z.strictObject({
   shows: z.array(z.string().min(1)),
-  later: z.array(z.strictObject({ id: z.string().regex(/^[a-z][a-z0-9-]*$/), unit: z.string().regex(/^Ud+[a-z]?$/), adds: z.string().min(1) })),
+  later: z.array(z.strictObject({ id: z.string().regex(/^[a-z][a-z0-9-]*$/), unit: z.string().regex(/^U\d+[a-z]?$/), adds: z.string().min(1) })),
 });
 
 type Scope = z.infer<typeof scope>;
