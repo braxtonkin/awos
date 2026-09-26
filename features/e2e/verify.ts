@@ -9,6 +9,7 @@ import { cleanScenarios } from './clean-lanes.ts';
 import { driverNames, type DriverName } from './driver.ts';
 import { githubFromEnvironment, githubPayloads } from './github.ts';
 import { createRunBranch, runEndToEnd, type Inspect, type RunResult } from './harness.ts';
+import { holdScenario } from './hold.ts';
 import { jiraPayloads } from './jira.ts';
 import { laneLines, lanes, laneTen } from './lanes.ts';
 import { parsePayload, PayloadRejected } from './payload.ts';
@@ -264,4 +265,4 @@ const e2ePayload: Scenario = {
   },
 };
 
-export const scenarios: readonly Scenario[] = [e2e, p7Lane, worldScenario, e2eBranch, e2ePayload, ...cleanScenarios, roundTripScenario, launchFaultsScenario, parkedScenario, standInSolutionsScenario, localEngineScenario, localReadScenario];
+export const scenarios: readonly Scenario[] = [e2e, p7Lane, worldScenario, e2eBranch, e2ePayload, ...cleanScenarios, roundTripScenario, launchFaultsScenario, parkedScenario, standInSolutionsScenario, localEngineScenario, localReadScenario, holdScenario];
