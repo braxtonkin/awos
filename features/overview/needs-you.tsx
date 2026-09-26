@@ -7,7 +7,7 @@ import { StatusMarks } from '../../shared/ui/status.tsx';
 import { color } from '../../shared/ui/tokens.ts';
 import { useFrames, type Stream } from '../../shared/ui/use-frames.ts';
 import { between } from '../../shared/ui/clock.ts';
-import { day, nameOf } from './format.ts';
+import { day, nameOf, splitFirst } from './format.ts';
 import { actionLink, box, EmptyWorld, Heading, page, taskHref } from './parts.tsx';
 import { frame, type Login, type NeedsYou, type TaskRow } from './protocol.ts';
 
@@ -19,7 +19,25 @@ const peoplePage = '/people';
 
 const actions: Readonly<Record<NonNullable<TaskRow['waitingOn']>, string>> = { answer: 'Answer', approval: 'Approve', outside_approval: 'Check', retry: 'Retry' };
 
-type RowProps = { readonly id: string; readonly marks: readonly Mark[]; readonly title: string; readonly label?: string; readonly detail: string; readonly since: string | null; readonly href: string; readonly action: string; readonly divided: boolean; readonly quiet?: boolean };
+const detailText = { fontSize: 13, color: color('muted') } as const;
+
+function Detail({ text }: { readonly text: string }) {
+  const { first, rest } = splitFirst(text);
+  if (rest === '') return <span style={detailText}>{text}</span>;
+  return (
+    <details style={detailText}>
+      <summary style={{ display: 'block', listStyle: 'none', cursor: 'pointer' }}>
+        {first}
+        <svg aria-hidden="true" width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5" style={{ marginLeft: 4, verticalAlign: 'middle' }}>
+          <path d="M3 4.5 6 7.5 9 4.5" />
+        </svg>
+      </summary>
+      {rest}
+    </details>
+  );
+}
+
+type RowProps ={ readonly id: string; readonly marks: readonly Mark[]; readonly title: string; readonly label?: string; readonly detail: string; readonly since: string | null; readonly href: string; readonly action: string; readonly divided: boolean; readonly quiet?: boolean };
 
 function Row({ id, marks, title, label, detail, since, href, action, divided, quiet = false }: RowProps) {
   return (
@@ -30,7 +48,7 @@ function Row({ id, marks, title, label, detail, since, href, action, divided, qu
           {label === undefined ? null : <span className="mono" style={{ color: color('muted'), flex: 'none' }}>{label}</span>}
           <span style={{ fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{title}</span>
         </span>
-        <span style={{ fontSize: 13, color: color('muted') }}>{detail}</span>
+        <Detail text={detail} />
       </div>
       <span style={{ fontSize: 13, color: color('muted'), textAlign: 'right' }}>{since}</span>
       <a href={href} data-action={id} style={quiet ? { justifySelf: 'end', fontSize: 13, fontWeight: 500, color: color('muted') } : { ...actionLink, justifySelf: 'end' }}>
@@ -71,7 +89,7 @@ function Logins({ logins, zone }: { readonly logins: readonly Login[]; readonly 
 
 const sinceText = (task: TaskRow, now: string): string | null => (task.since === null ? null : `${task.state === 'ready' ? 'running' : 'waiting'} ${between(task.since, now)}`);
 
-const runningDetail = (task: TaskRow): string => (task.since === null ? `${nameOf(task.step)} is next, for ${task.person}.` : `${nameOf(task.step)} is running for ${task.person}.`);
+const runningDetail = (task: TaskRow): string => (task.since === null ? `${nameOf(task.step)} is next, for ${task.person}.` : `${nameOf(task.step)} for ${task.person}.`);
 
 const taskRows = (tasks: readonly TaskRow[], now: string, detail: (task: TaskRow) => string, action: (task: TaskRow) => string, quiet = false): ReactNode =>
   tasks.map((task, index) => <Row key={task.key} divided={index > 0} id={task.key} marks={task.marks} label={task.key} title={task.title} detail={detail(task)} since={sinceText(task, now)} href={taskHref(task.key)} action={action(task)} quiet={quiet} />);

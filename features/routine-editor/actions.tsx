@@ -20,7 +20,7 @@ type RoutineActionsProps = { readonly routine: string; readonly paused: boolean;
 export function RoutineActions({ routine, paused, press }: RoutineActionsProps) {
   const [state, dispatch, pending] = useActionState(press, ready);
   const sentence = pending ? 'Sending' : said(state);
-  const button = { height: 28, padding: '0 10px', borderRadius: 6, border: `1px solid ${color('rule')}`, background: color('surface'), fontSize: 13, fontWeight: 500, cursor: 'pointer' } as const;
+  const button = { height: 28, padding: '0 12px', borderRadius: 6, border: `1px solid ${color('rule')}`, background: color('surface'), fontSize: 13, fontWeight: 500, cursor: 'pointer' } as const;
   return (
     <form action={dispatch} style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 8 }}>
       <input type="hidden" name="routine" value={routine} />
