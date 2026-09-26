@@ -252,16 +252,18 @@ const saying = (text: string): Working => said({ type: 'agentMessage', text });
 
 const reading = (path: string, text: string): Working => id => run(text, id, { type: 'read', command: text, name: basename(path), path });
 
-const working: readonly Working[] = [
-  reasoning('Looking for where the sandbox writes its start line.'),
+const opening: readonly Working[] = [
+  reasoning('Finding where the sandbox logs on start.'),
   id => run('ls src test', id),
   reading('src/words.ts', "sed -n '1,40p' src/words.ts"),
-  saying('The src folder holds only words.ts, and nothing there writes a start line. Next I will check what the package runs on start.'),
-  reasoning('Reading the package scripts to see what runs on start.'),
+  saying('Nothing in src logs a start line yet. Checking the package scripts next.'),
   reading('package.json', 'cat package.json'),
-  id => run('git log --oneline -5', id),
-  saying('Nothing in the package writes a start line yet. The plan is to add src/logging.ts, which writes the line once, and a test that counts it.'),
+  saying('I will add src/logging.ts to log the line once, with a test that counts it.'),
 ];
+
+const checking: readonly Working[] = [id => run('git status --short', id), reading('test/words.test.ts', "sed -n '1,40p' test/words.test.ts")];
+
+const workAt = (tick: number): Working | undefined => opening[tick - 1] ?? checking[(tick - 1 - opening.length) % checking.length];
 
 async function runTurn(params: Readonly<Record<string, unknown>>): Promise<void> {
   const prompt = promptOf(params);
@@ -275,7 +277,7 @@ async function runTurn(params: Readonly<Record<string, unknown>>): Promise<void>
     await wait(everyMs);
     if (stopped()) return;
     answerSteers();
-    await working[(tick - 1) % working.length]?.(`${tickPrefix}${String(tick)}`);
+    await workAt(tick)?.(`${tickPrefix}${String(tick)}`);
   }
   if (stopped()) return;
   const final = await work(prompt);
