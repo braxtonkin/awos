@@ -18,6 +18,7 @@ import { lastRealState, type TlcRun, type TraceState } from '../../tools/verify/
 import { catalogProblems, type Audit } from '../../tools/verify/catalog.ts';
 import { checkCatalog } from './catalog.ts';
 import { claim, lostTooOften } from './claim.ts';
+import { titled } from './decide.ts';
 import { coreRunAs } from './run-as.ts';
 import { pastSeedNames, seedPast } from './seed.ts';
 import { provePlants, type PlantProof } from './invariants.ts';
@@ -484,7 +485,7 @@ function badVersionsPark(profile: ProfileName, runs: readonly Run[]): Check {
   const name = `${profile}: no task whose routine ends at ${badEnd}, where Code change cannot end, reached done, and such tasks parked with the instruction to stop them`;
   const bad = runs.flatMap(run => run.tasks.filter(task => task.lastStep === badEnd).map(task => ({ seed: run.seed, ...task })));
   const done = bad.filter(task => task.state === 'done');
-  const parked = bad.filter(task => task.state === 'waiting' && task.reason?.includes(`ends at ${badEnd}`) === true);
+  const parked = bad.filter(task => task.state === 'waiting' && task.reason?.includes(`ends at ${titled(badEnd)}`) === true);
   return done.length === 0 && parked.length > 0
     ? pass(name, `${String(parked.length)} of ${String(bad.length)} such tasks parked with that instruction, and none reached done`)
     : fail(name, done.length > 0 ? done.slice(0, 3).map(task => `seed ${String(task.seed)} task ${task.key} reached done`).join('; ') : `none of ${String(bad.length)} such tasks parked`);

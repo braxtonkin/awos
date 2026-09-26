@@ -852,7 +852,7 @@ export async function probeReviewThroughFailure(postgres: TestPostgres): Promise
         .where('attempt.id', '=', review)
         .execute();
       await sql`update task set state = 'waiting', waiting_on = 'approval', review_attempt = ${review},
-        waiting_reason = 'Approve specify for task SIM-1 to go on to implement, or send it back with a note to run specify again.' where id = 1`.execute(tx);
+        waiting_reason = 'Approve Specify to go on to Implement, or send it back with a note to run Specify again.' where id = 1`.execute(tx);
       await enqueue(tx, { task: '1', actsAs: '1', now: clock.now() }, comment);
     });
     await passes(true, lease.maxTries + 1);

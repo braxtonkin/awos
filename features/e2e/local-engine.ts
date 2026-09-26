@@ -98,7 +98,7 @@ export const seeds: Readonly<Record<SeedName, Seed>> = {
   },
   'waiting-gate': {
     plant: { kind: 'ticket', routine: 'gated', work: 'catalog', assigned: true },
-    expect: { kind: 'task', state: 'waiting', step: 'specify', ...quiet, waitingOn: 'approval', reason: 'Approve specify for task' },
+    expect: { kind: 'task', state: 'waiting', step: 'specify', ...quiet, waitingOn: 'approval', reason: 'Approve Specify to go on to Implement, or send it back with a note to run Specify again.' },
   },
   'failed-behavior': { plant: { kind: 'ticket', routine: 'work', work: 'stillWrong', assigned: true }, expect: waitsForRetry('verify', 'Retry starts again at Implement, because Verify') },
   'failed-environment': { plant: { kind: 'ticket', routine: 'work', work: 'brokenEnvironment', assigned: true }, expect: waitsForRetry('verify', "Verify's environment failed 4 times in a row.") },

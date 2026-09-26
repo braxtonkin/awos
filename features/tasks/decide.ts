@@ -27,16 +27,16 @@ export type Next = Omit<Task, 'key' | 'gates' | 'end' | 'ignoreLaterReviews' | '
 
 type Charged = Extract<Failure, { readonly counter: string }>;
 
+export const titled = (step: string): string => `${step.charAt(0).toUpperCase()}${step.slice(1)}`;
+
 const failedTooOften = (step: string): Instruction =>
-  `The ${step} step failed ${String(caps.stageRetries + 1)} times in a row. Read its attempts on this page, fix what stopped them, then press Retry to run it again.`;
+  `${titled(step)} failed ${String(caps.stageRetries + 1)} times in a row. Read its attempts on this page, fix what stopped them, then press Retry to run it again.`;
 
 const gatesFirst = (step: string): Instruction =>
-  `The ${step} step owes an action that cannot be undone, and a gate before it was never approved, so AutoWorker holds it. Stop this task and report it, because only a fault lets a task pass a gate without Approve.`;
+  `${titled(step)} owes an action that cannot be undone, and a gate before it was never approved, so AutoWorker holds it. Stop this task and report it, because only a fault lets a task pass a gate without Approve.`;
 
-const approveOrSendBack = (step: string, key: string, next: string): Instruction =>
-  `Approve ${step} for task ${key} to go on to ${next}, or send it back with a note to run ${step} again. AutoWorker starts the next step once you approve.`;
-
-const titled = (step: string): string => `${step.charAt(0).toUpperCase()}${step.slice(1)}`;
+const approveOrSendBack = (step: string, next: string): Instruction =>
+  `Approve ${titled(step)} to go on to ${titled(next)}, or send it back with a note to run ${titled(step)} again.`;
 
 const answerAndApprove = (step: string): Instruction =>
   `Answer the question ${titled(step)} asked, then press Approve to run it again, or send it back with a note.`;
@@ -58,7 +58,7 @@ const kept = (task: Task): Next => ({ step: task.step, retries: task.retries, in
 
 const park = (next: Next, reason: Instruction): Next => ({ ...next, standing: { state: 'waiting', on: 'retry', reason } });
 
-const gateWait = (task: Task, next: string, review: string): Standing => ({ state: 'waiting', on: 'approval', reason: approveOrSendBack(task.step, task.key, next), review });
+const gateWait = (task: Task, next: string, review: string): Standing => ({ state: 'waiting', on: 'approval', reason: approveOrSendBack(task.step, next), review });
 
 function passed(workflow: Workflow, task: Task, kind: StepKind, attempt: string): Next {
   const base: Next = { ...kept(task), counts: without(task.counts, [...charges(kind, 'return'), ...charges(kind, 'rerun')]), retries: 0, inputWaits: 0 };
@@ -117,9 +117,9 @@ function judged(workflow: Workflow, task: Task, kind: StepKind, failure: Failure
 function versionProblem(workflow: Workflow, task: Task): Instruction | undefined {
   const names = workflow.steps.map(kind => kind.name);
   const end = workflow.steps.find(kind => kind.name === task.end);
-  if (end?.canEnd !== true) return `The routine that found task ${task.key} ends at ${task.end}, where ${workflow.name} cannot end. Stop this task, because it keeps that version, then fix the routine so new tasks can run.`;
+  if (end?.canEnd !== true) return `The routine that found task ${task.key} ends at ${titled(task.end)}, where ${workflow.name} cannot end. Stop this task, because it keeps that version, then fix the routine so new tasks can run.`;
   const gate = task.gates.find(named => !names.includes(named) || names.indexOf(named) >= names.indexOf(task.end));
-  if (gate !== undefined) return `The routine that found task ${task.key} gates ${gate}, which is not a step of ${workflow.name} before its end. Stop this task, because it keeps that version, then fix the routine so new tasks can run.`;
+  if (gate !== undefined) return `The routine that found task ${task.key} gates ${titled(gate)}, which is not a step of ${workflow.name} before its end. Stop this task, because it keeps that version, then fix the routine so new tasks can run.`;
   if (workflow.steps.some(kind => kind.needsRepository) && !task.hasRepository) {
     return `Task ${task.key} has no repository, and ${workflow.name} needs one. Stop this task, then save the routine with a repository so new tasks can run.`;
   }
@@ -128,7 +128,7 @@ function versionProblem(workflow: Workflow, task: Task): Instruction | undefined
 
 export function decide(workflow: Workflow, task: Task, verdict: StepVerdict, attempt: string): Next {
   const kind = workflow.steps.find(candidate => candidate.name === task.step);
-  if (kind === undefined) return park(kept(task), `Task ${task.key} is at ${task.step}, which ${workflow.name} no longer has. Stop the task, because AutoWorker cannot run a step its code lacks.`);
+  if (kind === undefined) return park(kept(task), `Task ${task.key} is at ${titled(task.step)}, which ${workflow.name} no longer has. Stop the task, because AutoWorker cannot run a step its code lacks.`);
   const problem = versionProblem(workflow, task);
   if (problem !== undefined) return park(kept(task), problem);
   if (verdict === 'pass') {
