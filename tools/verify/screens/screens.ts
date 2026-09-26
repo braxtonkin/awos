@@ -33,6 +33,7 @@ export const screen = z
     steps: z.array(step).readonly(),
     height: z.number().int().positive(),
     names: z.array(z.string().min(1)).readonly().optional(),
+    alone: z.literal(true).optional(),
   })
   .readonly();
 
@@ -297,15 +298,19 @@ export async function captureDeclared(browser: Browser, selected: readonly Scree
     process.stdout.write(`${line}\n`);
   };
   await buildDashboard(false, echo);
-  return withWorld([...new Set(selected.map(each => each.seed))], echo, async world => {
-    const taken: Capture[] = [];
-    for (const each of selected) {
-      const key = world.keys.get(each.seed);
-      if (key === undefined) throw new Error(`local-engine printed no key for the seed ${each.seed}, which ${each.name} needs`);
-      const url = `${world.origin}${each.path.replace('{key}', encodeURIComponent(key))}`;
-      taken.push(await capture(browser, { name: each.name, url, steps: [...actAs(actingPerson), ...each.steps], height: each.height, names: each.names ?? people }, limits, folder));
-    }
-    const seeded = await sql<{ name: string }>`select name from person where kind = 'person' order by name`.execute(world.owner);
-    return { captures: taken, people: seeded.rows.map(row => row.name) };
-  });
+  const taken = new Map<Screen, Capture>();
+  const everyone = new Set<string>();
+  for (const members of Map.groupBy(selected, each => (each.alone === true ? each.seed : '')).values()) {
+    await withWorld([...new Set(members.map(each => each.seed))], echo, async world => {
+      for (const each of members) {
+        const key = world.keys.get(each.seed);
+        if (key === undefined) throw new Error(`local-engine printed no key for the seed ${each.seed}, which ${each.name} needs`);
+        const url = `${world.origin}${each.path.replace('{key}', encodeURIComponent(key))}`;
+        taken.set(each, await capture(browser, { name: each.name, url, steps: [...actAs(actingPerson), ...each.steps], height: each.height, names: each.names ?? people }, limits, folder));
+      }
+      const seeded = await sql<{ name: string }>`select name from person where kind = 'person' order by name`.execute(world.owner);
+      for (const row of seeded.rows) everyone.add(row.name);
+    });
+  }
+  return { captures: selected.flatMap(each => taken.get(each) ?? []), people: [...everyone].toSorted() };
 }

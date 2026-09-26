@@ -1,0 +1,9 @@
+{
+  "why": "U6's review round adds the overview group's scope note and a need line and wait time on each row",
+  "raise": {
+    "characters/product": 1365,
+    "characters/tools": 1239,
+    "lines/product": 14,
+    "lines/tools": 29
+  }
+}
