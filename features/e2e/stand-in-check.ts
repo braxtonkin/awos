@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
-import { behaviorOf, outputLimit, reproductionPath, type Behavior, type RanScript, type Reproduction, type Side } from '../../shared/reproduction.ts';
+import { behaviorOf, outputLimit, reproductionPath, scriptFile, type Behavior, type RanScript, type Reproduction, type Side } from '../../shared/reproduction.ts';
 import { review as reviewSchema } from '../../shared/review.ts';
 import { fail, pass, type Check, type Scenario } from '../../tools/verify/check.ts';
 import { catalog, scripts, type Entry, type Script, type ScriptName } from './catalog.ts';
@@ -140,11 +140,11 @@ async function side(at: string, script: string, npmCache: string): Promise<Side>
     for (const made of [tree, home, temporary]) await mkdir(made);
     const checkout = await shell(`git archive --format=tar -o "${folder}/tree.tar" ${at} && tar -x -C "${tree}" -f "${folder}/tree.tar"`, workspace);
     if (checkout.code !== 0) return { commit: at, checkout: checkout.output.slice(-outputLimit), setup: null, run: null };
-    await writeFile(join(folder, 'reproduce.sh'), script);
+    await writeFile(join(folder, scriptFile), script);
     const env = { PATH: process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin', HOME: home, TMPDIR: temporary, LANG: 'C.UTF-8', CI: 'true', npm_config_cache: npmCache };
     const given = { cwd: tree, env, timeoutMs: 300_000, signal: new AbortController().signal };
     const setup = await execute('sh', ['-c', sandboxCommands.setup], given);
-    const ran = setup.code === 0 ? await execute('sh', [join(folder, 'reproduce.sh')], given) : null;
+    const ran = setup.code === 0 ? await execute('sh', [join(folder, scriptFile)], given) : null;
     return { commit: at, checkout: null, setup: ranScript(setup), run: ran === null ? null : ranScript(ran) };
   } finally {
     await rm(folder, { recursive: true, force: true });

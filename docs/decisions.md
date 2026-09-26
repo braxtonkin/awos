@@ -271,7 +271,7 @@ Rejected options:
 - **Record the change working, after only.** It takes one run instead of two, but it can't prove the bug existed or that the script would have caught it.
 - **A test in CI only, with no live run.** It repeats for free, but bugs that show only in a live environment slip past it.
 
-Reopened and refined 25 Sep 2026. The rule stays: the script fails on the base commit, passes on the change, and the verdict comes from trusted records. What changed is who runs the script. The agent only writes it, at `/tmp/autoworker-reproduce.sh`. After the turn, the Job's own code checks out the base commit and the change, each fresh, runs the repository's setup command and then the script in each, and posts both exit codes to the engine as one `reproduced` event. The engine settles the behavior from that event alone. Fixed means the base run failed and the change run passed, still wrong means the change run failed, and anything else, such as a base run that passes, a failed checkout or setup, or a run out of time, means Verify could not check it. A Verify Job pushes nothing.
+Reopened and refined 25 Sep 2026. The rule stays: the script fails on the base commit, passes on the change, and the verdict comes from trusted records. What changed is who runs the script. The agent only writes it, at `/tmp/autoworker-reproduce.sh`. After the turn, the Job's own code checks out the base commit and the change, each fresh, runs the repository's setup command and then the script in each, and posts both exit codes to the engine as one `reproduced` event. The engine settles the behavior from that event alone. Fixed means the base run failed and the change run passed, still wrong means the change run failed, and anything else, such as a base run that passes, a failed checkout or setup, a base run whose script could not run, or a run out of time, means Verify could not check it. A Verify Job pushes nothing.
 
 The script is the agent's code, so it runs as a third user, `reproduce`, not as `codex` and never as the bridge. It gets a scrubbed environment with its own home and temporary folder, a time limit per run, and a limit on kept output. It can read neither the bridge's environment nor its git folder, nor the Codex login in the `codex` home. The Job kills every `codex` and `reproduce` process before and between the runs, and each run gets a new folder that only `reproduce` can write, so nothing the agent left behind and nothing the first run did reaches the second.
 
@@ -289,6 +289,14 @@ Rejected options for the refinement:
 
 - **Keep matching the agent's commands, with a looser matcher.** Every fix to the matcher still trusts what the agent says it ran and where, and slugify failed 4 times on the matcher alone.
 - **Run the script as `codex`, the agent's own user.** It is one user fewer, but the script can then read the Codex login and write into folders the agent's leftover processes can reach.
+
+Refined 26 Sep 2026 after SBX-54 on braxtonkin/awos-game. Its script ended with `rg: not found` at line 6 on both commits, exit 127, because `rg` is in the agent's sandbox but not where the Job runs the script. The engine settled that as still wrong, Implement had nothing to fix and pushed nothing three times, and the task parked. Now a base run could not run its script when it exits 126 or 127, the shell's codes for a command it cannot execute or find, or when the shell reports a missing command or a syntax error on a line of the script itself. Verify could not check the behavior then, so the attempt ends `environment_fail` and Verify runs again. The evidence names the command, and the next Verify attempt's input holds the failed attempt's evidence. Another shell's `not found`, such as an npm script's, counts only through the exit code, because a bug can print one.
+
+Rejected options for the SBX-54 refinement:
+
+- **A verdict and route of its own for a script that cannot run.** It needs an enum migration and every record of verdicts, and `environment_fail` already runs Verify again.
+- **A missing command on either commit.** A command missing only on the change can be the change's doing, which Implement can fix, so that case stays still wrong.
+- **Exits 126 and 127 alone.** A script that goes on past a missing command, as `rg foo || true` does, exits with its own code, and dash exits 2 at a syntax error.
 
 ### The core ships one public Job image
 

@@ -2,6 +2,8 @@ import { z } from 'zod';
 
 export const reproductionPath = '/tmp/autoworker-reproduce.sh';
 
+export const scriptFile = 'reproduce.sh';
+
 export const setupLog = '/tmp/autoworker-setup.log';
 
 export const outputLimit = 16_000;
@@ -29,8 +31,21 @@ const cleanExit = (ran: RanScript | null): number | null => (ran === null || ran
 
 const setupFailed = (given: Side): boolean => given.checkout !== null || (given.setup !== null && cleanExit(given.setup) !== 0);
 
+const shellError = /^(\S+): (\d+): (?:(.+): not found|Syntax error: (.+))$/gm;
+
+const shellCodes: Readonly<Record<number, string>> = { 126: 'a command it could not execute', 127: 'a command it could not find' };
+
+function unrunnable(ran: RanScript | null): string | null {
+  if (ran === null || ran.timedOut) return null;
+  for (const [, source = '', line = '', command, error = ''] of ran.output.matchAll(shellError)) {
+    if (source.endsWith(`/${scriptFile}`)) return command === undefined ? `the shell stopped at a syntax error on line ${line}, ${error}` : `the shell found no \`${command}\` on line ${line}`;
+  }
+  const meaning = ran.exitCode === null ? undefined : shellCodes[ran.exitCode];
+  return meaning === undefined ? null : `it exited ${String(ran.exitCode)}, the shell's code for ${meaning}`;
+}
+
 export function behaviorOf(given: Reproduction): Behavior {
-  if (given.state === 'no_script' || setupFailed(given.base) || setupFailed(given.change)) return null;
+  if (given.state === 'no_script' || setupFailed(given.base) || setupFailed(given.change) || unrunnable(given.base.run) !== null) return null;
   const before = cleanExit(given.base.run);
   const after = cleanExit(given.change.run);
   if (before === null || after === null || before === 0) return null;
@@ -62,5 +77,7 @@ export const evidenceText = (evidence: unknown): string | null => {
   const parsed = reproduction.safeParse(evidence);
   if (!parsed.success) return null;
   if (parsed.data.state === 'no_script') return `AutoWorker ran no reproduction, because ${parsed.data.reason}.`;
-  return [`Reproduction script:\n\n\`\`\`sh\n${shown(parsed.data.script)}\n\`\`\``, sideText('On the base commit', parsed.data.base), sideText('On the change', parsed.data.change)].join('\n\n');
+  const stopped = unrunnable(parsed.data.base.run);
+  const why = stopped === null ? [] : [`AutoWorker could not check the behavior, because the script could not run on the base commit, where ${shown(stopped)}.`];
+  return [...why, `Reproduction script:\n\n\`\`\`sh\n${shown(parsed.data.script)}\n\`\`\``, sideText('On the base commit', parsed.data.base), sideText('On the change', parsed.data.change)].join('\n\n');
 };

@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { outputLimit, reproductionPath, type Reproduction, type Side } from '../../shared/reproduction.ts';
+import { outputLimit, reproductionPath, scriptFile, type Reproduction, type Side } from '../../shared/reproduction.ts';
 import { accounts, asBridge, asUser, bridgeGit, contained, kept, layout, path, run, setupMs, type Account, type JobEnvironment } from './workspace.ts';
 
 export type ReproducePlan = { readonly base: string; readonly change: string; readonly setup: string | null };
@@ -63,9 +63,9 @@ async function checkout(env: JobEnvironment, commit: string, script: string): Pr
     await ensureCommit(env, bridgeRun, commit);
     const folder = await run('mktemp', ['-d', '/tmp/autoworker-run.XXXXXX'], asRunner);
     await run('mkdir', [`${folder}/tree`, `${folder}/home`, `${folder}/tmp`], asRunner);
-    await run('sh', ['-c', 'cat > "$1"', 'sh', `${folder}/reproduce.sh`], { ...asRunner, input: script });
+    await run('sh', ['-c', 'cat > "$1"', 'sh', `${folder}/${scriptFile}`], { ...asRunner, input: script });
     await extract(bridgeRun, runner, commit, `${folder}/tree`);
-    return { folder, file: `${folder}/reproduce.sh` };
+    return { folder, file: `${folder}/${scriptFile}` };
   } catch (error) {
     return { failed: kept(error instanceof Error ? error.message : String(error)) };
   }

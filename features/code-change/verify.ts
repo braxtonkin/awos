@@ -9,7 +9,7 @@ import { fail, pass, type Check, type Scenario } from '../../tools/verify/check.
 import { modelShape, shapeDrift } from '../../tools/verify/model-shape.ts';
 import type { Change, Earlier, PullRequestFact } from '../../shared/agent-step.ts';
 import { decideLand, guarded, isConflictSendBack, sentBack } from './land.ts';
-import { reproductionPath, type RanScript, type Reproduction, type Side } from '../../shared/reproduction.ts';
+import { reproductionPath, scriptFile, type RanScript, type Reproduction, type Side } from '../../shared/reproduction.ts';
 import { agentSteps } from './stage-output.ts';
 import { defineModel, type Shape } from '../../tools/verify/models.ts';
 import { actionsOf, realStates, variablesIn, type TlcRun } from '../../tools/verify/tlc.ts';
@@ -113,8 +113,8 @@ function inShell(script: string): RanScript {
   const folder = mkdtempSync(join(tmpdir(), 'autoworker-run.'));
   try {
     mkdirSync(join(folder, 'tree'));
-    writeFileSync(join(folder, 'reproduce.sh'), script);
-    const ran = spawnSync('/bin/sh', [join(folder, 'reproduce.sh')], { cwd: join(folder, 'tree'), env: { PATH: '/nonexistent' }, encoding: 'utf8' });
+    writeFileSync(join(folder, scriptFile), script);
+    const ran = spawnSync('/bin/sh', [join(folder, scriptFile)], { cwd: join(folder, 'tree'), env: { PATH: '/nonexistent' }, encoding: 'utf8' });
     return { exitCode: ran.status, timedOut: false, output: `${ran.stdout}${ran.stderr}` };
   } finally {
     rmSync(folder, { recursive: true, force: true });

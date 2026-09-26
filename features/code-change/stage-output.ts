@@ -27,17 +27,17 @@ const planOf = (earlier: readonly Earlier[]): string => {
 
 const sinceLastPass = (earlier: readonly Earlier[]): readonly Earlier[] => earlier.slice(earlier.findLastIndex(entry => entry.step === 'implement' && entry.verdict === 'pass') + 1);
 
-const textOrJson = (output: unknown): string => textOf(output) ?? JSON.stringify(output);
+const reportOf = ({ evidence, output }: Earlier): string => evidenceText(evidence) ?? textOf(output) ?? JSON.stringify(output);
 
 function cameBack(earlier: readonly Earlier[]): string | null {
   const after = sinceLastPass(earlier).findLast(entry => entry.step !== 'specify' && entry.step !== 'implement' && entry.verdict !== 'pass');
   if (after === undefined) return null;
-  return [`The task came back from ${after.step} with ${after.verdict}.`, evidenceText(after.evidence) ?? textOrJson(after.output)].join('\n\n');
+  return [`The task came back from ${after.step} with ${after.verdict}.`, reportOf(after)].join('\n\n');
 }
 
-function lastFailure(earlier: readonly Earlier[]): string | null {
-  const last = sinceLastPass(earlier).findLast(entry => entry.step === 'implement');
-  return last?.verdict === 'fail' ? ['Your last attempt at this step failed.', textOrJson(last.output)].join('\n\n') : null;
+function lastFailure(earlier: readonly Earlier[], step: string, verdict: Earlier['verdict']): string | null {
+  const last = sinceLastPass(earlier).findLast(entry => entry.step === step);
+  return last?.verdict === verdict ? ['Your last attempt at this step failed.', reportOf(last)].join('\n\n') : null;
 }
 
 const workspace = ({ step, earlier }: History): Workspace => ({
@@ -54,9 +54,9 @@ function input({ step, ticket: { key, title, description }, earlier, merge }: St
     case 'specify':
       return named;
     case 'implement':
-      return [named, `Plan:\n\n${planOf(earlier)}`, cameBack(earlier), merge === null ? null : mergeFirst(merge), lastFailure(earlier)].filter(part => part !== null).join('\n\n');
+      return [named, `Plan:\n\n${planOf(earlier)}`, cameBack(earlier), merge === null ? null : mergeFirst(merge), lastFailure(earlier, 'implement', 'fail')].filter(part => part !== null).join('\n\n');
     case 'verify':
-      return [named, `Plan:\n\n${planOf(earlier)}`].join('\n\n');
+      return [named, `Plan:\n\n${planOf(earlier)}`, lastFailure(earlier, 'verify', 'environment_fail')].filter(part => part !== null).join('\n\n');
     default:
       throw new Error(`Code change has no agent step ${step}.`);
   }
