@@ -1,0 +1,13 @@
+{
+  "why": "Verify no longer settles a reproduction script that cannot run as still wrong: the settle rule reads the shell's exit codes 126 and 127 and its missing-command and syntax-error lines about the script, the evidence names the command, and the next Verify attempt's input holds the failed attempt's evidence. The code-change scenario replays SBX-54's script in sh and pins the rule's edges in six settle cases. The stand-in probes and the e2e setup check cover the setup command that now runs before Verify's turn. The docs record both refinements with their rejected options.",
+  "raise": {
+    "characters/docs": 1916,
+    "characters/e2e-harness": 230,
+    "characters/feature-verification": 3428,
+    "characters/product": 1075,
+    "lines/docs": 8,
+    "lines/e2e-harness": 1,
+    "lines/feature-verification": 39,
+    "lines/product": 10
+  }
+}
