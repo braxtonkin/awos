@@ -72,7 +72,7 @@
         "eslint.config.ts"
       ],
       "lines": 7227,
-      "characters": 330811,
+      "characters": 330781,
       "longest-line": 547
     },
     {
@@ -83,7 +83,7 @@
         "*.md"
       ],
       "lines": 708,
-      "characters": 194007
+      "characters": 193994
     },
     {
       "name": "product",
@@ -93,8 +93,8 @@
         "services/**",
         "shared/**"
       ],
-      "lines": 13272,
-      "characters": 608483,
+      "lines": 13299,
+      "characters": 608943,
       "longest-line": 374
     }
   ],

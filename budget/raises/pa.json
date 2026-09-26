@@ -1,7 +1,0 @@
-{
-  "why": "Folded renders evidence and transcript bodies only when open, and the top bar renders the acting menu only when open, so the screen gates stop counting unseen text",
-  "raise": {
-    "characters/product": 721,
-    "lines/product": 33
-  }
-}
