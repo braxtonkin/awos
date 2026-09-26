@@ -105,6 +105,7 @@ async function launchHeld(db: Database, settings: WorkerSettings, attempt: strin
   const token = await settings.issueToken(db, attempt);
   if (token === undefined) return `attempt ${attempt} of task ${step.key} ended or heard from its bridge before this pass launched it, so this pass launched nothing`;
   if (!(await turnStarted(db, attempt))) await settings.startTurn(db, attempt, prompt, now);
+  const setup = workspace.setup ? step.repository.setupCommand : null;
   const launched = await settings.launch(db, {
     attempt,
     taskKey: step.key,
@@ -113,10 +114,7 @@ async function launchHeld(db: Database, settings: WorkerSettings, attempt: strin
     image: step.repository.jobImage,
     repository: step.repository.github,
     startCommit: step.start,
-    plan:
-      step.kind.afterTurn === 'reproduce'
-        ? { kind: 'reproduce', base: (await baseOf(db, step.task)) ?? step.start, setup: step.repository.setupCommand }
-        : { kind: 'push', setup: workspace.setup ? step.repository.setupCommand : null, merge: step.mergeHead },
+    plan: step.kind.afterTurn === 'reproduce' ? { kind: 'reproduce', base: (await baseOf(db, step.task)) ?? step.start, setup } : { kind: 'push', setup, merge: step.mergeHead },
     attemptToken: token,
     runAs: step.runAs,
   });

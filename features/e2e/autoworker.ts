@@ -368,13 +368,13 @@ async function firstImplementEvent(db: Database, ticket: string): Promise<Implem
   return row === undefined ? undefined : { attempt: row.id, firstEventAt: row.stored_at };
 }
 
-async function implementAttempts(db: Database, ticket: string): Promise<readonly { readonly id: string; readonly verdict: string | null }[]> {
+async function attemptsAt(db: Database, ticket: string, steps: readonly string[]): Promise<readonly { readonly id: string; readonly step: string; readonly verdict: string | null }[]> {
   return db
     .selectFrom('attempt')
     .innerJoin('task', 'task.id', 'attempt.task_id')
-    .select(['attempt.id', 'attempt.verdict'])
+    .select(['attempt.id', 'attempt.step', 'attempt.verdict'])
     .where('task.key', '=', ticket)
-    .where('attempt.step', '=', 'implement')
+    .where('attempt.step', 'in', [...steps])
     .orderBy('attempt.id')
     .execute();
 }
@@ -387,7 +387,7 @@ const faultCheckNames: Readonly<Record<Fault, string>> = { 'engine-restart': 'at
 async function continuedCheck(db: Database, ticket: string, fault: Exclude<Fault, 'base-conflict'>, hit: Implementing | undefined): Promise<Check> {
   const name = faultCheckNames[fault];
   if (hit === undefined) return fail(name, 'the fault never fired, because no Implement event was stored');
-  const implement = await implementAttempts(db, ticket);
+  const implement = await attemptsAt(db, ticket, ['implement']);
   const described = implement.map(attempt => `${attempt.id} ${attempt.verdict ?? 'live'}`).join(', ');
   if (fault === 'engine-restart') {
     const verdict = implement.find(attempt => attempt.id === hit.attempt)?.verdict;
@@ -474,18 +474,19 @@ async function probeOutput(db: Database, attempt: string): Promise<string | unde
 }
 
 async function setupCheck(db: Database, ticket: string): Promise<Check> {
-  const name = "Implement started with the repository's setup already run";
+  const name = "Implement and Verify started with the repository's setup already run";
   const probes = await Promise.all(
-    (await implementAttempts(db, ticket)).map(async ({ id, verdict }) => {
+    (await attemptsAt(db, ticket, setupProbe.steps)).map(async ({ id, step, verdict }) => {
       const output = await probeOutput(db, id);
-      return { id, output, skippedAs: output === undefined && (verdict === 'lost' || verdict === 'not_launched') ? verdict : undefined };
+      return { id, step, output, skippedAs: output === undefined && (verdict === 'lost' || verdict === 'not_launched') ? verdict : undefined };
     }),
   );
   const judged = probes.filter(probe => probe.skippedAs === undefined);
   const detail = probes
-    .map(probe => `Implement attempt ${probe.id} ${probe.output === undefined ? `ran no probe${probe.skippedAs === undefined ? '' : `, skipped because it ended ${probe.skippedAs}`}` : `printed "${probe.output.trim()}"`}`)
+    .map(probe => `${probe.step} attempt ${probe.id} ${probe.output === undefined ? `ran no probe${probe.skippedAs === undefined ? '' : `, skipped because it ended ${probe.skippedAs}`}` : `printed "${probe.output.trim()}"`}`)
     .join('; ');
-  return judged.length > 0 && judged.every(probe => probe.output?.includes(setupProbe.present) === true) ? pass(name, detail) : fail(name, detail || 'no Implement attempt ran');
+  const everyStep = setupProbe.steps.every(step => judged.some(probe => probe.step === step));
+  return everyStep && judged.every(probe => probe.output?.includes(setupProbe.present) === true) ? pass(name, detail) : fail(name, detail || 'no Implement or Verify attempt ran');
 }
 
 type Park = { readonly step: string; readonly reason: string | null };

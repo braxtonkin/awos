@@ -215,7 +215,7 @@ const endedAs = (command: string, ran: RanScript): string =>
   `\`${command}\` ${ran.timedOut ? `ran out of time after ${String(setupMs / 1000)} s` : ran.exitCode === null ? 'did not start' : `exited ${String(ran.exitCode)}`}`;
 
 export async function setUp(env: JobEnvironment): Promise<SetUp | null> {
-  if (env.AFTER_TURN !== 'push' || env.SETUP_COMMAND === null) return null;
+  if (env.SETUP_COMMAND === null) return null;
   const { bridge, codex } = await accounts();
   const owner = asBridge(bridge, env);
   const before = await snapshot(owner);

@@ -730,7 +730,7 @@ Rejected options:
 - **Tight time budgets.** Local times swing with machine load, so a tight ceiling fails healthy runs and teaches agents to raise it without looking. The distinct state count is the ratchet for model cost, because it does not depend on load.
 - **A raise that states the new ceiling.** Two parallel raises of the same area would each count the same room, so a raise states the amount it adds.
 
-### The setup command runs before Implement's turn
+### The setup command runs before Implement's and Verify's turns
 
 Decided 26 Sep 2026 after the e2e-hold run on braxtonkin/awos-game. The repository's setup command reached only Verify's reproduction, so each Implement agent ran `npm ci` inside its turn, and with eight Jobs starting at once some downloads hung or timed out, and those agents ended blocked. Now a workflow's plug says which steps set up, which Code change says for Implement, and the Job runs the command in `/workspace` as `codex` before the turn, with a scrubbed environment and the reproduction's 600 s limit. It runs inside the bridge, after the bridge starts posting and before it initializes the app server, so heartbeats renew the lease and the engine holds the turn until setup ends. A failed or timed-out setup does not stop the turn, and the prompt tells the agent the command already ran and where its log is. The push leaves out every change the setup made that the agent did not change again, so an Implement with no net change still fails. Verify's reproduction is unchanged.
 
@@ -739,6 +739,12 @@ Rejected options:
 - **Setup in `prepareWorkspace`, before the bridge.** Nothing renews the lease there, and a hung download could outlast the 900 s start lease.
 - **Setup before every agent step.** Specify changes no file, and eight Specify Jobs start together at the head of every batch.
 - **Setup as the `reproduce` user.** Only `codex` can write `/workspace`. The setup can read the Codex login, as the agent's own `npm ci` could before.
+
+Refined 26 Sep 2026 after SBX-54 on the same repository. Verify's agent wrote its script but could not try it, because `vitest` was not installed in its workspace. Code change's plug now says Verify sets up too, and a plan's setup command follows the plug for both kinds of step, so a Verify Job runs it before the turn and in each fresh checkout of its reproduction.
+
+Rejected option for the SBX-54 refinement:
+
+- **A setting of its own for the reproduction's setup.** The turn and the reproduction need the same installed tools, and one setting cannot disagree with itself.
 
 ### A conflict rework merges the base head its claim read
 

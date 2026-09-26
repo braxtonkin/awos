@@ -41,7 +41,7 @@ function lastFailure(earlier: readonly Earlier[], step: string, verdict: Earlier
 }
 
 const workspace = ({ step, earlier }: History): Workspace => ({
-  setup: step === 'implement',
+  setup: step === 'implement' || step === 'verify',
   mergesBase: step === 'implement' && sinceLastPass(earlier).some(entry => entry.step === landStep && entry.verdict === 'red_check' && isConflictSendBack(entry.output)),
 });
 
