@@ -1,0 +1,10 @@
+{
+  "why": "People page redesign: a replace form that renders only for the one opened login, a people-replace screen that gates the open form, and the feature map sentence for the new link",
+  "raise": {
+    "characters/docs": 199,
+    "characters/feature-verification": 122,
+    "characters/product": 820,
+    "lines/feature-verification": 3,
+    "lines/product": 20
+  }
+}
