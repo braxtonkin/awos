@@ -27,7 +27,7 @@ export type Next = Omit<Task, 'key' | 'gates' | 'end' | 'ignoreLaterReviews' | '
 
 type Charged = Extract<Failure, { readonly counter: string }>;
 
-export const titled = (step: string): string => `${step.charAt(0).toUpperCase()}${step.slice(1)}`;
+const titled = (step: string): string => `${step.charAt(0).toUpperCase()}${step.slice(1)}`;
 
 const failedTooOften = (step: string): Instruction =>
   `${titled(step)} failed ${String(caps.stageRetries + 1)} times in a row. Read its attempts on this page, fix what stopped them, then press Retry to run it again.`;
