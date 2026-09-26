@@ -24,7 +24,7 @@ import { standInSolutionsScenario } from './stand-in-check.ts';
 import { localEngineScenario } from './local-engine.ts';
 import { localReadScenario } from './local-read.ts';
 
-const defaultRepository = 'braxtonkdev/autoworker-oss';
+const defaultRepository = 'braxtonkin/awos';
 const defaultProject = 'SBX';
 
 const schemas: Readonly<Record<string, z.ZodType>> = {

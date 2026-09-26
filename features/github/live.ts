@@ -16,7 +16,7 @@ const api = 'https://api.github.com';
 const environment = z.object({ GITHUB_TOKEN: z.string().regex(/^\S+$/) });
 
 const flags = {
-  repository: { type: 'string', default: 'braxtonkdev/autoworker-oss' },
+  repository: { type: 'string', default: 'braxtonkin/awos' },
   merged: { type: 'string', default: '29' },
   open: { type: 'string' },
   wait: { type: 'string', default: '1500' },
