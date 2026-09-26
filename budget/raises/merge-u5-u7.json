@@ -1,0 +1,7 @@
+{
+  "why": "Merging U5's People link into U6's multi-line top-bar links took one product line and 39 characters more than either unit's raise counted.",
+  "raise": {
+    "characters/product": 39,
+    "lines/product": 1
+  }
+}
