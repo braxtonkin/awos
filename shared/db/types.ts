@@ -192,6 +192,7 @@ export interface PersonRequest {
   person_id: Int8;
   position: Generated<number>;
   reason: string | null;
+  repository_id: Int8 | null;
   routine_id: Int8 | null;
   target: Generated<string | null>;
   task_id: Int8 | null;
