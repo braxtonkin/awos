@@ -2,7 +2,8 @@ import { readFile } from 'node:fs/promises';
 import { parseArgs } from 'node:util';
 import type { z } from 'zod';
 import { checksOf, fail, pass, type Check, type Line, type Scenario } from '../../tools/verify/check.ts';
-import { accessCopy, fakeCodexLogin, faultNames, runAsNames, standInImage, type Fault, type RunAs } from './autoworker.ts';
+import { agents, type Agent } from '../../tools/verify/dashboard.ts';
+import { faultNames, runAsNames, type Fault, type RunAs } from './autoworker.ts';
 import { Catalog, catalog, type Entry } from './catalog.ts';
 import { cleanScenarios } from './clean-lanes.ts';
 import { driverNames, type DriverName } from './driver.ts';
@@ -14,12 +15,10 @@ import { parsePayload, PayloadRejected } from './payload.ts';
 import { parkedScenario } from './parked.ts';
 import { seconds } from './report.ts';
 import { launchFaultsScenario } from './launch-faults.ts';
+import { openWorld } from './open-world.ts';
 import { roundTripScenario } from './round-trip.ts';
-import { kindAddress } from '../../tools/verify/cluster.ts';
-import { kind } from '../../tools/verify/kind.ts';
-import { startLocalWorld } from './local-world.ts';
 import { worldScenario } from './world-lane.ts';
-import { sandboxWorld, worldNames, type World, type WorldName } from './world.ts';
+import { worldNames, type WorldName } from './world.ts';
 import { standInSolutionsScenario } from './stand-in-check.ts';
 import { localEngineScenario } from './local-engine.ts';
 import { localReadScenario } from './local-read.ts';
@@ -33,38 +32,6 @@ const schemas: Readonly<Record<string, z.ZodType>> = {
   catalog: Catalog,
 };
 
-const agentNames = ['stand-in', 'real'] as const;
-
-type AgentName = (typeof agentNames)[number];
-
-const openWorld = (name: WorldName, repository: string, agent: AgentName): Promise<World> => {
-  switch (name) {
-    case 'sandbox':
-      return Promise.resolve(sandboxWorld(repository, accessCopy));
-    case 'local':
-      return localWorld(repository, agent);
-  }
-};
-
-async function localWorld(repository: string, agent: AgentName): Promise<World> {
-  const broken = (checksOf(await kind.run(['up']))).find(check => !check.passed);
-  if (broken !== undefined) throw new Error(`kind did not come up: ${broken.name}, ${broken.detail}`);
-  const local = await startLocalWorld(await kindAddress(), repository);
-  return {
-    name: 'local',
-    jira: local.jira,
-    github: local.github,
-    engine: {
-      settings: { ...local.engine.settings },
-      secrets: { github: local.engine.secrets.GITHUB_TOKEN, jiraLogin: local.engine.secrets.AUTOWORKER_JIRA_LOGIN },
-      codexLogin: agent === 'real' ? accessCopy : () => Promise.resolve(fakeCodexLogin()),
-      image: agent === 'real' ? attemptImage => Promise.resolve(attemptImage) : standInImage,
-      trustLogins: true,
-    },
-    stop: local.stop,
-  };
-}
-
 const shuffled = <T>(items: readonly T[]): readonly T[] =>
   items
     .map(item => ({ item, key: Math.random() }))
@@ -73,7 +40,7 @@ const shuffled = <T>(items: readonly T[]): readonly T[] =>
 
 type Series = {
   readonly world: WorldName;
-  readonly agent: AgentName;
+  readonly agent: Agent;
   readonly repository: string;
   readonly driver: DriverName;
   readonly entries: readonly Entry[];
@@ -142,8 +109,8 @@ function seriesFrom(values: Parsed, inspect: Inspect | undefined): Series | Chec
   if (driver === undefined) return fail('driver named', `--driver must be one of ${driverNames.join(', ')}`);
   const world = worldNames.find(name => name === values.world);
   if (world === undefined) return fail('world named', `--world must be one of ${worldNames.join(', ')}`);
-  const agent = agentNames.find(name => name === values.agent);
-  if (agent === undefined) return fail('agent named', `--agent must be one of ${agentNames.join(', ')}`);
+  const agent = agents.find(name => name === values.agent);
+  if (agent === undefined) return fail('agent named', `--agent must be one of ${agents.join(', ')}`);
   const fault = values.fault === undefined ? undefined : faultNames.find(name => name === values.fault);
   if (values.fault !== undefined && fault === undefined) return fail('fault named', `--fault must be one of ${faultNames.join(', ')}`);
   if (fault !== undefined && driver !== 'autoworker') return fail('fault needs AutoWorker', '--fault works only with --driver autoworker');

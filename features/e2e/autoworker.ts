@@ -1,5 +1,6 @@
 import { execFile, spawn, type ChildProcess } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
+import { once } from 'node:events';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -65,7 +66,9 @@ export async function actAs(store: Store, args: readonly string[]): Promise<Ran>
   return childResult(run(process.execPath, [actCommand, ...args], { env: baseEnvironment(store), cwd: repositoryRoot, timeout: 60_000 }));
 }
 
-export type Engine = { readonly said: () => string; readonly exited: Promise<void>; readonly stop: () => Promise<void>; readonly kill: () => Promise<void> };
+export type Engine = { readonly said: () => string; readonly exited: Promise<void>; readonly stop: (graceMs?: number) => Promise<void>; readonly kill: () => Promise<void> };
+
+const stopGraceMs = 30_000;
 
 export function startEngine(store: Store, settings: Readonly<Record<string, string>>, echo: (line: string) => void = () => undefined): Engine {
   let said = '';
@@ -80,9 +83,9 @@ export function startEngine(store: Store, settings: Readonly<Record<string, stri
   return {
     said: () => said,
     exited,
-    stop: async () => {
+    stop: async (graceMs = stopGraceMs) => {
       if (child.exitCode === null && child.signalCode === null) child.kill('SIGTERM');
-      await Promise.race([exited, wait(30_000)]);
+      await Promise.race([exited, wait(graceMs, undefined, { ref: false })]);
       if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
       await exited;
     },
@@ -90,6 +93,58 @@ export function startEngine(store: Store, settings: Readonly<Record<string, stri
       if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
       await exited;
     },
+  };
+}
+
+const restartDelayMs = 1_000;
+
+export type Supervised = { readonly stop: (graceMs?: number) => Promise<void>; readonly hold: () => Promise<void>; readonly release: () => void; readonly starts: () => number; readonly said: () => string };
+
+export function supervise(store: Store, settings: Readonly<Record<string, string>>, stopping: AbortSignal, out: (line: string) => void, echo?: (line: string) => void): Supervised {
+  const stopped = new AbortController();
+  const signal = AbortSignal.any([stopping, stopped.signal]);
+  let engine: Engine = startEngine(store, settings, echo);
+  let starts = 1;
+  let said = '';
+  let held: PromiseWithResolvers<void> | undefined;
+  const watching = (async () => {
+    while (!signal.aborted) {
+      const ended = await Promise.race([engine.exited.then(() => 'exited' as const), once(signal, 'abort').then(() => 'stopping' as const)]);
+      if (ended === 'stopping') return;
+      said += engine.said();
+      if (held !== undefined) {
+        out('the engine is held stopped until start-engine');
+        const released = await Promise.race([held.promise.then(() => true), once(signal, 'abort').then(() => false)]);
+        if (!released) return;
+      } else {
+        out(`the engine exited, so it starts again in ${String(restartDelayMs)} ms`);
+      }
+      const waited = await wait(restartDelayMs, undefined, { signal }).then(
+        () => true,
+        () => false,
+      );
+      if (!waited) return;
+      engine = startEngine(store, settings, echo);
+      starts += 1;
+    }
+  })();
+  return {
+    stop: async graceMs => {
+      stopped.abort();
+      await watching;
+      await engine.stop(graceMs);
+    },
+    hold: async () => {
+      held ??= Promise.withResolvers();
+      await engine.kill();
+    },
+    release: () => {
+      const releasing = held;
+      held = undefined;
+      releasing?.resolve();
+    },
+    starts: () => starts,
+    said: () => said + engine.said(),
   };
 }
 
@@ -234,29 +289,44 @@ export const driverSettings = (worldSettings: Readonly<Record<string, string>>, 
 
 type Person = { readonly name: string; readonly email: string; readonly jiraAccountId?: string; readonly logins: object };
 
-function setupFile(drive: Drive, login: string, accountId: string): object {
-  const run = drive.branch.replace(/^e2e\/run-/, '');
-  const project = drive.ticket.split('-')[0] ?? 'SBX';
-  const owner = drive.jira.email.toLowerCase();
+export type Plan = {
+  readonly owner: string;
+  readonly accountId: string;
+  readonly repository: string;
+  readonly branch: string;
+  readonly commands: { readonly fastTest: string | undefined; readonly setup: string | undefined };
+  readonly routine: { readonly name: string; readonly goal: string; readonly jql: string; readonly everyMinutes: number; readonly runAs: RunAs | 'owner' };
+};
+
+function setupFile(plan: Plan, login: string): object {
   const logins = { github: { env: 'GITHUB_TOKEN' }, codex: { file: login }, jira: { env: 'AUTOWORKER_JIRA_LOGIN' } };
+  const runsAs: Readonly<Record<Plan['routine']['runAs'], string | undefined>> = { assignee: undefined, team: teamAccount, owner: plan.owner };
+  const runAs = runsAs[plan.routine.runAs];
   const people: readonly Person[] = [
-    { name: 'Sandbox owner', email: owner, jiraAccountId: accountId, logins },
-    ...(drive.runAs === 'team' ? [{ name: 'Sandbox team', email: teamAccount, logins }] : []),
+    { name: 'Sandbox owner', email: plan.owner, jiraAccountId: plan.accountId, logins },
+    ...(plan.routine.runAs === 'team' ? [{ name: 'Sandbox team', email: teamAccount, logins }] : []),
   ];
   return {
-    admin: owner,
+    admin: plan.owner,
     people,
-    repositories: [{ github: drive.github.repository, branch: drive.branch, fastTestCommand: sandboxCommands.fastTest, setupCommand: sandboxCommands.setup }],
+    repositories: [
+      {
+        github: plan.repository,
+        branch: plan.branch,
+        ...(plan.commands.fastTest === undefined ? {} : { fastTestCommand: plan.commands.fastTest }),
+        ...(plan.commands.setup === undefined ? {} : { setupCommand: plan.commands.setup }),
+      },
+    ],
     routines: [
       {
-        name: 'End to end',
-        goal: 'Take each sandbox ticket to a merged pull request.',
+        name: plan.routine.name,
+        goal: plan.routine.goal,
         workflow: 'code-change',
-        source: { kind: 'jira-search', jql: `project = ${project} AND labels = e2e-run-${run}` },
-        everyMinutes: 1,
-        repository: { github: drive.github.repository, branch: drive.branch },
-        creator: owner,
-        ...(drive.runAs === 'team' ? { runAs: teamAccount } : {}),
+        source: { kind: 'jira-search', jql: plan.routine.jql },
+        everyMinutes: plan.routine.everyMinutes,
+        repository: { github: plan.repository, branch: plan.branch },
+        creator: plan.owner,
+        ...(runAs === undefined ? {} : { runAs }),
         gates: [],
         lastStep: 'land',
         jiraStartStatus: startStatus,
@@ -264,6 +334,15 @@ function setupFile(drive: Drive, login: string, accountId: string): object {
       },
     ],
   };
+}
+
+export async function setUpAutoWorker(store: Store, world: EngineWorld, plan: Plan): Promise<string> {
+  const login = join(store.folder, 'codex.json');
+  await writeFile(login, await world.codexLogin(), { mode: 0o600 });
+  const setup = await applySetup(store, setupFile(plan, login), { GITHUB_TOKEN: world.secrets.github, AUTOWORKER_JIRA_LOGIN: world.secrets.jiraLogin });
+  if (setup.code !== 0) throw new Error(`setup failed: ${setup.out}`);
+  if (world.trustLogins) await store.db.updateTable('credential').set({ state: 'valid', checked_at: new Date() }).execute();
+  return setup.out.replaceAll('\n', '; ');
 }
 
 type Implementing = { readonly attempt: string; readonly firstEventAt: Date };
@@ -321,31 +400,33 @@ async function podNames(core: CoreV1Api, namespace: string, attempt: string): Pr
   return (await core.listNamespacedPod({ namespace, labelSelector: `${labels.attempt}=${attempt}` })).items.flatMap(pod => (pod.metadata?.name === undefined ? [] : [pod.metadata.name]));
 }
 
-export async function driveAutoWorker(drive: Drive): Promise<void> {
+export async function inJobNamespace<T>(world: EngineWorld, namespace: string, log: (line: string) => void, work: (cluster: { readonly core: CoreV1Api; readonly image: string; readonly address: string }) => Promise<T>): Promise<T> {
   const up = checksOf(await kind.run(['up']));
   const broken = up.find(check => !check.passed);
   if (broken !== undefined) throw new Error(`kind did not come up: ${broken.name}, ${broken.detail}`);
-  drive.log(await ensureRegistry());
-  const image = await drive.world.image(await buildAttemptImage(`${registry.host}/autoworker-job:e2e`));
+  log(await ensureRegistry());
+  const image = await world.image(await buildAttemptImage(`${registry.host}/autoworker-job:e2e`));
   const address = await kindAddress();
   const core = kubernetes();
-  await jobNamespace(core, drive.namespace, e2eServiceAccount);
+  await jobNamespace(core, namespace, e2eServiceAccount);
   try {
-    await driveInNamespace(drive, core, image, address);
+    return await work({ core, image, address });
   } finally {
-    await core.deleteNamespace({ name: drive.namespace });
+    await core.deleteNamespace({ name: namespace });
   }
+}
+
+export async function driveAutoWorker(drive: Drive): Promise<void> {
+  await inJobNamespace(drive.world, drive.namespace, drive.log, ({ core, image, address }) => driveInNamespace(drive, core, image, address));
 }
 
 async function driveInNamespace(drive: Drive, core: CoreV1Api, image: string, address: string): Promise<void> {
   const store = await openStore(drive.databaseUrl);
   try {
-    const login = join(store.folder, 'codex.json');
-    await writeFile(login, await drive.world.codexLogin(), { mode: 0o600 });
-    const setup = await applySetup(store, setupFile(drive, login, await drive.jira.accountId()), { GITHUB_TOKEN: drive.world.secrets.github, AUTOWORKER_JIRA_LOGIN: drive.world.secrets.jiraLogin });
-    if (setup.code !== 0) throw new Error(`setup failed: ${setup.out}`);
-    drive.log(setup.out.replaceAll('\n', '; '));
-    if (drive.world.trustLogins) await store.db.updateTable('credential').set({ state: 'valid', checked_at: new Date() }).execute();
+    const run = drive.branch.replace(/^e2e\/run-/, '');
+    const project = drive.ticket.split('-')[0] ?? 'SBX';
+    const routine = { name: 'End to end', goal: 'Take each sandbox ticket to a merged pull request.', jql: `project = ${project} AND labels = e2e-run-${run}`, everyMinutes: 1, runAs: drive.runAs };
+    drive.log(await setUpAutoWorker(store, drive.world, { owner: drive.jira.email.toLowerCase(), accountId: await drive.jira.accountId(), repository: drive.github.repository, branch: drive.branch, commands: sandboxCommands, routine }));
     const settings = driverSettings(drive.world.settings, image, drive.namespace, address);
     let engine = startEngine(store, settings);
     let printed = '';
