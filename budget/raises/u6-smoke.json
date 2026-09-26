@@ -1,7 +1,0 @@
-{
-  "why": "U6's smoke lane checks each item of the You see line on Needs you",
-  "raise": {
-    "characters/feature-verification": 580,
-    "lines/feature-verification": 13
-  }
-}
