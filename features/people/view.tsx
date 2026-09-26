@@ -1,8 +1,8 @@
 import type { ReactNode } from 'react';
-import type { ConnectorKind, PersonKind } from '../../shared/db/types.ts';
+import type { PersonKind } from '../../shared/db/types.ts';
 import { color } from '../../shared/ui/tokens.ts';
 import { Avatar } from '../../shared/ui/top-bar.tsx';
-import type { LoginsOf, ReplaceLogin } from './logins.ts';
+import type { LoginsOf, Opened, ReplaceLogin } from './logins.ts';
 import { Logins, RefreshWhileChecking } from './logins.tsx';
 import type { Account } from './read.ts';
 
@@ -10,7 +10,7 @@ const kindWords: Readonly<Record<PersonKind, string>> = { person: 'Person', shar
 
 export type Replacing = { readonly on: true; readonly action: ReplaceLogin } | { readonly on: false; readonly why: string };
 
-type Shown = { readonly acting: string | undefined; readonly logins: LoginsOf; readonly now: string; readonly zone: string; readonly replacing: Replacing; readonly focus: ConnectorKind | undefined };
+type Shown = { readonly acting: string | undefined; readonly logins: LoginsOf; readonly now: string; readonly zone: string; readonly replacing: Replacing; readonly opened: Opened };
 
 type Column = { readonly label: string; readonly width?: string; readonly cell: (account: Account, shown: Shown) => ReactNode };
 
@@ -33,8 +33,8 @@ const columns: readonly Column[] = [
   {
     label: 'Logins',
     width: '44%',
-    cell: (account, { logins, now, zone, replacing, focus, acting }) => (
-      <Logins logins={logins(account.id)} now={now} zone={zone} action={replacing.on ? replacing.action : undefined} focus={account.id === acting ? focus : undefined} />
+    cell: (account, { logins, now, zone, replacing, opened }) => (
+      <Logins logins={logins(account.id)} now={now} zone={zone} action={replacing.on ? replacing.action : undefined} open={opened?.owner === account.id ? opened.connector : undefined} />
     ),
   },
 ];

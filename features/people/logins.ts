@@ -96,3 +96,14 @@ export async function readLogins(db: Database): Promise<LoginsOf> {
   );
   return owner => connectorsShown.map((connector): Login => ({ owner, connector, stored: stored.get(`${owner} ${connector}`) ?? null }));
 }
+
+export type Opened = { readonly owner: string; readonly connector: ConnectorKind } | undefined;
+
+type Asked = Readonly<Record<string, string | readonly string[] | undefined>>;
+
+export function openedLogin(asked: Asked, acting: string | undefined): Opened {
+  const connector = connectorsShown.find(each => each === asked['login']);
+  const named = asked['owner'];
+  const owner = typeof named === 'string' ? named : acting;
+  return connector === undefined || owner === undefined ? undefined : { owner, connector };
+}

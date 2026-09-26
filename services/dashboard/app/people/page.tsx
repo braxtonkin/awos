@@ -1,4 +1,4 @@
-import { connectorsShown, readLogins } from '../../../../features/people/logins.ts';
+import { openedLogin, readLogins } from '../../../../features/people/logins.ts';
 import { readPeople } from '../../../../features/people/read.ts';
 import { PeoplePage } from '../../../../features/people/view.tsx';
 import { credentialKey } from '../../credential-key.ts';
@@ -18,7 +18,7 @@ export default async function Page({ searchParams }: { readonly searchParams: Pr
       now={new Date().toISOString()}
       zone={Intl.DateTimeFormat().resolvedOptions().timeZone}
       replacing={'off' in keyed ? { on: false, why: keyed.off } : { on: true, action: replaceLogin }}
-      focus={connectorsShown.find(connector => connector === asked['login'])}
+      opened={openedLogin(asked, person)}
     />
   );
 }
