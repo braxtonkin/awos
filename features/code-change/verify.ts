@@ -1,3 +1,7 @@
+import { spawnSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { isDeepStrictEqual, parseArgs } from 'node:util';
 import { z } from 'zod';
 import { builtByStep, shapeOf, type StepVerdict, type Unasked } from '../../shared/workflow.ts';
@@ -68,7 +72,19 @@ const side = (commit: string, run: RanScript | null, setup: RanScript | null = r
 
 const ranBoth = (before: Side, after: Side): Reproduction => ({ state: 'ran', script: 'test -f src/fixed.ts', base: before, change: after });
 
+const said = (exitCode: number, output: string): RanScript => ({ exitCode, timedOut: false, output });
+
+const runFile = '/tmp/autoworker-run.sAMQb4/reproduce.sh';
+
+const noRg = `checking formatNumber\n${runFile}: 6: rg: not found`;
+
 const settleCases: readonly (readonly [string, Reproduction | null, 'fixed' | 'still_wrong' | null])[] = [
+  ['the shell found no `rg` on line 6 on both commits, as in SBX-54', ranBoth(side(base, said(127, noRg)), side(head, said(127, noRg))), null],
+  ['the script went on past a command the shell could not find on the base commit, then failed', ranBoth(side(base, said(1, `${runFile}: 1: rg: not found\nafter`)), side(head, ran(0))), null],
+  ['a command in the script could not be executed on the base commit', ranBoth(side(base, said(126, `${runFile}: 2: ./bin/format: Permission denied`)), side(head, ran(0))), null],
+  ['the shell stopped at a syntax error in the script on both commits', ranBoth(side(base, said(2, `${runFile}: 1: Syntax error: "(" unexpected`)), side(head, said(2, `${runFile}: 1: Syntax error: "(" unexpected`))), null],
+  ["the base run failed and printed another shell's not found, as a bug can", ranBoth(side(base, said(1, 'sh: 1: tsc: not found')), side(head, ran(0))), 'fixed'],
+  ['the shell found no `rg` only on the change, which the change may have removed', ranBoth(side(base, ran(1)), side(head, said(127, noRg))), 'still_wrong'],
   ['the script fails on the base commit and passes on the change', ranBoth(side(base, ran(1)), side(head, ran(0))), 'fixed'],
   ['the script fails on both', ranBoth(side(base, ran(1)), side(head, ran(1))), 'still_wrong'],
   ['the script passes on the base commit, so nothing was reproduced', ranBoth(side(base, ran(0)), side(head, ran(0))), null],
@@ -89,6 +105,35 @@ function settleChecks(): readonly Check[] {
     const kept = JSON.stringify(settled.evidence) === JSON.stringify(reproduction);
     return behavior === expected && kept ? pass(name, `behavior ${String(expected)}, evidence ${settled.evidence === null ? 'none' : 'stored as posted'}`) : fail(name, `behavior ${String(behavior)}, not ${String(expected)}; evidence ${kept ? 'as posted' : 'changed'}`);
   });
+}
+
+const sbx54Script = ['echo "checking formatNumber"', 'test -f package.json || echo "no package.json here"', "printf '%s\\n' 'formatNumber(1234) prints 1,234'", 'cd .', 'echo "searching src"', 'rg -n formatNumber src/'].join('\n');
+
+function inShell(script: string): RanScript {
+  const folder = mkdtempSync(join(tmpdir(), 'autoworker-run.'));
+  try {
+    mkdirSync(join(folder, 'tree'));
+    writeFileSync(join(folder, 'reproduce.sh'), script);
+    const ran = spawnSync('/bin/sh', [join(folder, 'reproduce.sh')], { cwd: join(folder, 'tree'), env: { PATH: '/nonexistent' }, encoding: 'utf8' });
+    return { exitCode: ran.status, timedOut: false, output: `${ran.stdout}${ran.stderr}` };
+  } finally {
+    rmSync(folder, { recursive: true, force: true });
+  }
+}
+
+function unrunnableCheck(): Check {
+  const name = "SBX-54 replayed in sh: a script whose line 6 calls `rg`, which the shell cannot find, fails Verify's own attempt, and the next Verify attempt is told the command";
+  const reproduction: Reproduction = { state: 'ran', script: sbx54Script, base: side(base, inShell(sbx54Script)), change: side(head, inShell(sbx54Script)) };
+  const output = { outcome: 'done', summary: 'The script checks formatNumber.', blocks: [{ kind: 'text', title: null, body: 'The script searches src for formatNumber.' }], behavior: null };
+  const settled = agentSteps.settle({ step: 'verify', output, change: { pushed: null, carried: null, declined: null }, reproduction });
+  const verdict = workflow.steps.find(kind => kind.name === 'verify')?.judge(settled.output) ?? 'pass';
+  const earlier = [entry('specify', 'pass'), entry('implement', 'pass'), { step: 'verify', verdict, output: settled.output, evidence: settled.evidence }];
+  const next = agentSteps.input({ step: 'verify', ticket: { key: 'SBX-54', title: 'Format numbers', description: null }, earlier, merge: null });
+  const told = 'AutoWorker could not check the behavior, because the script could not run on the base commit, where the shell found no `rg` on line 6.';
+  const exits = `base ${String(reproduction.base.run?.exitCode)}, change ${String(reproduction.change.run?.exitCode)}`;
+  return verdict === 'environment_fail' && next.includes(told)
+    ? pass(name, `${exits}; verdict ${verdict}; the next Verify input says: ${told}`)
+    : fail(name, `${exits}; verdict ${verdict}${verdict === 'behavior_fail' ? ', which sends the task back to Implement' : ''}; the next Verify input ${next.includes(told) ? 'names the command' : `lacks "${told}"`}`);
 }
 
 const doneImplement = { outcome: 'done', summary: 'Implemented the ticket.', blocks: [{ kind: 'text', title: null, body: 'Added the function.' }] };
@@ -531,7 +576,7 @@ export const scenarios: readonly Scenario[] = [
   {
     name: 'code-change',
     summary: "checks the Code change declaration against the task model's shape and runs each step's judge on reviews of every outcome",
-    run: () => Promise.resolve([shapeCheck(), builtCheck(), ...judgeChecks(), ...settleChecks(), ...pullEvidenceChecks(), ...unopenedEvidenceChecks(), ...implementChecks(), ...reworkChecks(), promptCheck()]),
+    run: () => Promise.resolve([shapeCheck(), builtCheck(), ...judgeChecks(), ...settleChecks(), unrunnableCheck(), ...pullEvidenceChecks(), ...unopenedEvidenceChecks(), ...implementChecks(), ...reworkChecks(), promptCheck()]),
   },
   landModel,
   {
