@@ -1,7 +1,7 @@
 'use client';
 
 import { usePathname } from 'next/navigation';
-import { useRef, useState } from 'react';
+import { useRef } from 'react';
 import { initials, type Person } from '../people.ts';
 import { color } from './tokens.ts';
 
@@ -55,7 +55,6 @@ function Mark() {
 
 export function TopBar({ people, acting, pick }: TopBarProps) {
   const menu = useRef<HTMLDetailsElement>(null);
-  const [open, setOpen] = useState(false);
   const path = usePathname();
   const close = (): void => {
     if (menu.current !== null) menu.current.open = false;
@@ -76,28 +75,20 @@ export function TopBar({ people, acting, pick }: TopBarProps) {
       </nav>
       <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 12 }}>
         <span style={{ fontSize: 12, color: color('muted') }}>Acting as</span>
-        <details
-          ref={menu}
-          style={{ position: 'relative' }}
-          onToggle={event => {
-            setOpen(event.currentTarget.open);
-          }}
-        >
+        <details ref={menu} style={{ position: 'relative' }}>
           <summary aria-label="Acting as" style={{ display: 'inline-flex', alignItems: 'center', gap: 8, height: 32, padding: '0 8px', borderRadius: 6, fontSize: 13, fontWeight: 500, cursor: 'pointer', listStyle: 'none' }}>
             {acting === undefined ? 'Pick who you are' : <><Avatar name={acting.name} />{acting.name}</>}
             <Chevron />
           </summary>
-          {open ? (
-            <form action={pick} onSubmit={close} role="menu" style={{ position: 'absolute', right: -12, top: 48, zIndex: 20, width: 240, padding: 4, background: color('surface'), border: `1px solid ${color('rule')}`, borderRadius: 8, boxShadow: '0 8px 24px rgba(0, 0, 0, 0.12)' }}>
-              {people.map(person => (
-                <button key={person.id} type="submit" name="person" value={person.id} role="menuitemradio" aria-checked={person.id === acting?.id} className="hov" style={item}>
-                  <Avatar name={person.name} />
-                  {person.name}
-                  {person.id === acting?.id ? <Tick /> : null}
-                </button>
-              ))}
-            </form>
-          ) : null}
+          <form action={pick} onSubmit={close} role="menu" style={{ position: 'absolute', right: -12, top: 48, zIndex: 20, width: 240, padding: 4, background: color('surface'), border: `1px solid ${color('rule')}`, borderRadius: 8, boxShadow: '0 8px 24px rgba(0, 0, 0, 0.12)' }}>
+            {people.map(person => (
+              <button key={person.id} type="submit" name="person" value={person.id} role="menuitemradio" aria-checked={person.id === acting?.id} className="hov" style={item}>
+                <Avatar name={person.name} />
+                {person.name}
+                {person.id === acting?.id ? <Tick /> : null}
+              </button>
+            ))}
+          </form>
         </details>
       </div>
     </header>
