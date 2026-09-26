@@ -117,7 +117,7 @@ const stopTurn: StopTurn = async (writer, attempt, now) => {
 
 const steerTurn: SteerTurn = async (writer, attempt, message, action, now) => {
   const sent = await numberCommand(writer, attemptId.parse(attempt), { kind: 'turn.steer', message, action }, now);
-  return typeof sent === 'string' ? 'not-running' : 'sent';
+  return sent === 'no-turn' ? 'starting' : sent === 'ended' ? 'ended' : 'sent';
 };
 
 const byWhom = (request: Applying<RequestKind>): RoutineAction => ({ id: request.action, person: request.person, at: request.at });

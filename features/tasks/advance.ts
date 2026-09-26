@@ -254,11 +254,13 @@ export function refusalOf(kind: PersonAction['kind'], refused: Extract<Acted, { 
   }
 }
 
-export type SteerTurn = (writer: Writer, attempt: string, message: string, action: string, now: Date) => Promise<'sent' | 'not-running'>;
+export type SteerTurn = (writer: Writer, attempt: string, message: string, action: string, now: Date) => Promise<'sent' | 'ended' | 'starting'>;
 
 export type Steered = { readonly recorded: string } | { readonly refused: Instruction };
 
 const notRunning: Instruction = 'The agent is not running, so it cannot read a message. Retry with a note instead.';
+
+const starting: Instruction = 'The agent is still starting, so it cannot read a message yet. Send it again in a moment.';
 
 export async function steerWithin(writer: Transacting, task: string, by: Person, message: string, steerTurn: SteerTurn): Promise<Steered> {
   const earlier = await writer.selectFrom('human_action').select(['human_action.task_id', 'human_action.kind']).where('human_action.id', '=', by.id).executeTakeFirst();
@@ -270,7 +272,8 @@ export async function steerWithin(writer: Transacting, task: string, by: Person,
     .where('attempt.finished_at', 'is', null)
     .forUpdate()
     .executeTakeFirst();
-  if (live === undefined || (await steerTurn(writer, live.id, message, by.id, by.at)) === 'not-running') return { refused: notRunning };
+  const steered = live === undefined ? 'ended' : await steerTurn(writer, live.id, message, by.id, by.at);
+  if (steered !== 'sent') return { refused: steered === 'starting' ? starting : notRunning };
   await writer
     .insertInto('human_action')
     .values({ id: by.id, at: by.at, person_id: by.person, kind: 'steer_task', task_id: task })
