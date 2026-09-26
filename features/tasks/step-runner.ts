@@ -215,9 +215,7 @@ export async function baseOf(db: Database, task: string): Promise<string | null>
   return row?.start_commit ?? null;
 }
 
-export type Repository = { readonly github: string; readonly branch: string };
-
-export async function baseToMerge(db: Database, runner: Pick<StepRunner, 'workflows' | 'agents'>, task: string): Promise<Repository | null> {
+export async function baseToMerge(db: Database, runner: Pick<StepRunner, 'workflows' | 'agents'>, task: string): Promise<{ readonly github: string; readonly branch: string } | null> {
   const row = await db
     .selectFrom('task')
     .leftJoin('repository', 'repository.id', 'task.repository_id')
