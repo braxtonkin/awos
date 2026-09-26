@@ -8,7 +8,7 @@ import type { Step } from './read.ts';
 import { useLive } from './status-card.tsx';
 import { stepName } from './time.ts';
 
-type StepState = 'done' | 'running' | 'waiting' | 'failed' | 'stopped' | 'next';
+type StepState = 'done' | 'running' | 'waiting' | 'failed' | 'stopped' | 'passed' | 'sent-back' | 'next';
 
 const looks: Readonly<Record<StepState, { readonly label: string; readonly tone: ColorName; readonly filled: boolean }>> = {
   done: { label: 'Done', tone: 'ink', filled: true },
@@ -16,6 +16,8 @@ const looks: Readonly<Record<StepState, { readonly label: string; readonly tone:
   waiting: { label: 'Waiting', tone: 'attn', filled: true },
   failed: { label: 'Failed', tone: 'fail', filled: true },
   stopped: { label: 'Stopped', tone: 'muted', filled: true },
+  passed: { label: 'Passed', tone: 'ink', filled: true },
+  'sent-back': { label: 'Sent back', tone: 'muted', filled: true },
   next: { label: 'Not yet', tone: 'faint', filled: false },
 };
 
@@ -33,11 +35,17 @@ function currentState(task: TaskLive): StepState {
   }
 }
 
+function laterState(task: TaskLive, step: Step): StepState {
+  const last = task.attempts.findLast(each => each.step === step.name);
+  if (last === undefined) return 'next';
+  return last.verdict === 'pass' ? 'passed' : 'sent-back';
+}
+
 function statesOf(task: TaskLive, steps: readonly Step[]): readonly StepState[] {
   const current = steps.findIndex(step => step.name === task.step);
-  return steps.map((_, index) => {
+  return steps.map((step, index) => {
     if (task.state === 'done' || index < current) return 'done';
-    return index === current ? currentState(task) : 'next';
+    return index === current ? currentState(task) : laterState(task, step);
   });
 }
 
