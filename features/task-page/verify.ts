@@ -160,6 +160,7 @@ export const screens: readonly Screen[] = [
   task('task-waiting', 'question'),
   task('task-empty', 'nobody-to-run-as'),
   task('task-stopped', 'stopped'),
+  task('task-failed', 'failed-behavior'),
   task('acting-menu', 'running', [{ click: 'summary[aria-label="Acting as"]' }]),
   { name: 'task-not-found', group: 'chrome', path: '/tasks/NOPE-1', seed: 'running', steps: [], height: 900, names: localPeople },
 ];

@@ -17,7 +17,7 @@
       {
         "id": "agent-panel",
         "unit": "U7",
-        "adds": "A plain line at the top of the agent panel saying what the agent is doing now, tool output that names its command, the message box with sent, received, and acted-on states, answering an agent's question in place, Retry with a note, and Stop's final place and sentence."
+        "adds": "A plain line at the top of the agent panel saying what the agent is doing now and whether it waits, who said what in order with times, grouped by attempt, tool output that names its command, the message box with sent, received, and acted-on states, answering an agent's question in place, one sentence on why a failed task failed and what the agent tried, Retry with a note, and Stop's final place and sentence."
       },
       {
         "id": "status-card",
