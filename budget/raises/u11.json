@@ -1,0 +1,17 @@
+{
+  "why": "U11 adds the repositories list and editor as a new feature folder, the save_repository request with its migration and the dashboard's read grants, saveRepository beside setup's repository write, the setup scenario's engine save check, the form scenario, and the smoke lane",
+  "raise": {
+    "characters/docs": 1736,
+    "characters/feature-verification": 12574,
+    "characters/migrations": 2786,
+    "characters/product": 24417,
+    "characters/tools": 115,
+    "lines/docs": 1,
+    "lines/feature-verification": 268,
+    "lines/migrations": 70,
+    "lines/product": 543,
+    "structure/features": 1,
+    "structure/migrations": 2,
+    "structure/verify-scenarios": 1
+  }
+}
