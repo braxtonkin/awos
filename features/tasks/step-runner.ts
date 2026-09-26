@@ -33,6 +33,7 @@ export type Step = {
   readonly runAs: { readonly id: string; readonly name: string; readonly email: string };
   readonly branch: string | null;
   readonly start: string | null;
+  readonly mergeHead: string | null;
   readonly startedAt: Date;
 };
 
@@ -55,6 +56,7 @@ export async function stepOf(db: Database, runner: StepRunner, attempt: string):
       'attempt.routine_version',
       'attempt.branch',
       'attempt.start_commit',
+      'attempt.merge_head',
       'attempt.started_at',
       'task.key',
       'task.title',
@@ -101,11 +103,14 @@ export async function stepOf(db: Database, runner: StepRunner, attempt: string):
     runAs: { id: row.person_id, name: row.person_name, email: row.person_email },
     branch: row.branch,
     start: row.start_commit,
+    mergeHead: row.merge_head,
     startedAt: row.started_at,
   };
 }
 
 const evidenceBody = z.record(z.string(), z.unknown());
+
+const declinedEnd = z.object({ declined: z.string() });
 
 export async function earlierOf(db: Database, task: string): Promise<readonly Earlier[]> {
   const rows = await db
@@ -210,6 +215,22 @@ export async function baseOf(db: Database, task: string): Promise<string | null>
   return row?.start_commit ?? null;
 }
 
+export type Repository = { readonly github: string; readonly branch: string };
+
+export async function baseToMerge(db: Database, runner: Pick<StepRunner, 'workflows' | 'agents'>, task: string): Promise<Repository | null> {
+  const row = await db
+    .selectFrom('task')
+    .leftJoin('repository', 'repository.id', 'task.repository_id')
+    .select(['task.workflow', 'task.step', 'repository.github', 'repository.branch'])
+    .where('task.id', '=', task)
+    .executeTakeFirst();
+  if (row?.github == null || row.branch == null) return null;
+  const kind = runner.workflows.get(row.workflow)?.steps.find(candidate => candidate.name === row.step);
+  const agent = runner.agents.get(row.workflow);
+  if (kind === undefined || agent === undefined || !runByAgent(kind) || kind.afterTurn !== 'push') return null;
+  return agent.workspace({ step: kind.name, earlier: await earlierOf(db, task) }).mergesBase ? { github: row.github, branch: row.branch } : null;
+}
+
 export type Prompt = { readonly prompt: string; readonly outputSchema: Readonly<Record<string, unknown>> };
 
 export type PromptParts = { readonly earlier: readonly Earlier[]; readonly workspace: Workspace; readonly environment: string | null; readonly description: string | null };
@@ -219,7 +240,8 @@ const ranBeforeTurn = (command: string): string =>
 
 export async function promptFor(db: Database, step: Step, { earlier, workspace, environment, description }: PromptParts): Promise<Prompt> {
   const { instructions, skills } = await routineStep(db, step);
-  const input = step.agent.input({ step: step.kind.name, ticket: { key: step.key, title: step.title, description }, earlier });
+  const merge = step.mergeHead === null || step.repository === null ? null : { branch: step.repository.branch, head: step.mergeHead };
+  const input = step.agent.input({ step: step.kind.name, ticket: { key: step.key, title: step.title, description }, earlier, merge });
   const setup = step.repository?.setupCommand ?? null;
   const sections = [
     step.kind.prompt.trim(),
@@ -322,7 +344,8 @@ async function changeOf(tx: Transacting, step: Step): Promise<Change> {
           .where('attempt.verdict', '=', 'lost')
           .where('attempt.last_pushed', '=', step.start)
           .executeTakeFirst();
-  return { pushed: own.last_pushed, carried: carried?.last_pushed ?? null };
+  const ended = await tx.selectFrom('attempt_event').select('body').where('attempt_id', '=', step.attempt).where('kind', '=', 'end').executeTakeFirst();
+  return { pushed: own.last_pushed, carried: carried?.last_pushed ?? null, declined: declinedEnd.safeParse(ended?.body).data?.declined ?? null };
 }
 
 export async function finishStep(runner: StepRunner, tx: Transacting, attempt: string, now: Date): Promise<void> {

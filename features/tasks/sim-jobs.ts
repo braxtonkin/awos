@@ -123,13 +123,13 @@ export function jobs(workflows: Workflows, plug: AgentSteps, mutant: StepMutantN
     return posted;
   };
   const real = async (db: Database, task: string, runAs: string): Promise<Start | null> => {
-    const found = await startOf(db, branchHead, task, runAs);
+    const found = await startOf(db, { branchHead, runner: { workflows, agents: new Map([...workflows.keys()].map(name => [name, agent])) } }, task, runAs);
     return found === null || 'refused' in found ? null : found;
   };
   const start = async (db: Database, task: string, runAs: string): Promise<Start | null> => {
     if (mutant !== 'continue-from-task-head') return real(db, task, runAs);
     const head = await taskBranchHead(db, task);
-    return head === null ? real(db, task, runAs) : { commit: head, inherited: false };
+    return head === null ? real(db, task, runAs) : { commit: head, inherited: false, merge: null };
   };
   return { post, start };
 }

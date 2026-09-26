@@ -28,7 +28,7 @@ const common = z.object({
 const setupCommand = z.string().trim().transform(text => (text === '' ? null : text));
 
 const plan = z.discriminatedUnion('AFTER_TURN', [
-  z.object({ AFTER_TURN: z.literal('push'), SETUP_COMMAND: setupCommand }),
+  z.object({ AFTER_TURN: z.literal('push'), SETUP_COMMAND: setupCommand, MERGE_HEAD: z.union([z.literal(''), commit]).transform(value => (value === '' ? null : value)) }),
   z.object({ AFTER_TURN: z.literal('reproduce'), BASE_COMMIT: commit, SETUP_COMMAND: setupCommand }),
 ]);
 
@@ -146,7 +146,21 @@ export const bridgeGit = (args: readonly string[], given: Run): Promise<string> 
 
 const codexGit = (args: readonly string[], given: Run): Promise<string> => run('git', ['-C', layout.workspace, ...args], given);
 
-export type Ready = { readonly commit: string; readonly branch: string };
+export type Ready = { readonly commit: string; readonly branch: string; readonly merging: string | null };
+
+const mergeRef = 'refs/heads/autoworker-base';
+
+const isAncestor = (git: Git, ancestor: string, commit: string): Promise<boolean> =>
+  git(['merge-base', '--is-ancestor', ancestor, commit]).then(
+    () => true,
+    () => false,
+  );
+
+async function startMerge(agent: Run, merging: string): Promise<void> {
+  await codexGit(['-c', 'merge.conflictStyle=zdiff3', 'merge', '--quiet', '--no-ff', '--no-commit', merging], agent).catch(() => undefined);
+  const started = await codexGit(['rev-parse', '-q', '--verify', 'MERGE_HEAD'], agent).catch(() => '');
+  if (started !== merging) throw new Error(`git did not start merging ${merging} into the workspace`);
+}
 
 export async function prepareWorkspace(env: JobEnvironment): Promise<Ready> {
   const { bridge, codex } = await accounts();
@@ -163,10 +177,13 @@ export async function prepareWorkspace(env: JobEnvironment): Promise<Ready> {
   ] as const) {
     await bridgeGit(['config', key, value], owner);
   }
-  await bridgeGit(['fetch', '--quiet', env.REPO_URL, env.START_COMMIT], owner);
+  const merge = env.AFTER_TURN === 'push' ? env.MERGE_HEAD : null;
+  await bridgeGit(['fetch', '--quiet', env.REPO_URL, env.START_COMMIT, ...(merge === null ? [] : [merge])], owner);
   await bridgeGit(['update-ref', ref, env.START_COMMIT], owner);
   await bridgeGit(['symbolic-ref', 'HEAD', ref], owner);
-  await bridgeGit(['bundle', 'create', '--quiet', layout.startBundle, ref], owner);
+  const merging = merge !== null && !(await isAncestor(asGit(owner), merge, env.START_COMMIT)) ? merge : null;
+  if (merging !== null) await bridgeGit(['update-ref', mergeRef, merging], owner);
+  await bridgeGit(['bundle', 'create', '--quiet', layout.startBundle, ref, ...(merging === null ? [] : [mergeRef])], owner);
   await run('git', ['clone', '--quiet', '--no-checkout', layout.startBundle, layout.workspace], agent);
   for (const [key, value] of [
     ['user.name', env.GIT_AUTHOR_NAME],
@@ -178,8 +195,9 @@ export async function prepareWorkspace(env: JobEnvironment): Promise<Ready> {
   await bridgeGit(['read-tree', 'HEAD'], owner);
   const heads = [await bridgeGit(['rev-parse', 'HEAD'], owner), await codexGit(['rev-parse', 'HEAD'], agent)];
   if (heads.some(head => head !== env.START_COMMIT)) throw new Error(`the workspace is at ${heads.join(' and ')}, not the start commit ${env.START_COMMIT}`);
+  if (merging !== null) await startMerge(agent, merging);
   await run('sh', ['-c', 'umask 077 && mkdir -p "$1" && cat > "$1/auth.json"', 'sh', layout.codexHome], { ...agent, input: env.CODEX_AUTH_JSON });
-  return { commit: env.START_COMMIT, branch: env.ATTEMPT_BRANCH };
+  return { commit: env.START_COMMIT, branch: env.ATTEMPT_BRANCH, merging };
 }
 
 export const setupMs = 600_000;
@@ -230,17 +248,56 @@ const asGit =
   (args, input) =>
     bridgeGit(args, input === undefined ? owner : { ...owner, input });
 
-export type StepPush = { readonly pushed: string } | { readonly unchanged: string };
+export type MergeCheck = { readonly start: string; readonly merge: string; readonly tree: string };
+
+const marker = /^([<=>|])\1{6}( |$)/;
+
+const listed = (files: readonly string[]): string => files.map(file => `\`${file}\``).join(', ');
+
+const changedFiles = async (git: Git, from: string, to: string): Promise<ReadonlySet<string>> =>
+  new Set((await git(['diff-tree', '-r', '-z', '--name-only', '--no-renames', from, to])).split('\0').filter(file => file !== ''));
+
+const linesAt = async (git: Git, at: string, file: string): Promise<ReadonlySet<string>> => new Set((await git(['cat-file', 'blob', `${at}:${file}`]).catch(() => '')).split('\n'));
+
+export async function mergeProblem(git: Git, { start, merge, tree }: MergeCheck): Promise<string | null> {
+  const common = await git(['merge-base', start, merge]);
+  const [theirs, ours, kept] = await Promise.all([changedFiles(git, common, merge), changedFiles(git, common, start), changedFiles(git, start, tree)]);
+  const marked: string[] = [];
+  for (const file of [...theirs].filter(changed => ours.has(changed))) {
+    const [now, before, incoming] = await Promise.all([linesAt(git, tree, file), linesAt(git, start, file), linesAt(git, merge, file)]);
+    if ([...now].some(line => marker.test(line) && !before.has(line) && !incoming.has(line))) marked.push(file);
+  }
+  if (marked.length > 0) return `${listed(marked)} still ${marked.length === 1 ? 'holds' : 'hold'} conflict markers`;
+  const dropped = [...theirs].filter(file => !ours.has(file) && !kept.has(file));
+  return dropped.length > 0 ? `the merge takes back what the base branch changed in ${listed(dropped)}` : null;
+}
+
+const probe = (codex: Account, args: readonly string[]): Promise<RanScript> =>
+  contained('git', ['-C', layout.workspace, ...args], { as: codex, cwd: '/', env: { PATH: path(), HOME: codex.home, ...quiet }, timeoutMs: 60_000, graceMs: 100 });
+
+async function stillMerging(codex: Account, merge: string): Promise<boolean> {
+  const head = await probe(codex, ['rev-parse', '-q', '--verify', 'MERGE_HEAD']);
+  if (head.exitCode === 0 && head.output.trim() === merge) return true;
+  return (await probe(codex, ['merge-base', '--is-ancestor', merge, 'HEAD'])).exitCode === 0;
+}
+
+export type StepPush = { readonly pushed: string } | { readonly unchanged: string } | { readonly declined: string };
 
 export async function pushStep(env: JobEnvironment, message: string, lastPushed: string | undefined, baseline: Baseline | null = null): Promise<StepPush> {
-  const { bridge } = await accounts();
+  const { bridge, codex } = await accounts();
   const owner = asBridge(bridge, env);
-  await bridgeGit(['add', '--all'], owner);
-  const tree = baseline === null ? await bridgeGit(['write-tree'], owner) : await withoutSetup(asGit(owner), baseline);
-  const [parent = '', parentTree = '', before = ''] = (await bridgeGit(['rev-parse', 'HEAD', 'HEAD^{tree}', `${lastPushed ?? env.START_COMMIT}^{tree}`], owner)).split('\n');
-  const head = tree === parentTree ? parent : await bridgeGit(['commit-tree', tree, '-p', parent, '-m', message], owner);
-  if (head !== parent) await bridgeGit(['update-ref', 'HEAD', head], owner);
-  if (tree === before) return { unchanged: head };
+  const git = asGit(owner);
+  await git(['add', '--all']);
+  const tree = baseline === null ? await git(['write-tree']) : await withoutSetup(git, baseline);
+  const [parent = '', parentTree = '', before = ''] = (await git(['rev-parse', 'HEAD', 'HEAD^{tree}', `${lastPushed ?? env.START_COMMIT}^{tree}`])).split('\n');
+  const merge = env.AFTER_TURN === 'push' && env.MERGE_HEAD !== null && !(await isAncestor(git, env.MERGE_HEAD, parent)) ? env.MERGE_HEAD : null;
+  if (merge !== null) {
+    const problem = (await stillMerging(codex, merge)) ? await mergeProblem(git, { start: parent, merge, tree }) : `the workspace no longer holds the merge of ${merge}, so the pull request would still conflict with its base branch`;
+    if (problem !== null) return { declined: problem };
+  }
+  const head = merge !== null ? await git(['commit-tree', tree, '-p', parent, '-p', merge, '-m', message]) : tree === parentTree ? parent : await git(['commit-tree', tree, '-p', parent, '-m', message]);
+  if (head !== parent) await git(['update-ref', 'HEAD', head]);
+  if (merge === null && tree === before) return { unchanged: head };
   const ref = `refs/heads/${env.ATTEMPT_BRANCH}`;
   try {
     await bridgeGit(['push', '--quiet', '--no-verify', `--force-with-lease=${ref}:${lastPushed ?? ''}`, env.REPO_URL, `HEAD:${ref}`], owner);

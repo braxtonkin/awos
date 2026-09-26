@@ -208,7 +208,7 @@ const owes = (verdicted: Verdicted): readonly Owe[] => {
 };
 
 const simAgent: AgentSteps = {
-  workspace: () => ({ setup: false }),
+  workspace: () => ({ setup: false, mergesBase: false }),
   input: ({ ticket }) => `Ticket ${ticket.key}: ${ticket.title}`,
   settle: ({ output }) => ({ output, evidence: null, observed: null }),
   owes,

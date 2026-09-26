@@ -11,11 +11,13 @@ export type Ticket = { readonly key: string; readonly title: string; readonly de
 
 export type History = { readonly step: string; readonly earlier: readonly Earlier[] };
 
-export type Workspace = { readonly setup: boolean };
+export type Workspace = { readonly setup: boolean; readonly mergesBase: boolean };
 
-export type StepInput = History & { readonly ticket: Ticket };
+export type BaseMerge = { readonly branch: string; readonly head: string };
 
-export type Change = { readonly pushed: string | null; readonly carried: string | null };
+export type StepInput = History & { readonly ticket: Ticket; readonly merge: BaseMerge | null };
+
+export type Change = { readonly pushed: string | null; readonly carried: string | null; readonly declined: string | null };
 
 export type Reply = { readonly step: string; readonly output: unknown; readonly change: Change; readonly reproduction: Reproduction | null };
 

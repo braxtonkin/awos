@@ -1,9 +1,10 @@
-import { parseArgs } from 'node:util';
+import { isDeepStrictEqual, parseArgs } from 'node:util';
 import { z } from 'zod';
 import { builtByStep, shapeOf, type StepVerdict, type Unasked } from '../../shared/workflow.ts';
 import { fail, pass, type Check, type Scenario } from '../../tools/verify/check.ts';
 import { modelShape, shapeDrift } from '../../tools/verify/model-shape.ts';
-import type { Change, PullRequestFact } from '../../shared/agent-step.ts';
+import type { Change, Earlier, PullRequestFact } from '../../shared/agent-step.ts';
+import { decideLand, guarded, isConflictSendBack, sentBack } from './land.ts';
 import { reproductionPath, type RanScript, type Reproduction, type Side } from '../../shared/reproduction.ts';
 import { agentSteps } from './stage-output.ts';
 import { defineModel, type Shape } from '../../tools/verify/models.ts';
@@ -83,7 +84,7 @@ const settleCases: readonly (readonly [string, Reproduction | null, 'fixed' | 's
 function settleChecks(): readonly Check[] {
   return settleCases.map(([what, reproduction, expected]) => {
     const name = `Verify's behavior comes from the Job's own runs, whatever the agent says: ${what}`;
-    const settled = agentSteps.settle({ step: 'verify', output: { outcome: 'done', summary: 'Ran both.', blocks: [], behavior: 'fixed' }, change: { pushed: null, carried: null }, reproduction });
+    const settled = agentSteps.settle({ step: 'verify', output: { outcome: 'done', summary: 'Ran both.', blocks: [], behavior: 'fixed' }, change: { pushed: null, carried: null, declined: null }, reproduction });
     const behavior = typeof settled.output === 'object' && settled.output !== null && 'behavior' in settled.output ? settled.output.behavior : 'missing';
     const kept = JSON.stringify(settled.evidence) === JSON.stringify(reproduction);
     return behavior === expected && kept ? pass(name, `behavior ${String(expected)}, evidence ${settled.evidence === null ? 'none' : 'stored as posted'}`) : fail(name, `behavior ${String(behavior)}, not ${String(expected)}; evidence ${kept ? 'as posted' : 'changed'}`);
@@ -92,20 +93,73 @@ function settleChecks(): readonly Check[] {
 
 const doneImplement = { outcome: 'done', summary: 'Implemented the ticket.', blocks: [{ kind: 'text', title: null, body: 'Added the function.' }] };
 
-const implementCases: readonly (readonly [string, Change, Unasked | null])[] = [
-  ['an attempt that pushed a commit', { pushed: 'a'.repeat(40), carried: null }, null],
-  ["an attempt that pushed nothing but started from a lost attempt's push", { pushed: null, carried: 'b'.repeat(40) }, null],
-  ['an attempt that pushed nothing and carried nothing, so the agent made no change', { pushed: null, carried: null }, 'fail'],
+const implementCases: readonly (readonly [string, Change, Unasked | null, string])[] = [
+  ['an attempt that pushed a commit', { pushed: 'a'.repeat(40), carried: null, declined: null }, null, 'Added the function.'],
+  ["an attempt that pushed nothing but started from a lost attempt's push", { pushed: null, carried: 'b'.repeat(40), declined: null }, null, 'Added the function.'],
+  ['an attempt that pushed nothing and carried nothing, so the agent made no change', { pushed: null, carried: null, declined: null }, 'fail', 'made no change'],
+  [
+    'an attempt whose merge the Job declined to push, with the reason it gave',
+    { pushed: null, carried: null, declined: '`src/a.ts` still holds conflict markers' },
+    'fail',
+    'AutoWorker pushed nothing, because `src/a.ts` still holds conflict markers.',
+  ],
 ];
 
 function implementChecks(): readonly Check[] {
-  return implementCases.map(([what, change, expected]) => {
+  return implementCases.map(([what, change, expected, says]) => {
     const name = `Implement's verdict comes from its change: ${what}`;
     const settled = agentSteps.settle({ step: 'implement', output: doneImplement, change, reproduction: null });
     const said = JSON.stringify(settled.output);
-    const explained = expected === null || said.includes('made no change');
-    return settled.observed === expected && explained ? pass(name, `observed ${String(settled.observed)}`) : fail(name, `observed ${String(settled.observed)}, not ${String(expected)}; output ${said.slice(0, 200)}`);
+    return settled.observed === expected && said.includes(says) ? pass(name, `observed ${String(settled.observed)}`) : fail(name, `observed ${String(settled.observed)}, not ${String(expected)}; output ${said.slice(0, 200)}`);
   });
+}
+
+const doneReview = { outcome: 'done', summary: 'Done.', blocks: [{ kind: 'text', title: null, body: 'Done.' }] };
+
+const waitingTasksLand = { outcome: 'done', summary: 'Land sent the task back to Implement.', blocks: [{ kind: 'text', title: null, body: 'Land sent the task back, because the pull request conflicts with its base branch.' }] };
+
+const noChangeOutput = { outcome: 'fail', summary: 'The agent made no change.', blocks: [{ kind: 'text', title: null, body: 'Implement made no change: the attempt pushed no commit.' }] };
+
+const entry = (step: string, verdict: Earlier['verdict'], output: unknown = doneReview): Earlier => ({ step, verdict, output, evidence: null });
+
+const passedOnce = [entry('specify', 'pass'), entry('implement', 'pass'), entry('verify', 'pass')];
+
+const conflicted = [...passedOnce, entry('land', 'red_check', waitingTasksLand)];
+
+const baseHead = 'd'.repeat(40);
+
+const reworkInput = (earlier: readonly Earlier[]): string =>
+  agentSteps.input({ step: 'implement', ticket: { key: 'SBX-49', title: 'Add scores', description: null }, earlier, merge: { branch: 'main', head: baseHead } });
+
+function reworkChecks(): readonly Check[] {
+  const merges: readonly (readonly [string, string, readonly Earlier[], boolean])[] = [
+    ["Implement right after Land's conflict send-back, whose output is the exact one the five waiting tasks hold", 'implement', conflicted, true],
+    ['the third Implement attempt after that send-back, once two reworks failed', 'implement', [...conflicted, entry('implement', 'fail', noChangeOutput), entry('implement', 'fail', noChangeOutput)], true],
+    ['Implement after Land sent the task back for a red check', 'implement', [...passedOnce, entry('land', 'red_check', sentBack('a check failed: sandbox'))], false],
+    ['Implement after the rework passed and Verify sent the task back', 'implement', [...conflicted, entry('implement', 'pass'), entry('verify', 'behavior_fail')], false],
+    ["Verify after Land's conflict send-back", 'verify', conflicted, false],
+  ];
+  const decided = merges.map(([what, step, earlier, expected]) => {
+    const name = `the plug merges the base only into an Implement attempt that Land's conflict sent back since Implement last passed: ${what}`;
+    const got = agentSteps.workspace({ step, earlier }).mergesBase;
+    return got === expected ? pass(name, `mergesBase ${String(got)}`) : fail(name, `mergesBase ${String(got)}, not ${String(expected)}`);
+  });
+  const reading = { number: 7, state: { head: 'c'.repeat(40), value: { kind: 'conflicting' as const } }, draft: 'when-green' as const };
+  const record = { draftLeaves: 'when-green' as const, answered: [], markedReady: false, refused: null, updatedAt: null, gatesApproved: true, evidence: '' };
+  const { decision } = decideLand(reading, record, guarded);
+  const written = decision.kind === 'send-back' ? sentBack(decision.why) : decision;
+  const landName = "Land's conflict send-back writes the exact output the five waiting tasks hold, and the plug recognizes it";
+  const first = reworkInput(conflicted);
+  const third = reworkInput([...conflicted, entry('implement', 'fail', noChangeOutput), entry('implement', 'fail', noChangeOutput)]);
+  const told = (input: string): boolean => input.includes('Land sent the task back, because the pull request conflicts with its base branch.') && input.includes(`AutoWorker started merging \`${baseHead}\`, the head of \`main\``);
+  const firstName = 'the first rework is told that the pull request conflicts, and which base commit AutoWorker started merging';
+  const thirdName = 'the third rework is still told about the conflict and the merge, and why its last attempt failed';
+  return [
+    ...decided,
+    isDeepStrictEqual(written, waitingTasksLand) && isConflictSendBack(written) ? pass(landName, JSON.stringify(written)) : fail(landName, JSON.stringify(written)),
+    told(first) && !first.includes('Your last attempt') ? pass(firstName, first.slice(-400)) : fail(firstName, first),
+    told(third) && third.includes('Your last attempt at this step failed.') && third.includes('Implement made no change') ? pass(thirdName, third.slice(-500)) : fail(thirdName, third),
+  ];
 }
 
 const verdictedVerify = (evidence: Reproduction, pullRequest: PullRequestFact) => ({
@@ -477,7 +531,7 @@ export const scenarios: readonly Scenario[] = [
   {
     name: 'code-change',
     summary: "checks the Code change declaration against the task model's shape and runs each step's judge on reviews of every outcome",
-    run: () => Promise.resolve([shapeCheck(), builtCheck(), ...judgeChecks(), ...settleChecks(), ...pullEvidenceChecks(), ...unopenedEvidenceChecks(), ...implementChecks(), promptCheck()]),
+    run: () => Promise.resolve([shapeCheck(), builtCheck(), ...judgeChecks(), ...settleChecks(), ...pullEvidenceChecks(), ...unopenedEvidenceChecks(), ...implementChecks(), ...reworkChecks(), promptCheck()]),
   },
   landModel,
   {

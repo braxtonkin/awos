@@ -67,7 +67,11 @@ export function applier(): Applier {
   };
 }
 
-export type AfterTurn<T = undefined> = (turn: TurnCompleted, prepared: T) => Promise<readonly LineBody[]>;
+export type TurnEnd = { readonly lines: readonly LineBody[]; readonly declined: string | null };
+
+export type AfterTurn<T = undefined> = (turn: TurnCompleted, prepared: T) => Promise<TurnEnd>;
+
+const nothingAfter: TurnEnd = { lines: [], declined: null };
 
 export type TurnSteps<T> = { readonly beforeTurn: () => Promise<T>; readonly afterTurn: AfterTurn<T> };
 
@@ -226,11 +230,11 @@ export async function runBridge<T>(settings: BridgeSettings, steps: TurnSteps<T>
       const interrupted = completed.data.params.turn.status === 'interrupted';
       void quiet()
         .then(() => storedOrFenced())
-        .then(async () => (interrupted || fenced ? [] : steps.afterTurn(completed.data.params, await prepared)))
+        .then(async () => (interrupted || fenced ? nothingAfter : steps.afterTurn(completed.data.params, await prepared)))
         .then(
-          lines => {
+          ({ lines, declined }) => {
             for (const body of lines) box.push(body);
-            endLine = box.push({ kind: 'end' });
+            endLine = box.push(declined === null ? { kind: 'end' } : { kind: 'end', declined });
             posting.nudge();
           },
           (error: unknown) => {

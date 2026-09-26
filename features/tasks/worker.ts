@@ -5,7 +5,7 @@ import { abandon, advance } from './advance.ts';
 import { claim, claimable, holdingLaunch, jobCreated, park, renew, unlaunched, type Start } from './claim.ts';
 import { continuation } from './continuation.ts';
 import type { RunAsRule } from './run-as.ts';
-import { baseOf, earlierOf, promptFor, stepOf, type Prompt, type StepRunner } from './step-runner.ts';
+import { baseOf, baseToMerge, earlierOf, promptFor, stepOf, type Prompt, type StepRunner } from './step-runner.ts';
 
 export type JobRequest = {
   readonly attempt: string;
@@ -47,7 +47,11 @@ const reason = (error: unknown): string => (error instanceof Error ? error.messa
 const turnStarted = async (db: Database, attempt: string): Promise<boolean> =>
   (await db.selectFrom('attempt_command').select('attempt_command.seq').where('attempt_command.attempt_id', '=', attempt).where('attempt_command.kind', '=', 'turn.start').executeTakeFirst()) !== undefined;
 
-export async function startOf(db: Database, branchHead: WorkerSettings['branchHead'], task: string, runAs: string): Promise<Start | { readonly refused: Instruction } | null> {
+export type StartReads = { readonly branchHead: WorkerSettings['branchHead']; readonly runner: Pick<StepRunner, 'workflows' | 'agents'> };
+
+type Begun = Omit<Start, 'merge'> | { readonly refused: Instruction } | null;
+
+async function begun(db: Database, branchHead: WorkerSettings['branchHead'], task: string, runAs: string): Promise<Begun> {
   const found = await continuation(db, task);
   switch (found.from) {
     case 'lost':
@@ -61,6 +65,15 @@ export async function startOf(db: Database, branchHead: WorkerSettings['branchHe
     case 'nowhere':
       return null;
   }
+}
+
+export async function startOf(db: Database, reads: StartReads, task: string, runAs: string): Promise<Start | { readonly refused: Instruction } | null> {
+  const start = await begun(db, reads.branchHead, task, runAs);
+  if (start === null || 'refused' in start) return start;
+  const base = await baseToMerge(db, reads.runner, task);
+  if (base === null) return { ...start, merge: null };
+  const read = await reads.branchHead(runAs, base.github, base.branch);
+  return 'refused' in read ? read : { ...start, merge: read.head === start.commit ? null : read.head };
 }
 
 async function launchHeld(db: Database, settings: WorkerSettings, attempt: string, now: Date): Promise<string> {
@@ -103,7 +116,7 @@ async function launchHeld(db: Database, settings: WorkerSettings, attempt: strin
     plan:
       step.kind.afterTurn === 'reproduce'
         ? { kind: 'reproduce', base: (await baseOf(db, step.task)) ?? step.start, setup: step.repository.setupCommand }
-        : { kind: 'push', setup: workspace.setup ? step.repository.setupCommand : null },
+        : { kind: 'push', setup: workspace.setup ? step.repository.setupCommand : null, merge: step.mergeHead },
     attemptToken: token,
     runAs: step.runAs,
   });
@@ -120,7 +133,7 @@ const launchAttempt = async (db: Database, settings: WorkerSettings, attempt: st
 
 async function take(db: Database, settings: WorkerSettings, task: string, now: Date): Promise<string> {
   const runAs = await settings.runAs(db, task);
-  const start = runAs === null ? null : await startOf(db, settings.branchHead, task, runAs);
+  const start = runAs === null ? null : await startOf(db, { branchHead: settings.branchHead, runner: settings.runner }, task, runAs);
   if (start !== null && 'refused' in start) return `parked task ${task} before its claim: ${(await park(db, task, start.refused)) ? start.refused : 'it was no longer ready'}`;
   const claimed = await claim(db, task, now, settings.startLeaseMs, runAs, start);
   if ('refused' in claimed) return `did not claim task ${task}: ${claimed.refused}${'parked' in claimed && claimed.parked ? ', and parked it' : ''}`;

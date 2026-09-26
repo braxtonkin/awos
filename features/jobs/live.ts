@@ -191,7 +191,7 @@ async function start(world: World, options: Options = {}): Promise<Started> {
     image: options.image ?? world.image,
     repositoryUrl: options.repositoryUrl ?? thisRepository,
     startCommit: options.startCommit ?? pinnedCommit,
-    plan: options.plan ?? { kind: 'push' as const, setup: null },
+    plan: options.plan ?? { kind: 'push' as const, setup: null, merge: null },
     attemptToken: token,
     engineUrl: options.engineUrl ?? `http://${world.address}:9`,
     runAs: { name: 'Probe Person', email: 'probe@example.com', githubToken: world.githubToken, codexLogin: world.login },

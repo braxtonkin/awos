@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from 'node:util';
 import { actionKinds, owe, ticket, type ActionSpec, type Owe, type Stands } from '../../shared/actions.ts';
 import { mergeState, type Answered, type MergeState, type ReadMergeState } from '../../shared/merge-state.ts';
 import type { Review } from '../../shared/review.ts';
@@ -5,6 +6,8 @@ import type { Instruction, Unasked } from '../../shared/workflow.ts';
 import type { workflow } from './workflow.ts';
 
 export const landStep: (typeof workflow)['steps'][number]['name'] = 'land';
+
+export const conflictWhy = 'the pull request conflicts with its base branch';
 
 export type DraftSetting = 'when-green' | 'at-once';
 
@@ -130,7 +133,7 @@ export const rules: readonly Rule[] = [
       return { kind: 'fail', why: `the merge queue ejected the pull request${value.kind === 'ejected' ? `: ${value.reason}` : ''}`, answers: unansweredEjection(seen) };
     },
   },
-  { name: 'conflicting', when: seen => seen.guards.ConflictSendsBack && is('conflicting')(seen), then: () => ({ kind: 'send-back', why: 'the pull request conflicts with its base branch' }) },
+  { name: 'conflicting', when: seen => seen.guards.ConflictSendsBack && is('conflicting')(seen), then: () => ({ kind: 'send-back', why: conflictWhy }) },
   { name: 'ready at once', when: seen => atOnce(seen) && !seen.record.markedReady, then: oweAction('mark-ready') },
   {
     name: 'still a draft',
@@ -188,6 +191,10 @@ const said = (summary: string, body: string, answers: Answer | null = null): Lan
   blocks: [{ kind: 'text', title: null, body }],
   ...(answers === null ? {} : { answers }),
 });
+
+export const sentBack = (why: string): LandOutput => said('Land sent the task back to Implement.', `Land sent the task back, because ${why}.`);
+
+export const isConflictSendBack = (output: unknown): boolean => isDeepStrictEqual(output, sentBack(conflictWhy));
 
 export type TicketStatuses = { readonly start: string | null; readonly end: string | null };
 
@@ -257,7 +264,7 @@ async function act(land: Land, task: AtLand, attempt: string, reading: Reading, 
     case 'fail':
       return done(await store.finish(attempt, 'fail', said('Land failed this attempt.', `Land failed the attempt, because ${decision.why}.`, decision.answers), nothingFollows), `failed the attempt, because ${decision.why}`);
     case 'send-back':
-      return done(await store.finish(attempt, 'red_check', said('Land sent the task back to Implement.', `Land sent the task back, because ${decision.why}.`), nothingFollows), `sent the task back, because ${decision.why}`);
+      return done(await store.finish(attempt, 'red_check', sentBack(decision.why), nothingFollows), `sent the task back, because ${decision.why}`);
     case 'answer-review': {
       const { review } = decision;
       const body = [`${review.reviewer} asked for changes.`, review.body, ...review.comments.map(comment => `${comment.path ?? 'the pull request'}${comment.line === null ? '' : `:${String(comment.line)}`}: ${comment.body}`)].join('\n');

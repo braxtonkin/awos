@@ -68,6 +68,7 @@ export interface Attempt {
   last_pushed: string | null;
   lease_until: Timestamp;
   live: Generated<boolean | null>;
+  merge_head: string | null;
   output: Json | null;
   routine_id: Int8;
   routine_version: number;

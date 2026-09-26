@@ -16,7 +16,7 @@ import { liveScenario } from './live.ts';
 import { jobName } from './launch.ts';
 import { imageReference } from './settings.ts';
 import { sweepOnce } from './sweep.ts';
-import { withoutSetup, type Baseline, type Git } from './workspace.ts';
+import { mergeProblem, withoutSetup, type Baseline, type Git } from './workspace.ts';
 
 const run = promisify(execFile);
 const root = fileURLToPath(new URL('../../', import.meta.url));
@@ -43,7 +43,7 @@ const launchWith = (login: string, guard = 'true'): string =>
     "const image = imageReference.parse('example.com/job@sha256:' + '0'.repeat(64));",
     "const settings = { image, namespace: 'default', serviceAccount: 'autoworker-job', deadlineSeconds: 60 };",
     "const copy = accessOnly('{}');",
-    `export const planted = ${guard} ? manifests({ attempt: '1', taskKey: 'K-1', branch: 'autoworker/K-1-attempt-1', step: 'specify', image, repositoryUrl: 'https://example.com/r.git', startCommit: '', plan: { kind: 'push', setup: null }, attemptToken: '', engineUrl: '', runAs: { name: 'n', email: 'e@example.com', githubToken: 't', codexLogin: ${login} } }, settings) : copy;`,
+    `export const planted = ${guard} ? manifests({ attempt: '1', taskKey: 'K-1', branch: 'autoworker/K-1-attempt-1', step: 'specify', image, repositoryUrl: 'https://example.com/r.git', startCommit: '', plan: { kind: 'push', setup: null, merge: null }, attemptToken: '', engineUrl: '', runAs: { name: 'n', email: 'e@example.com', githubToken: 't', codexLogin: ${login} } }, settings) : copy;`,
   ].join('\n');
 
 const typePlants = [
@@ -287,11 +287,46 @@ async function setupOutputChecks(): Promise<readonly Check[]> {
   });
 }
 
+const treeWith = async ({ git, write }: Repo, from: string, files: Readonly<Record<string, string | null>>): Promise<string> => {
+  await git(['read-tree', from]);
+  for (const [file, content] of Object.entries(files)) {
+    if (content === null) await git(['rm', '--cached', '--quiet', '--ignore-unmatch', file]);
+    else {
+      await write(file, content);
+      await git(['add', file]);
+    }
+  }
+  return git(['write-tree']);
+};
+
+const commitWith = async (repo: Repo, parent: string, files: Readonly<Record<string, string>>): Promise<string> => repo.git(['commit-tree', await treeWith(repo, parent, files), '-p', parent, '-m', 'side']);
+
+async function mergeGuardChecks(): Promise<readonly Check[]> {
+  return inRepo({ 'README.md': 'readme' }, async (repo, common) => {
+    const start = await commitWith(repo, common, { 'src/a.ts': 'ours' });
+    const merge = await commitWith(repo, common, { 'src/a.ts': 'theirs', 'notes.md': 'the base moved' });
+    const cases: readonly (readonly [string, Readonly<Record<string, string | null>>, string | null])[] = [
+      ["a resolution that keeps both sides' changes", { 'src/a.ts': 'ours\ntheirs', 'notes.md': 'the base moved' }, null],
+      ["the task's own version of the conflicted file, with the base's other change kept", { 'src/a.ts': 'ours', 'notes.md': 'the base moved' }, null],
+      ['conflict markers left in the conflicted file', { 'src/a.ts': '<<<<<<< HEAD\nours\n||||||| base\n=======\ntheirs\n>>>>>>> base', 'notes.md': 'the base moved' }, '`src/a.ts` still holds conflict markers'],
+      ['a change only the base made, taken back', { 'src/a.ts': 'ours\ntheirs', 'notes.md': null }, 'the merge takes back what the base branch changed in `notes.md`'],
+    ];
+    const checks: Check[] = [];
+    for (const [what, files, expected] of cases) {
+      const problem = await mergeProblem(repo.git, { start, merge, tree: await treeWith(repo, start, files) });
+      const name = `the bridge publishes a merge of the base only when its tree holds the base: ${what}`;
+      checks.push(problem === expected ? pass(name, problem ?? 'published') : fail(name, `${problem ?? 'published'}, not ${expected ?? 'published'}`));
+    }
+    return checks;
+  });
+}
+
 export const scenarios: readonly Scenario[] = [
   {
     name: 'jobs',
-    summary: "proves the launcher's invariants without a cluster: the AccessOnlyLogin input, the digest-only image column, the boundaries of services/job, the pins, and a push tree that leaves out the setup's own changes",
-    run: async () => [typeGuards(), ...(await boundaryPlants()), await imageColumn(), refreshTokenRefused(), await pins(), await sweepPastAFailure(), ...(await setupOutputChecks())],
+    summary:
+      "proves the launcher's invariants without a cluster: the AccessOnlyLogin input, the digest-only image column, the boundaries of services/job, the pins, a push tree that leaves out the setup's own changes, and the guards on a merge of the base",
+    run: async () => [typeGuards(), ...(await boundaryPlants()), await imageColumn(), refreshTokenRefused(), await pins(), await sweepPastAFailure(), ...(await setupOutputChecks()), ...(await mergeGuardChecks())],
   },
   liveScenario,
 ];

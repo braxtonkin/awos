@@ -23,7 +23,7 @@ if ('problems' in env) {
 } else {
   try {
     const ready = await prepareWorkspace(env);
-    say(`workspace ready at ${ready.commit} on ${ready.branch}`);
+    say(`workspace ready at ${ready.commit} on ${ready.branch}${ready.merging === null ? '' : `, merging ${ready.merging}`}`);
     const { codex } = await accounts();
     const ending = await runBridge(
       {
@@ -47,15 +47,19 @@ if ('problems' in env) {
           if (env.AFTER_TURN === 'reproduce') {
             const reproduction = await reproduce(env, { base: env.BASE_COMMIT, change: env.START_COMMIT, setup: env.SETUP_COMMAND });
             say(reproduction.state === 'ran' ? `reproduced on ${env.BASE_COMMIT} and ${env.START_COMMIT}` : `reproduced nothing: ${reproduction.reason}`);
-            return [{ kind: 'reproduced', reproduction }];
+            return { lines: [{ kind: 'reproduced', reproduction }], declined: null };
           }
           const pushed = await pushStep(env, `AutoWorker attempt ${env.ATTEMPT_ID}`, undefined, baseline);
+          if ('declined' in pushed) {
+            say(`the bridge pushed nothing, because ${pushed.declined}`);
+            return { lines: [], declined: pushed.declined };
+          }
           if ('unchanged' in pushed) {
             say(`the step changed nothing, so the bridge pushed nothing past ${pushed.unchanged}`);
-            return [];
+            return { lines: [], declined: null };
           }
           say(`pushed ${pushed.pushed} to ${env.ATTEMPT_BRANCH}`);
-          return [{ kind: 'pushed', commit: pushed.pushed, branch: env.ATTEMPT_BRANCH }];
+          return { lines: [{ kind: 'pushed', commit: pushed.pushed, branch: env.ATTEMPT_BRANCH }], declined: null };
         },
       },
       say,

@@ -732,6 +732,18 @@ Rejected options:
 - **Setup before every agent step.** Specify changes no file, and eight Specify Jobs start together at the head of every batch.
 - **Setup as the `reproduce` user.** Only `codex` can write `/workspace`. The setup can read the Codex login, as the agent's own `npm ci` could before.
 
+### A conflict rework merges the base head its claim read
+
+Decided 26 Sep 2026 after the same run, where five of eight tasks waited with "The Implement step failed 3 times in a row". Land sent each conflicting pull request back with `red_check`, but the rework started from the task's head on the old base, the Job fetched only that commit, and `cameBack` forgot the send-back after the first failed rework, so each agent pushed nothing. Now Code change's plug says an Implement attempt merges the base when Land's exact conflict output, which the five waiting tasks hold too, came after Implement last passed. The claim reads the base branch's head with the `git ls-remote` a first attempt uses and records it as `attempt.merge_head`, so the stored prompt and a retried launch name one commit. The Job fetches it with the start commit and starts `git merge --no-commit` as `codex` before the turn. After the turn the bridge commits a merge with that head as its second parent only while the agent's repository still holds the merge, no conflicted file holds a new conflict marker, and no file only the base changed is back to the branch's version. Otherwise it pushes nothing, and the end line's `declined` reason fails the attempt and reaches the next one. A merge counts as the attempt's change, and every other push keeps F3. `Land.tla` already assumed a rework clears the conflict, so no model changes, and the e2e fault `base-conflict` proves the path on kind.
+
+Rejected options:
+
+- **Land records the base head from its GraphQL read.** The five waiting tasks' outputs hold no head, so they would need a second rule.
+- **The worker reads the base head at launch and stores nothing.** The prompt is stored once, but a retried launch rebuilds the Secret, so the two could name different commits.
+- **The Job reads the base itself.** The prompt, stored before the Job runs, could not name the commit.
+- **The agent runs the merge, and the bridge always adds the base as a parent.** After an aborted merge that publishes a commit that reverts the base.
+- **A verdict or route of its own for a conflict.** It needs an enum migration and every record of verdicts, and `red_check` already returns to Implement.
+
 ## Open
 
 Each open question names the current lean or default. A lean is not a decision.

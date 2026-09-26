@@ -41,7 +41,7 @@ const labelValue = (text: string): string =>
 export const imageFor = (settings: JobSettings, repositoryImage: ImageReference | null): ImageReference => repositoryImage ?? settings.image;
 
 const planKeys = (plan: JobPlan): PlanKeys =>
-  plan.kind === 'push' ? { AFTER_TURN: 'push', SETUP_COMMAND: plan.setup ?? '' } : { AFTER_TURN: 'reproduce', BASE_COMMIT: plan.base, SETUP_COMMAND: plan.setup ?? '' };
+  plan.kind === 'push' ? { AFTER_TURN: 'push', SETUP_COMMAND: plan.setup ?? '', MERGE_HEAD: plan.merge ?? '' } : { AFTER_TURN: 'reproduce', BASE_COMMIT: plan.base, SETUP_COMMAND: plan.setup ?? '' };
 
 export function manifests(input: LaunchInput, settings: JobSettings): Manifests {
   const name = jobName(input.attempt);
