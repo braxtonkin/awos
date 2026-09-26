@@ -17,8 +17,8 @@
       "files": [
         "**/fixtures/**"
       ],
-      "lines": 434,
-      "characters": 71256
+      "lines": 438,
+      "characters": 74390
     },
     {
       "name": "e2e-harness",
@@ -26,8 +26,8 @@
       "files": [
         "features/e2e/**"
       ],
-      "lines": 5860,
-      "characters": 294643,
+      "lines": 5901,
+      "characters": 296628,
       "longest-line": 471
     },
     {
@@ -71,8 +71,8 @@
         "tools/**",
         "eslint.config.ts"
       ],
-      "lines": 6936,
-      "characters": 313943,
+      "lines": 7041,
+      "characters": 319918,
       "longest-line": 547
     },
     {
@@ -83,7 +83,7 @@
         "*.md"
       ],
       "lines": 697,
-      "characters": 181234
+      "characters": 182297
     },
     {
       "name": "product",
@@ -93,8 +93,8 @@
         "services/**",
         "shared/**"
       ],
-      "lines": 8872,
-      "characters": 408897,
+      "lines": 8906,
+      "characters": 410715,
       "longest-line": 374
     }
   ],
