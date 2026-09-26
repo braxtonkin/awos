@@ -1,7 +1,7 @@
 import type { Scenario } from '../../tools/verify/check.ts';
 import type { Lane } from '../../tools/verify/dashboard.ts';
 import type { Screen } from '../../tools/verify/screens/screens.ts';
-import { loginLanes, loginNeverShown } from './login-lanes.ts';
+import { loginLanes, loginNeverShown } from './live.ts';
 import { lanes as peopleLanes, seededNames } from './lanes.ts';
 
 export const scenarios: readonly Scenario[] = [loginNeverShown];
