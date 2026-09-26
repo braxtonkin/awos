@@ -14,7 +14,7 @@ export function TaskNotFound({ open }: TaskNotFoundProps) {
         <label htmlFor="task-key" style={{ fontSize: 13, color: color('muted') }}>
           Task key
         </label>
-        <input id="task-key" name="key" required autoComplete="off" spellCheck={false} className="mono" style={{ ...field, width: 200 }} />
+        <input id="task-key" name="key" required autoComplete="off" spellCheck={false} style={{ ...field, width: 200 }} />
         <button type="submit" className="hov" style={{ ...field, fontWeight: 500, cursor: 'pointer' }}>
           Open task
         </button>
