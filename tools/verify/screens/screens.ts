@@ -2,6 +2,7 @@ import { mkdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
+import { sql } from 'kysely';
 import type { Browser } from 'playwright-core';
 import { z } from 'zod';
 import { open, record, run, shoot, withBrowser, type Script, type Served, type Step, type Theme } from '../browser.ts';
@@ -284,18 +285,21 @@ export const screens = (declared: readonly Screen[]): Scenario => ({
       const taken = await capture(browser, fixtureTarget(control), limits, folder);
       const lines: Line[] = [renders(taken), ...controlStillFails(taken, limits)];
       if (selected.length === 0) return [...lines, info(`no feature declares a screen in ${group ?? 'all'}`, 'n/a', 'a feature adds screens by exporting them from its verify.ts')];
-      for (const shot of await captureDeclared(browser, selected, limits, folder)) lines.push(renders(shot), ...gateLines(shot, limits));
+      for (const shot of (await captureDeclared(browser, selected, limits, folder)).captures) lines.push(renders(shot), ...gateLines(shot, limits));
       return lines;
     });
   },
 });
 
-export async function captureDeclared(browser: Browser, selected: readonly Screen[], limits: Limits, folder: string): Promise<readonly Capture[]> {
+export type Declared = { readonly captures: readonly Capture[]; readonly people: readonly string[] };
+
+export async function captureDeclared(browser: Browser, selected: readonly Screen[], limits: Limits, folder: string): Promise<Declared> {
   const echo = (line: string): void => {
     process.stdout.write(`${line}\n`);
   };
   await buildDashboard(false, echo);
   const taken = new Map<Screen, Capture>();
+  const everyone = new Set<string>();
   for (const members of Map.groupBy(selected, each => (each.alone === true ? each.seed : '')).values()) {
     await withWorld([...new Set(members.map(each => each.seed))], echo, async world => {
       for (const each of members) {
@@ -304,7 +308,9 @@ export async function captureDeclared(browser: Browser, selected: readonly Scree
         const url = `${world.origin}${each.path.replace('{key}', encodeURIComponent(key))}`;
         taken.set(each, await capture(browser, { name: each.name, url, steps: [...actAs(actingPerson), ...each.steps], height: each.height, names: each.names ?? people }, limits, folder));
       }
+      const seeded = await sql<{ name: string }>`select name from person where kind = 'person' order by name`.execute(world.owner);
+      for (const row of seeded.rows) everyone.add(row.name);
     });
   }
-  return selected.flatMap(each => taken.get(each) ?? []);
+  return { captures: selected.flatMap(each => taken.get(each) ?? []), people: [...everyone].toSorted() };
 }

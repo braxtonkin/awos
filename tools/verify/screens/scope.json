@@ -1,0 +1,29 @@
+{
+  "chrome": {
+    "shows": [
+      "The task's header: its routine, key, title, repository, who it runs as, and when it was found.",
+      "The status card: the task's state mark and one sentence that says what it is doing, what it waits for, or who stopped it.",
+      "The agent's conversation as stored, streaming live while the agent runs, grouped by step and try, with times.",
+      "Stop, at the top right of a task whose agent runs or waits, and its answer: Sending, Stopped, Waiting for the engine, or why it was refused.",
+      "The Acting as menu in the top bar, which picks the person the dashboard acts as.",
+      "A not-found page for a key no task has, with a field that opens a task by its key."
+    ],
+    "later": [
+      {
+        "id": "top-bar-links",
+        "unit": "U6",
+        "adds": "Links in the top bar to Needs you, the board, and all tasks, and the pages they open. Until then no page links to a list of tasks."
+      },
+      {
+        "id": "agent-panel",
+        "unit": "U7",
+        "adds": "A plain line at the top of the agent panel saying what the agent is doing now and whether it waits, who said what in order with times, grouped by attempt, tool output that names its command, the message box with sent, received, and acted-on states, answering an agent's question in place, one sentence on why a failed task failed and what the agent tried, Retry with a note, and Stop's final form: shown only while an attempt runs, beside the panel, with the sentence \"Stopping keeps the work already pushed.\""
+      },
+      {
+        "id": "status-card",
+        "unit": "U8",
+        "adds": "The status card's next action, such as Approve, Send back, or Retry, a waiting reason shown as its instruction, the stepper of the task's steps, open reviews, and the evidence and attempts tabs."
+      }
+    ]
+  }
+}

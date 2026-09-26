@@ -9,7 +9,7 @@ import { buildAttemptImage, ensureRegistry, gitServer, jobNamespace, kindAddress
 import { kind } from '../../tools/verify/kind.ts';
 import { withPostgres } from '../../tools/verify/postgres.ts';
 import { accessCopy, actAs, applySetup, closeStore, fakeCodexLogin, openStore, standInImage, startEngine, until, type Engine, type Store } from './autoworker.ts';
-import { standInPlan, ticking } from './codex-stand-in.ts';
+import { standInPlan, tickPrefix, ticking } from './codex-stand-in.ts';
 
 const owner = 'owner@example.com';
 const repository = 'lane/sandbox';
@@ -141,11 +141,11 @@ const waitForRunningPod = (world: World, attempt: string, ms = stepWaitMs): Prom
 async function storedTicks(world: World, attempt: string): Promise<readonly string[]> {
   const rows = await world.store.db
     .selectFrom('attempt_event')
-    .select(sql<string>`body -> 'params' -> 'item' ->> 'text'`.as('text'))
+    .select(sql<string>`body -> 'params' -> 'item' ->> 'id'`.as('item'))
     .where('attempt_id', '=', attempt)
     .where('method', '=', 'item/completed')
     .execute();
-  return rows.map(row => row.text).filter(text => /^tick \d+$/.test(text));
+  return rows.map(row => row.item).filter(item => item.startsWith(tickPrefix));
 }
 
 async function overheadCheck(world: World, label: string, attempt: string | undefined): Promise<Check> {
@@ -254,7 +254,7 @@ async function outage(world: World, image: string): Promise<readonly Check[]> {
     engine = startEngine(world.store, engineSettings(world, image), world.out);
     const reason = await waitForWait(world, key);
     const stored = specify === undefined ? [] : await storedTicks(world, specify.id);
-    const expected = Array.from({ length: ticks }, (_, index) => `tick ${String(index + 1)}`);
+    const expected = Array.from({ length: ticks }, (_, index) => `${tickPrefix}${String(index + 1)}`);
     const seqs = specify === undefined ? [] : await world.store.db.selectFrom('attempt_event').select('seq').where('attempt_id', '=', specify.id).orderBy('seq').execute();
     const gaps = seqs.filter((row, index) => index > 0 && Number(row.seq) !== Number(seqs[index - 1]?.seq ?? 0) + 1).length;
     await actAs(world.store, ['stop', key, '--as', owner]);

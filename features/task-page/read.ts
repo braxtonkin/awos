@@ -116,6 +116,11 @@ export async function taskIdOf(db: Database, key: string): Promise<string | unde
   return (await db.selectFrom('task').select('task.id').where('task.key', '=', key).executeTakeFirst())?.id;
 }
 
+export async function keyAsStored(db: Database, typed: string): Promise<string> {
+  const found = await db.selectFrom('task').select('task.key').where(eb => eb(eb.fn<string>('upper', ['task.key']), '=', typed.toUpperCase())).orderBy('task.key').executeTakeFirst();
+  return found?.key ?? typed;
+}
+
 export async function readTask(db: Database, key: string): Promise<TaskPageData | undefined> {
   const header = await db
     .selectFrom('task')

@@ -1,0 +1,14 @@
+{
+  "why": "U4b fixes the task page, adds a scope note to screen review, and makes the stand-in stream real-looking work",
+  "raise": {
+    "characters/docs": 1063,
+    "characters/e2e-harness": 1992,
+    "characters/fixtures": 3134,
+    "characters/product": 1856,
+    "characters/tools": 5975,
+    "lines/e2e-harness": 41,
+    "lines/fixtures": 4,
+    "lines/product": 34,
+    "lines/tools": 105
+  }
+}

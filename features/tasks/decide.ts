@@ -36,8 +36,10 @@ const gatesFirst = (step: string): Instruction =>
 const approveOrSendBack = (step: string, key: string, next: string): Instruction =>
   `Approve ${step} for task ${key} to go on to ${next}, or send it back with a note to run ${step} again. AutoWorker starts the next step once you approve.`;
 
-const answerAndApprove = (step: string, key: string): Instruction =>
-  `Answer the review ${step} left for task ${key}, then press Approve to run ${step} again with your answers, or send it back with a note.`;
+const titled = (step: string): string => `${step.charAt(0).toUpperCase()}${step.slice(1)}`;
+
+const answerAndApprove = (step: string): Instruction =>
+  `Answer the question ${titled(step)} asked, then press Approve to run it again, or send it back with a note.`;
 
 const after = (workflow: Workflow, name: string): string | undefined => workflow.steps[workflow.steps.findIndex(kind => kind.name === name) + 1]?.name;
 
@@ -88,7 +90,7 @@ function judged(workflow: Workflow, task: Task, kind: StepKind, failure: Failure
     case 'ask':
       return task.inputWaits >= caps.inputWaits
         ? failed(task, kind)
-        : { ...kept(task), inputWaits: task.inputWaits + 1, standing: { state: 'waiting', on: 'answer', reason: answerAndApprove(kind.name, task.key), review: attempt } };
+        : { ...kept(task), inputWaits: task.inputWaits + 1, standing: { state: 'waiting', on: 'answer', reason: answerAndApprove(kind.name), review: attempt } };
     case 'return': {
       const rounds = countOf(task.counts, failure.counter) + 1;
       return rounds >= failure.cap

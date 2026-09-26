@@ -31,7 +31,7 @@
     ],
     "chrome": [
       { "id": "chrome-acting", "question": "Who are you acting as right now?" },
-      { "id": "chrome-switch", "question": "How do you switch to acting as Priya Raman?" },
+      { "id": "chrome-switch", "question": "How do you switch to acting as {person}?" },
       { "id": "chrome-back", "question": "How do you get back to the tasks that need you?" }
     ],
     "controls": [
