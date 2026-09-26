@@ -1,3 +1,4 @@
+import type { Batch } from '../../tools/verify/batch.ts';
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { setTimeout as wait } from 'node:timers/promises';
@@ -112,3 +113,5 @@ const savedAsVersionTwo: Lane = {
 };
 
 export const lanes: readonly Lane[] = [savedAsVersionTwo];
+
+export const batch: Batch = { scenarios: [], engine: [['setup'], ['requests-sim', '--mutant', 'all'], ['routines-sim', '--mutant', 'all']] };

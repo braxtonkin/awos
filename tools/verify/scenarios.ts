@@ -4,6 +4,7 @@ import { pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
 import { accounts } from './accounts.ts';
 import { dashboardGrants } from './dashboard-grants.ts';
+import { batch, dashboardBatch, type Batch } from './batch.ts';
 import { dashboardLane, isLane, type Lane } from './dashboard.ts';
 import { checksOf, fail, pass, type Line, type Scenario } from './check.ts';
 import { doctor } from './doctor.ts';
@@ -34,14 +35,15 @@ const exists = (path: string): Promise<boolean> =>
     () => false,
   );
 
-type Declared = { readonly scenarios: readonly Scenario[]; readonly screens: readonly Screen[]; readonly lanes: readonly Lane[] };
+type Declared = { readonly scenarios: readonly Scenario[]; readonly screens: readonly Screen[]; readonly lanes: readonly Lane[]; readonly batches: readonly Batch[] };
 
 async function featureModules(root: string): Promise<Declared> {
   const features = join(root, 'features');
-  if (!(await exists(features))) return { scenarios: [], screens: [], lanes: [] };
+  if (!(await exists(features))) return { scenarios: [], screens: [], lanes: [], batches: [] };
   const found: Scenario[] = [];
   const declared: Screen[] = [];
   const lanes: Lane[] = [];
+  const batches: Batch[] = [];
   for (const folder of await readdir(features, { withFileTypes: true })) {
     const file = join(features, folder.name, 'verify.ts');
     if (!folder.isDirectory() || !(await exists(file))) continue;
@@ -65,8 +67,13 @@ async function featureModules(root: string): Promise<Declared> {
       if (!Array.isArray(loaded.lanes) || !loaded.lanes.every(isLane)) throw new Error(`${file} must export lanes, a list of dashboard lanes as tools/verify/dashboard.ts declares them`);
       lanes.push(...loaded.lanes);
     }
+    if ('batch' in loaded) {
+      const parsed = batch.safeParse(loaded.batch);
+      if (!parsed.success) throw new Error(`${file} must export batch, the scenarios and engine checks dashboard-batch runs, as tools/verify/batch.ts declares it: ${parsed.error.message}`);
+      batches.push(parsed.data);
+    }
   }
-  return { scenarios: found, screens: declared, lanes };
+  return { scenarios: found, screens: declared, lanes, batches };
 }
 
 export async function runScenario(scenario: Scenario, args: readonly string[]): Promise<readonly Line[]> {
@@ -133,9 +140,13 @@ const sims = (features: readonly Scenario[]): Scenario => ({
 });
 
 export async function loadScenarios(root: string): Promise<ReadonlyMap<string, Scenario>> {
-  const { scenarios: features, screens: declared, lanes } = await featureModules(root);
+  const { scenarios: features, screens: declared, lanes, batches } = await featureModules(root);
   const registry = new Map<string, Scenario>();
-  for (const scenario of [guardrails, doctor, migrations, kind, accounts, screens(declared), screenGates, screenReview(declared), dashboardLane(lanes), dashboardGrants, models(features), sims(features), ...features]) {
+  const runNamed = (name: string, args: readonly string[]): Promise<readonly Line[]> => {
+    const scenario = registry.get(name);
+    return scenario === undefined ? Promise.resolve([fail(`a scenario named ${name} exists`, 'a feature registered it in its batch, but no scenario has that name')]) : runScenario(scenario, args);
+  };
+  for (const scenario of [guardrails, doctor, migrations, kind, accounts, screens(declared), screenGates, screenReview(declared), dashboardLane(lanes), dashboardBatch({ screens: declared, lanes, batches }, runNamed), dashboardGrants, models(features), sims(features), ...features]) {
     if (registry.has(scenario.name)) throw new Error(`two scenarios are named ${scenario.name}`);
     registry.set(scenario.name, scenario);
   }

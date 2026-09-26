@@ -271,7 +271,7 @@ export const screenGates: Scenario = {
   },
 };
 
-export const screens = (declared: readonly Screen[]): Scenario => ({
+export const screens = (declared: readonly Screen[], folder: string = shotsOf('screens')): Scenario => ({
   name: 'screens',
   summary: `captures every declared screen of a group, or all, at 1440 by 900 in both themes and judges each gate, beside the busy control; the groups are ${groups.join(', ')}`,
   run: async args => {
@@ -280,7 +280,6 @@ export const screens = (declared: readonly Screen[]): Scenario => ({
     if (rest.length > 0 || (group !== 'all' && known === undefined)) throw new Error(`screens takes one argument, all or a group: ${groups.join(', ')}`);
     const selected = declared.filter(each => group === 'all' || each.group === known);
     const limits = await readLimits();
-    const folder = shotsOf('screens');
     return withBrowser(async browser => {
       const taken = await capture(browser, fixtureTarget(control), limits, folder);
       const lines: Line[] = [renders(taken), ...controlStillFails(taken, limits)];

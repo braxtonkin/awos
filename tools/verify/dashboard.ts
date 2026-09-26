@@ -109,7 +109,13 @@ export type World = {
   readonly engineSaid: () => string;
 };
 
-const seedLine = /^seed ([a-z-]+): (\S+) /;
+const seedLine = /^seed ([a-z-]+(?:@[a-z0-9-]+)?): (\S+) /;
+
+export type Started = { readonly seeds: readonly string[]; readonly readySeconds: number };
+
+const started: Started[] = [];
+
+export const worldsStarted = (): readonly Started[] => [...started];
 
 async function loginUrl(owner: Kysely<unknown>, ownerUrl: string): Promise<string> {
   const password = randomBytes(18).toString('hex');
@@ -127,6 +133,7 @@ export const agents = ['stand-in', 'real'] as const;
 export type Agent = (typeof agents)[number];
 
 export async function withWorld<T>(seeds: readonly string[], echo: (line: string) => void, work: (world: World) => Promise<T>, agent: Agent = 'stand-in'): Promise<T> {
+  const began = performance.now();
   const key = { CREDENTIAL_KEY: randomBytes(32).toString('base64'), CREDENTIAL_KEY_VERSION: '1' };
   const engine = startChild([process.execPath, join(root, 'tools/verify/main.ts'), 'local-engine', ...seeds.flatMap(seed => ['--seed', seed]), '--agent', agent], key, line => {
     echo(`local-engine: ${line}`);
@@ -152,11 +159,11 @@ export async function withWorld<T>(seeds: readonly string[], echo: (line: string
     const port = await freePort();
     const origin = `http://127.0.0.1:${String(port)}`;
     const database = await loginUrl(owner, ownerUrl);
-    const started = startChild([process.execPath, next, 'start', dashboardFolder, '-p', String(port), '-H', '127.0.0.1'], { DATABASE_URL: database, NEXT_TELEMETRY_DISABLED: '1', ...key }, line => {
+    dashboard = startChild([process.execPath, next, 'start', dashboardFolder, '-p', String(port), '-H', '127.0.0.1'], { DATABASE_URL: database, NEXT_TELEMETRY_DISABLED: '1', ...key }, line => {
       echo(`dashboard: ${line}`);
     });
-    dashboard = started;
     await until('the dashboard answering', dashboardReadyMs, () => fetch(`${origin}/tasks/NOPE-1`).then(response => response.status === 404, () => false));
+    started.push({ seeds, readySeconds: (performance.now() - began) / 1000 });
     echo(`dashboard ready at ${origin}`);
     const command = (sent: string, answer: string) => async (): Promise<void> => {
       const before = engine.said().length;
@@ -172,20 +179,86 @@ export async function withWorld<T>(seeds: readonly string[], echo: (line: string
   }
 }
 
-export type Lane = { readonly unit: string; readonly id: string; readonly seeds: readonly string[]; readonly run: (world: World, browser: Browser, shots: string) => Promise<readonly Line[]> };
+export type Lane = {
+  readonly unit: string;
+  readonly id: string;
+  readonly seeds: readonly string[];
+  readonly run: (world: World, browser: Browser, shots: string) => Promise<readonly Line[]>;
+  readonly alone?: true;
+  readonly agent?: 'real';
+};
 
 export const isLane = (value: unknown): value is Lane =>
-  typeof value === 'object' && value !== null && 'unit' in value && typeof value.unit === 'string' && 'id' in value && typeof value.id === 'string' && 'seeds' in value && Array.isArray(value.seeds) && 'run' in value && typeof value.run === 'function';
+  typeof value === 'object' &&
+  value !== null &&
+  'unit' in value &&
+  typeof value.unit === 'string' &&
+  'id' in value &&
+  typeof value.id === 'string' &&
+  'seeds' in value &&
+  Array.isArray(value.seeds) &&
+  'run' in value &&
+  typeof value.run === 'function' &&
+  (!('alone' in value) || value.alone === true) &&
+  (!('agent' in value) || value.agent === 'real');
 
-const shotsFolder = (unit: string): string => join(root, '.shots', unit);
+const wholeWorldSeeds: ReadonlySet<string> = new Set(['all', 'no-tasks', 'no-routines', 'login-expired']);
+
+export type Group = { readonly lanes: readonly Lane[]; readonly agent: Agent };
+
+const tagOf = (lane: Lane): string => `${lane.unit}-${lane.id}`.toLowerCase().replaceAll(/[^a-z0-9-]/g, '-');
+
+const seedArgument = (lane: Lane, seed: string): string => (wholeWorldSeeds.has(seed) ? seed : `${seed}@${tagOf(lane)}`);
+
+export function groupsOf(lanes: readonly Lane[], forced: Agent | undefined): readonly Group[] {
+  const alone = (lane: Lane): boolean => lane.alone === true || lane.agent === 'real' || forced === 'real';
+  const worldKey = (lane: Lane): string => (lane.seeds.some(seed => wholeWorldSeeds.has(seed)) ? lane.seeds.toSorted().join(' ') : '');
+  const shared = [...Map.groupBy(lanes.filter(lane => !alone(lane)), worldKey).values()].map(members => ({ lanes: members, agent: 'stand-in' as const }));
+  return [...shared, ...lanes.filter(alone).map(lane => ({ lanes: [lane], agent: forced ?? lane.agent ?? 'stand-in' }))];
+}
+
+function laneWorld(world: World, lane: Lane): World {
+  const tag = tagOf(lane);
+  const entries = [...world.keys].map(([label, key]) => ({ name: label.split('@')[0] ?? label, instance: label.split('@')[1], key }));
+  const keys = new Map([...entries.filter(entry => entry.instance === undefined), ...entries.filter(entry => entry.instance === tag)].map(entry => [entry.name, entry.key] as const));
+  const refuse = (): Promise<void> => Promise.reject(new Error(`lane ${lane.unit} ${lane.id} stops the engine, which every lane in its world would feel, so declare it alone: true`));
+  return { ...world, keys, holdEngine: lane.alone === true ? world.holdEngine : refuse };
+}
+
+export type Ran = { readonly lane: Lane; readonly lines: readonly Line[]; readonly seconds: number };
+
+export async function runGroups(groups: readonly Group[], browser: Browser, shots: string, echo: (line: string) => void): Promise<readonly Ran[]> {
+  const ran: Ran[] = [];
+  for (const group of groups) {
+    const seeds = [...new Set(group.lanes.flatMap(lane => lane.seeds.map(seed => seedArgument(lane, seed))))];
+    echo(`world of ${group.lanes.map(lane => `${lane.unit} ${lane.id}`).join(', ')} with ${seeds.join(' ')}`);
+    const done = new Set<Lane>();
+    const failed = (error: unknown): void => {
+      const detail = error instanceof Error ? error.message : String(error);
+      for (const lane of group.lanes.filter(each => !done.has(each))) ran.push({ lane, lines: [fail(`lane ${lane.id} runs to completion`, detail)], seconds: 0 });
+    };
+    await withWorld(seeds, echo, async world => {
+      for (const lane of group.lanes) {
+        const started = performance.now();
+        const lines = await lane.run(laneWorld(world, lane), browser, join(shots, lane.unit)).catch((error: unknown) => [fail(`lane ${lane.id} runs to completion`, error instanceof Error ? error.message : String(error))]);
+        done.add(lane);
+        ran.push({ lane, lines, seconds: (performance.now() - started) / 1000 });
+      }
+    }, group.agent).catch(failed);
+  }
+  return ran;
+}
+
+const shotsRoot = join(root, '.shots');
 
 export const dashboardLane = (declared: readonly Lane[]): Scenario => ({
   name: 'dashboard-lane',
-  summary: "builds the dashboard when its sources changed, starts local-engine with the lane's seeds and the dashboard as child processes, runs the named lanes of a unit in a browser, and saves their screenshots under .shots/<unit>/; dashboard-lane <unit> <lane>... or all, and --agent real runs real Codex from the live service's login",
+  summary:
+    "builds the dashboard when its sources changed, runs the named lanes of a unit in a browser against local-engine and the dashboard, as few worlds as dashboard-batch would start for them, and saves their screenshots under .shots/<unit>/; dashboard-lane <unit> <lane>... or all, and --agent real runs real Codex from the live service's login",
   run: async args => {
-    const { values, positionals } = parseArgs({ args: [...args], options: { agent: { type: 'string', default: 'stand-in' } }, strict: true, allowPositionals: true });
-    const agent = agents.find(name => name === values.agent);
-    if (agent === undefined) throw new Error(`--agent takes ${agents.join(' or ')}`);
+    const { values, positionals } = parseArgs({ args: [...args], options: { agent: { type: 'string' } }, strict: true, allowPositionals: true });
+    const agent = values.agent === undefined ? undefined : agents.find(name => name === values.agent);
+    if (values.agent !== undefined && agent === undefined) throw new Error(`--agent takes ${agents.join(' or ')}`);
     const [unit, ...wanted] = positionals;
     const ofUnit = declared.filter(lane => lane.unit === unit);
     const lanes = wanted.includes('all') ? ofUnit : ofUnit.filter(lane => wanted.includes(lane.id));
@@ -194,13 +267,7 @@ export const dashboardLane = (declared: readonly Lane[]): Scenario => ({
       process.stdout.write(`${line}\n`);
     };
     const built = await buildDashboard(false, echo);
-    const lines: Line[] = [info('next build', 'passed', built.seconds === undefined ? built.output : `${built.seconds.toFixed(1)} s`)];
-    await withBrowser(async browser => {
-      for (const lane of lanes) {
-        const ran = await withWorld(lane.seeds, echo, world => lane.run(world, browser, shotsFolder(lane.unit)), agent).catch((error: unknown) => [fail(`lane ${lane.id} runs to completion`, error instanceof Error ? error.message : String(error))]);
-        lines.push(...ran.map(line => ({ ...line, name: `${lane.unit} lane ${lane.id}: ${line.name}` })));
-      }
-    });
-    return lines;
+    const ran = await withBrowser(browser => runGroups(groupsOf(lanes, agent), browser, shotsRoot, echo));
+    return [info('next build', 'passed', built.seconds === undefined ? built.output : `${built.seconds.toFixed(1)} s`), ...ran.flatMap(each => each.lines.map(line => ({ ...line, name: `${each.lane.unit} lane ${each.lane.id}: ${line.name}` })))];
   },
 });

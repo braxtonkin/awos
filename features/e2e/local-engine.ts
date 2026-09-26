@@ -62,7 +62,7 @@ type Then = 'steer' | 'stop';
 
 type Plant =
   | { readonly kind: 'ticket'; readonly routine: Exclude<RoutineName, 'past'>; readonly work: ScriptName | 'catalog'; readonly ticks?: number; readonly assigned: boolean; readonly then?: Then }
-  | { readonly kind: 'past'; readonly key: string }
+  | { readonly kind: 'past' }
   | { readonly kind: 'login' }
   | { readonly kind: 'empty'; readonly routines: boolean };
 
@@ -103,8 +103,8 @@ export const seeds: Readonly<Record<SeedName, Seed>> = {
   'failed-behavior': { plant: { kind: 'ticket', routine: 'work', work: 'stillWrong', assigned: true }, expect: waitsForRetry('verify', 'Retry starts again at Implement, because Verify') },
   'failed-environment': { plant: { kind: 'ticket', routine: 'work', work: 'brokenEnvironment', assigned: true }, expect: waitsForRetry('verify', "Verify's environment failed 4 times in a row.") },
   stopped: { plant: { kind: 'ticket', routine: 'work', work: 'longStream', assigned: true, then: 'stop' }, expect: { kind: 'task', state: 'stopped', step: 'specify', ...quiet } },
-  done: { plant: { kind: 'past', key: 'PAST-1' }, expect: { kind: 'task', state: 'done', step: 'land', ...quiet } },
-  expired: { plant: { kind: 'past', key: 'PAST-2' }, expect: { kind: 'task', state: 'done', step: 'land', ...quiet, aged: true } },
+  done: { plant: { kind: 'past' }, expect: { kind: 'task', state: 'done', step: 'land', ...quiet } },
+  expired: { plant: { kind: 'past' }, expect: { kind: 'task', state: 'done', step: 'land', ...quiet, aged: true } },
   'nobody-to-run-as': { plant: { kind: 'ticket', routine: 'unassigned', work: 'longStream', assigned: false }, expect: waitsForRetry('specify', 'Nobody can run this task yet.') },
   'login-expired': { plant: { kind: 'login' }, expect: { kind: 'login', state: 'invalid' } },
   'no-tasks': { plant: { kind: 'empty', routines: true }, expect: { kind: 'world', routines: true, tasks: 0 } },
@@ -200,7 +200,11 @@ async function worldFacts(db: Database): Promise<Observed> {
   return { kind: 'world', routines: (await count('routine')) > 0, tasks: await count('task') };
 }
 
-type Planted = { readonly name: SeedName; readonly key: string | undefined; done: boolean; observed: Observed };
+type Wanted = { readonly name: SeedName; readonly instance: string };
+
+type Planted = Wanted & { readonly key: string | undefined; done: boolean; observed: Observed };
+
+const labelOf = (wanted: Wanted): string => (wanted.instance === '' ? wanted.name : `${wanted.name}@${wanted.instance}`);
 
 const factsOf = (db: Database, entry: Planted): Promise<Observed> => {
   if (seeds[entry.name].plant.kind === 'login') return loginFacts(db);
@@ -230,8 +234,8 @@ function descriptionOf(plant: Extract<Plant, { kind: 'ticket' }>): { readonly su
   return { summary: work.summary, description: ticks === 0 ? work.description : `${work.description}\n\n${ticking(ticks, 1000)}` };
 }
 
-function setupFile(login: string, wanted: readonly SeedName[], withRoutines: boolean): object {
-  const expired = wanted.includes('login-expired');
+function setupFile(login: string, wanted: readonly Wanted[], withRoutines: boolean): object {
+  const expired = wanted.some(each => each.name === 'login-expired');
   return {
     admin: actingPerson.email,
     people: people.map(person => ({
@@ -322,21 +326,28 @@ async function holdWithCommands(engine: Supervised, signal: AbortSignal, out: (l
   }
 }
 
-type Options = { readonly wanted: readonly SeedName[]; readonly check: boolean; readonly plant: SeedName | undefined; readonly agent: Agent };
+type Options = { readonly wanted: readonly Wanted[]; readonly check: boolean; readonly plant: SeedName | undefined; readonly agent: Agent };
 
 const sharedKey = z.object({ CREDENTIAL_KEY: z.base64().optional() });
 
 const optionsSpec = { seed: { type: 'string', multiple: true }, check: { type: 'boolean', default: false }, plant: { type: 'string' }, agent: { type: 'string', default: 'stand-in' } } as const;
 
+const seedArgument = /^([a-z-]+)(?:@([a-z0-9-]+))?$/;
+
+const wholeWorld = (name: SeedName): boolean => seeds[name].plant.kind === 'login' || seeds[name].plant.kind === 'empty';
+
 function optionsOf(args: readonly string[]): Options | Check {
   const { values } = parseArgs({ args: [...args], options: optionsSpec, strict: true });
-  const given = (values.seed ?? []).flatMap(name => (name === 'all' ? [...seedNames] : [name]));
-  const unknown = given.filter(name => !seedNames.some(seed => seed === name));
-  if (unknown.length > 0) return fail('seeds named', `${unknown.join(', ')} is not a seed; name all or one of ${seedNames.join(', ')}`);
-  const wanted = seedNames.filter(name => given.includes(name));
+  const given = (values.seed ?? []).flatMap(text => (text === 'all' ? [...seedNames] : [text]));
+  const parsed = given.map(text => ({ text, found: seedArgument.exec(text) }));
+  const unknown = parsed.flatMap(({ text, found }) => (seedNames.some(seed => seed === found?.[1]) ? [] : [text]));
+  if (unknown.length > 0) return fail('seeds named', `${unknown.join(', ')} is not a seed; name all or one of ${seedNames.join(', ')}, each with an optional @<instance>`);
+  const wanted = seedNames.flatMap(name => [...new Set(parsed.filter(({ found }) => found?.[1] === name).map(({ found }) => found?.[2] ?? ''))].map(instance => ({ name, instance })));
+  const whole = wanted.filter(each => each.instance !== '' && wholeWorld(each.name));
+  if (whole.length > 0) return fail('seeds named', `${whole.map(labelOf).join(', ')} changes the whole world, so it takes no @<instance>; a lane that names it runs in a world of its own`);
   const plant = values.plant === undefined ? undefined : seedNames.find(name => name === values.plant);
   const target = plant === undefined ? undefined : seeds[plant].expect;
-  if (values.plant !== undefined && (plant === undefined || !wanted.includes(plant) || target?.kind !== 'task' || (target.state !== 'ready' && target.state !== 'waiting'))) {
+  if (values.plant !== undefined && (plant === undefined || !wanted.some(each => each.name === plant) || target?.kind !== 'task' || (target.state !== 'ready' && target.state !== 'waiting'))) {
     return fail('plant named', '--plant takes one seeded task that waits or runs, which local-engine then stops so the check must name it');
   }
   if (plant !== undefined && !values.check) return fail('plant named', '--plant needs --check');
@@ -367,23 +378,23 @@ async function namespaceGone(namespace: string): Promise<boolean> {
 
 async function settle(store: Store, planted: readonly Planted[], signal: AbortSignal, out: (line: string) => void): Promise<void> {
   const deadline = Date.now() + settleMs;
-  const acted = new Set<SeedName>();
+  const acted = new Set<Planted>();
   while (!signal.aborted && Date.now() < deadline && planted.some(entry => !entry.done)) {
     for (const entry of planted.filter(candidate => !candidate.done)) {
       const { plant, expect } = seeds[entry.name];
       entry.observed = await factsOf(store.db, entry);
-      if (plant.kind === 'ticket' && plant.then !== undefined && !acted.has(entry.name) && entry.observed.kind === 'task' && entry.observed.streaming && entry.key !== undefined) {
+      if (plant.kind === 'ticket' && plant.then !== undefined && !acted.has(entry) && entry.observed.kind === 'task' && entry.observed.streaming && entry.key !== undefined) {
         const asked = plant.then === 'steer' ? ['steer', entry.key, '--message', steerText] : ['stop', entry.key];
         const sent = (await actAs(store, [...asked, '--as', actingPerson.email])).code === 0;
         if (sent) {
-          acted.add(entry.name);
-          out(`seed ${entry.name}: ${plant.then === 'steer' ? 'steered' : 'stopped'} ${entry.key} while it streamed`);
+          acted.add(entry);
+          out(`seed ${labelOf(entry)}: ${plant.then === 'steer' ? 'steered' : 'stopped'} ${entry.key} while it streamed`);
         }
         continue;
       }
       if (differences(expect, entry.observed).length === 0) {
         entry.done = true;
-        out(`seed ${entry.name}: ${describe(entry)}`);
+        out(`seed ${labelOf(entry)}: ${describe(entry)}`);
       }
     }
     await wait(pollMs, undefined, { signal }).catch(() => undefined);
@@ -392,7 +403,7 @@ async function settle(store: Store, planted: readonly Planted[], signal: AbortSi
 
 type Plants = { readonly planted: readonly Planted[]; readonly counts: readonly string[] };
 
-async function plantAll(store: Store, local: LocalWorld, wanted: readonly SeedName[], agent: Agent, out: (line: string) => void): Promise<Plants> {
+async function plantAll(store: Store, local: LocalWorld, wanted: readonly Wanted[], agent: Agent, out: (line: string) => void): Promise<Plants> {
   const login = join(store.folder, 'codex.json');
   await writeFile(login, agent === 'real' ? await accessCopy() : fakeCodexLogin(), { mode: 0o600 });
   const secrets = { GITHUB_TOKEN: local.engine.secrets.GITHUB_TOKEN, AUTOWORKER_JIRA_LOGIN: local.engine.secrets.AUTOWORKER_JIRA_LOGIN, [expiredTokenVariable]: 'expired-github-token' };
@@ -403,30 +414,36 @@ async function plantAll(store: Store, local: LocalWorld, wanted: readonly SeedNa
   };
   const planted: Planted[] = [];
   const counts = [await applied(false)];
-  if (wanted.includes('no-routines')) planted.push({ name: 'no-routines', key: undefined, done: true, observed: await worldFacts(store.db) });
-  for (const name of wanted) {
-    const { plant } = seeds[name];
+  const named = (name: SeedName): Wanted | undefined => wanted.find(each => each.name === name);
+  const noRoutines = named('no-routines');
+  if (noRoutines !== undefined) planted.push({ ...noRoutines, key: undefined, done: true, observed: await worldFacts(store.db) });
+  for (const each of wanted) {
+    const { plant } = seeds[each.name];
     if (plant.kind !== 'ticket') continue;
     const { summary, description } = descriptionOf(plant);
     const key = await local.jira.fileTicket({ project, summary, description, label: routines[plant.routine].label, assignee: plant.assigned ? (actingPerson.jiraAccountId ?? null) : null });
-    planted.push({ name, key, done: false, observed: { kind: 'missing', what: `the engine has not found ${key}` } });
+    planted.push({ ...each, key, done: false, observed: { kind: 'missing', what: `the engine has not found ${key}` } });
   }
-  if (wanted.some(name => name !== 'no-routines')) counts.push(await applied(true));
-  if (wanted.includes('no-tasks')) planted.push({ name: 'no-tasks', key: undefined, done: true, observed: await worldFacts(store.db) });
+  if (wanted.some(each => each.name !== 'no-routines')) counts.push(await applied(true));
+  const noTasks = named('no-tasks');
+  if (noTasks !== undefined) planted.push({ ...noTasks, key: undefined, done: true, observed: await worldFacts(store.db) });
   await store.db
     .updateTable('credential')
     .set({ state: 'valid', checked_at: new Date() })
-    .$if(wanted.includes('login-expired'), update =>
+    .$if(named('login-expired') !== undefined, update =>
       update.where('credential.id', 'not in', store.db.selectFrom('credential').innerJoin('person', 'person.id', 'credential.person_id').select('credential.id').where('person.email', '=', actingPerson.email).where('credential.connector', '=', 'github')),
     )
     .execute();
-  for (const name of wanted) {
-    const { plant } = seeds[name];
+  let pasts = 0;
+  for (const each of wanted) {
+    const { plant } = seeds[each.name];
     if (plant.kind === 'past') {
-      out(`seed ${name}: ${await pastSeed(store, name, plant.key)}`);
-      planted.push({ name, key: plant.key, done: false, observed: await taskFacts(store.db, plant.key) });
+      pasts += 1;
+      const key = `PAST-${String(pasts)}`;
+      out(`seed ${labelOf(each)}: ${await pastSeed(store, each.name, key)}`);
+      planted.push({ ...each, key, done: false, observed: await taskFacts(store.db, key) });
     }
-    if (plant.kind === 'login') planted.push({ name, key: undefined, done: false, observed: await loginFacts(store.db) });
+    if (plant.kind === 'login') planted.push({ ...each, key: undefined, done: false, observed: await loginFacts(store.db) });
   }
   return { planted, counts };
 }
@@ -464,7 +481,7 @@ async function hold(signal: AbortSignal, out: (line: string) => void, options: O
             out(`DATABASE_URL=${store.url}`);
             out(`JOB_NAMESPACE=${namespace}`);
             for (const count of counts) out(`setup: ${count}`);
-            for (const entry of planted) out(`seed ${entry.name}: ${describe(entry)}${entry.done ? '' : ', not yet as named'}${entry.key === undefined ? '' : `; attempts: ${await attemptsOf(store.db, entry.key)}`}`);
+            for (const entry of planted) out(`seed ${labelOf(entry)}: ${describe(entry)}${entry.done ? '' : ', not yet as named'}${entry.key === undefined ? '' : `; attempts: ${await attemptsOf(store.db, entry.key)}`}`);
             lines.push(info('seconds to ready', 'passed', ((performance.now() - began) / 1000).toFixed(1)));
             if (options.check) {
               if (options.plant !== undefined) {
@@ -474,7 +491,7 @@ async function hold(signal: AbortSignal, out: (line: string) => void, options: O
               for (const entry of planted) {
                 const observed = await factsOf(store.db, entry);
                 const wrong = differences(seeds[entry.name].expect, observed);
-                const name = `seed ${entry.name} reads back as named`;
+                const name = `seed ${labelOf(entry)} reads back as named`;
                 lines.push(wrong.length === 0 ? pass(name, describe({ ...entry, observed })) : fail(name, wrong.join('; ')));
               }
             } else {

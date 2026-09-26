@@ -1,4 +1,5 @@
 import { setTimeout as wait } from 'node:timers/promises';
+import type { Batch } from '../../tools/verify/batch.ts';
 import { sql } from 'kysely';
 import { connect, type Database } from '../../shared/db/client.ts';
 import { emptyTranscript, reduce } from '../../shared/items.ts';
@@ -193,3 +194,5 @@ export const screens: readonly Screen[] = [
 ];
 
 export const lanes: readonly Lane[] = [...taskLanes, ...agentLanes, ...stateLanes];
+
+export const batch: Batch = { scenarios: [['task-page-stream'], ['review-answers']], engine: [['tasks-sim']] };

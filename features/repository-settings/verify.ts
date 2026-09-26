@@ -1,3 +1,4 @@
+import type { Batch } from '../../tools/verify/batch.ts';
 import { randomUUID } from 'node:crypto';
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -175,6 +176,7 @@ async function nextVerifyPrompt(db: Database, key: string, after: string): Promi
 const regression: Lane = {
   unit,
   id: '1',
+  alone: true,
   seeds: ['failed-behavior'],
   run: async (world, browser, shots) => {
     const key = world.keys.get('failed-behavior');
@@ -206,3 +208,5 @@ const regression: Lane = {
 };
 
 export const lanes: readonly Lane[] = [regression];
+
+export const batch: Batch = { scenarios: [['repository-form']], engine: [['setup'], ['requests-sim', '--mutant', 'all']] };

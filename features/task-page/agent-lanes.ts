@@ -388,6 +388,7 @@ const models = (value: unknown): readonly string[] => {
 const real: Lane = {
   unit,
   id: '9',
+  agent: 'real',
   seeds: ['running'],
   run: async (world, browser, shots) => {
     const key = keyOf(world, 'running');
@@ -516,6 +517,7 @@ async function replayRender(world: World, browser: Parameters<Lane['run']>[1], k
 const perf: Lane = {
   unit,
   id: 'perf',
+  alone: true,
   seeds: ['running'],
   run: async (world, browser) =>
     withDatabase(world, async db => {

@@ -249,6 +249,7 @@ const doubleStop: Lane = {
 const engineDown: Lane = {
   unit,
   id: '5',
+  alone: true,
   seeds: ['running'],
   run: async (world, browser, shots) => {
     const key = keyOf(world, 'running');
@@ -279,6 +280,7 @@ const engineDown: Lane = {
 const reconnect: Lane = {
   unit,
   id: '6',
+  alone: true,
   seeds: ['running'],
   run: async (world, browser, shots) => {
     const key = keyOf(world, 'running');
@@ -426,6 +428,7 @@ const commits = async (db: Database): Promise<number> => {
 const perf: Lane = {
   unit,
   id: 'perf',
+  alone: true,
   seeds: ['running'],
   run: async (world, browser) => {
     const key = keyOf(world, 'running');

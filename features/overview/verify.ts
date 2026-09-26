@@ -1,3 +1,4 @@
+import type { Batch } from '../../tools/verify/batch.ts';
 import { sql } from 'kysely';
 import { connect, type Database } from '../../shared/db/client.ts';
 import { fail, pass, type Check, type Scenario } from '../../tools/verify/check.ts';
@@ -116,3 +117,5 @@ export const screens: readonly Screen[] = [
 ];
 
 export { lanes };
+
+export const batch: Batch = { scenarios: [['overview-read']], engine: [['routines-sim', '--mutant', 'all']] };

@@ -102,6 +102,7 @@ const seenAt = async (page: Page): Promise<number | undefined> => {
 const regression: Lane = {
   unit,
   id: '1',
+  alone: true,
   seeds: ['waiting-gate'],
   run: async (world, browser, shots) => {
     const key = keyOf(world, 'waiting-gate');
@@ -260,6 +261,7 @@ const board: Lane = {
 const filter: Lane = {
   unit,
   id: '6',
+  alone: true,
   seeds: ['stopped', 'running', 'done'],
   run: async (world, browser, shots) => {
     const stopped = keyOf(world, 'stopped');
@@ -456,6 +458,7 @@ async function waitingPaint(db: Database, world: World, browser: Parameters<Lane
 const perf: Lane = {
   unit,
   id: 'perf',
+  alone: true,
   seeds: ['running'],
   run: async (world, browser) => {
     const key = keyOf(world, 'running');
