@@ -43,6 +43,7 @@ const world = z.discriminatedUnion('kind', [
 export type World = z.infer<typeof world>;
 
 const needsYou = z.strictObject({
+  at: moment,
   picked: z.boolean(),
   waiting: z.array(task).readonly(),
   gates: z.array(task).readonly(),

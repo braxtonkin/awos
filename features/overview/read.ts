@@ -45,6 +45,12 @@ const sinceOf = (row: Row): string | null => {
   }
 };
 
+const needRank: Readonly<Record<Mark, number>> = { failed: 0, 'needs-you': 1, running: 2, stopped: 3, landed: 4 };
+
+const rankOf = (task: TaskRow): number => Math.min(...task.marks.map(mark => needRank[mark]));
+
+const byNeed = (a: TaskRow, b: TaskRow): number => rankOf(a) - rankOf(b);
+
 const taskOf = (row: Row): TaskRow => ({
   key: row.key,
   title: row.title,
@@ -150,6 +156,7 @@ export async function readNeedsYou(db: Database, person: string | undefined, now
   const parsed = needsRow.parse(row);
   const waiting = parsed.tasks.map(taskOf);
   return {
+    at: now.toISOString(),
     picked: person !== undefined,
     waiting: waiting.filter(task => task.waitingOn !== 'approval'),
     gates: waiting.filter(task => task.waitingOn === 'approval'),
@@ -233,7 +240,7 @@ export async function readTaskList(db: Database, params: Readonly<Record<string,
     const landedInMs = task.state === 'done' && span.first_started !== null && span.last_finished !== null ? Date.parse(span.last_finished) - Date.parse(span.first_started) : null;
     return [{ ...task, landedInMs }];
   });
-  return { filters, rows: rows.slice(0, listShown), matching: rows.length, routines, people, world };
+  return { filters, rows: rows.toSorted(byNeed).slice(0, listShown), matching: rows.length, routines, people, world };
 }
 
 type Column = { readonly step: string; readonly tasks: readonly TaskRow[] };
@@ -257,7 +264,7 @@ export async function readBoard(db: Database, now: Date): Promise<Board> {
     const unknown = [...new Set(open.map(task => task.step))].filter(step => !published.includes(step));
     return {
       workflow,
-      columns: [...published, ...unknown].map(step => ({ step, tasks: open.filter(task => task.step === step) })),
+      columns: [...published, ...unknown].map(step => ({ step, tasks: open.filter(task => task.step === step).toSorted(byNeed) })),
       landed: mine.length - open.length,
     };
   });

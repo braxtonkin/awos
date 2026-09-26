@@ -4,11 +4,6 @@ const partsIn = (iso: string, zone: string, options: Intl.DateTimeFormatOptions)
 
 export const clock = (iso: string, zone: string): string => partsIn(iso, zone, { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
 
-export const moment = (iso: string, zone: string, now: string): string => {
-  const sameDay = partsIn(iso, zone, { dateStyle: 'short' }) === partsIn(now, zone, { dateStyle: 'short' });
-  return sameDay ? clock(iso, zone) : partsIn(iso, zone, { day: 'numeric', month: 'short' });
-};
-
 export const day = (iso: string, zone: string): string => partsIn(iso, zone, { weekday: 'short', day: 'numeric', month: 'short' });
 
 export const duration = (ms: number): string => {
@@ -18,6 +13,8 @@ export const duration = (ms: number): string => {
   if (ms < dayMs) return `${String(Math.floor(minutes / 60))} h ${String(minutes % 60)} min`;
   return `${String(Math.floor(ms / dayMs))} d ${String(Math.round((ms % dayMs) / 3_600_000))} h`;
 };
+
+export const between = (from: string, to: string): string => duration(Math.max(0, Date.parse(to) - Date.parse(from)));
 
 export const nameOf = (machineName: string): string => {
   const spaced = machineName.replaceAll(/[-_]+/g, ' ');

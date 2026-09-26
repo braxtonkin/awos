@@ -6,7 +6,7 @@ import type { Mark } from '../../shared/task-status.ts';
 import { StatusMarks } from '../../shared/ui/status.tsx';
 import { color } from '../../shared/ui/tokens.ts';
 import { useFrames, type Stream } from '../../shared/ui/use-frames.ts';
-import { day, moment, nameOf } from './format.ts';
+import { between, day, nameOf } from './format.ts';
 import { actionLink, box, EmptyWorld, Heading, page, taskHref } from './parts.tsx';
 import { frame, type Login, type NeedsYou, type TaskRow } from './protocol.ts';
 
@@ -16,13 +16,13 @@ const connectorNames: Readonly<Record<ConnectorKind, string>> = { codex: 'Codex'
 
 const peoplePage = '/people';
 
-const actions: Readonly<Record<NonNullable<TaskRow['waitingOn']>, string>> = { answer: 'Answer', approval: 'Review', outside_approval: 'Check', retry: 'Fix and retry' };
+const actions: Readonly<Record<NonNullable<TaskRow['waitingOn']>, string>> = { answer: 'Answer', approval: 'Approve', outside_approval: 'Check', retry: 'Retry' };
 
-type RowProps = { readonly id: string; readonly marks: readonly Mark[]; readonly title: string; readonly label?: string; readonly detail: string; readonly since: string | null; readonly href: string; readonly action: string; readonly divided: boolean };
+type RowProps = { readonly id: string; readonly marks: readonly Mark[]; readonly title: string; readonly label?: string; readonly detail: string; readonly since: string | null; readonly href: string; readonly action: string; readonly divided: boolean; readonly quiet?: boolean };
 
-function Row({ id, marks, title, label, detail, since, href, action, divided }: RowProps) {
+function Row({ id, marks, title, label, detail, since, href, action, divided, quiet = false }: RowProps) {
   return (
-    <li data-row={id} style={{ display: 'grid', gridTemplateColumns: '176px minmax(0, 1fr) 96px auto', alignItems: 'center', gap: 16, padding: '12px 16px', borderTop: divided ? `1px solid ${color('rule')}` : 'none' }}>
+    <li data-row={id} style={{ display: 'grid', gridTemplateColumns: '176px minmax(0, 1fr) 128px 120px', alignItems: 'center', gap: 16, padding: '12px 16px', borderTop: divided ? `1px solid ${color('rule')}` : 'none' }}>
       <StatusMarks marks={marks} />
       <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
         <span style={{ display: 'flex', alignItems: 'baseline', gap: 8, minWidth: 0 }}>
@@ -32,7 +32,7 @@ function Row({ id, marks, title, label, detail, since, href, action, divided }: 
         <span style={{ fontSize: 13, color: color('muted') }}>{detail}</span>
       </div>
       <span style={{ fontSize: 13, color: color('muted'), textAlign: 'right' }}>{since}</span>
-      <a href={href} data-action={id} style={actionLink}>
+      <a href={href} data-action={id} style={quiet ? { justifySelf: 'end', fontSize: 13, fontWeight: 500, color: color('muted') } : { ...actionLink, justifySelf: 'end' }}>
         {action}
       </a>
     </li>
@@ -53,8 +53,8 @@ function Section({ name, title, count, children }: { readonly name: string; read
 
 const loginSentence = (login: Login, zone: string): string => {
   const name = connectorNames[login.connector];
-  if (login.state === 'invalid') return `${name} no longer accepts your login. Replace it on the People page with a new one.`;
-  return login.expiresAt === null ? `Replace your ${name} login on the People page.` : `Your ${name} login expires on ${day(login.expiresAt, zone)}. Replace it on the People page before then.`;
+  if (login.state === 'invalid') return `${name} no longer accepts your login, so replace it with a new one.`;
+  return login.expiresAt === null ? `Replace your ${name} login.` : `Your ${name} login expires on ${day(login.expiresAt, zone)}, so replace it before then.`;
 };
 
 function Logins({ logins, zone }: { readonly logins: readonly Login[]; readonly zone: string }) {
@@ -68,12 +68,12 @@ function Logins({ logins, zone }: { readonly logins: readonly Login[]; readonly 
   );
 }
 
-const sinceText = (task: TaskRow, zone: string, now: string): string | null => (task.since === null ? null : `since ${moment(task.since, zone, now)}`);
+const sinceText = (task: TaskRow, now: string): string | null => (task.since === null ? null : `${task.state === 'ready' ? 'running' : 'waiting'} ${between(task.since, now)}`);
 
 const runningDetail = (task: TaskRow): string => (task.since === null ? `${nameOf(task.step)} is next, for ${task.person}.` : `${nameOf(task.step)} is running for ${task.person}.`);
 
-const taskRows = (tasks: readonly TaskRow[], zone: string, now: string, detail: (task: TaskRow) => string, action: (task: TaskRow) => string): ReactNode =>
-  tasks.map((task, index) => <Row key={task.key} divided={index > 0} id={task.key} marks={task.marks} label={task.key} title={task.title} detail={detail(task)} since={sinceText(task, zone, now)} href={taskHref(task.key)} action={action(task)} />);
+const taskRows = (tasks: readonly TaskRow[], now: string, detail: (task: TaskRow) => string, action: (task: TaskRow) => string, quiet = false): ReactNode =>
+  tasks.map((task, index) => <Row key={task.key} divided={index > 0} id={task.key} marks={task.marks} label={task.key} title={task.title} detail={detail(task)} since={sinceText(task, now)} href={taskHref(task.key)} action={action(task)} quiet={quiet} />);
 
 const waitingDetail = (task: TaskRow): string => task.waitingReason ?? `${nameOf(task.step)} waits for a person.`;
 
@@ -86,14 +86,14 @@ const summary = (needs: NeedsYou): string | undefined => {
   return count === 1 ? 'One thing waits for you.' : `${String(count)} things wait for you, oldest first.`;
 };
 
-type NeedsYouProps = { readonly initial: NeedsYou; readonly zone: string; readonly now: string };
+type NeedsYouProps = { readonly initial: NeedsYou; readonly zone: string };
 
-export function NeedsYouPage({ initial, zone, now }: NeedsYouProps) {
+export function NeedsYouPage({ initial, zone }: NeedsYouProps) {
   const [needs, setNeeds] = useState(initial);
   useFrames(needsYouStream, frame, next => {
     setNeeds(next.needs);
   });
-  const { world } = needs;
+  const { world, at } = needs;
   return (
     <main style={page} data-live="needs-you">
       <Heading title="Needs you" note={world.kind === 'tasks' ? summary(needs) : undefined} />
@@ -106,17 +106,17 @@ export function NeedsYouPage({ initial, zone, now }: NeedsYouProps) {
         <>
           {needs.waiting.length === 0 ? null : (
             <Section name="waiting" title="Waiting on you" count={needs.waiting.length}>
-              {taskRows(needs.waiting, zone, now, waitingDetail, actionOf)}
+              {taskRows(needs.waiting, at, waitingDetail, actionOf)}
             </Section>
           )}
           {needs.gates.length === 0 ? null : (
             <Section name="gates" title="Approve" count={needs.gates.length}>
-              {taskRows(needs.gates, zone, now, waitingDetail, actionOf)}
+              {taskRows(needs.gates, at, waitingDetail, actionOf)}
             </Section>
           )}
           <Logins logins={needs.logins} zone={zone} />
           <Section name="running" title="Running" count={needs.running.length + needs.moreRunning}>
-            {needs.running.length === 0 ? <li style={{ padding: '12px 16px', color: color('muted') }}>Nothing is running right now.</li> : taskRows(needs.running, zone, now, runningDetail, () => 'Watch')}
+            {needs.running.length === 0 ? <li style={{ padding: '12px 16px', color: color('muted') }}>Nothing is running right now.</li> : taskRows(needs.running, at, runningDetail, () => 'Watch', true)}
             {needs.moreRunning === 0 ? null : (
               <li style={{ padding: '12px 16px', borderTop: `1px solid ${color('rule')}` }}>
                 <a href="/tasks?state=running" style={{ color: color('ink'), fontWeight: 500 }}>

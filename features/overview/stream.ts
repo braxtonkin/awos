@@ -10,7 +10,7 @@ export async function* frames(db: Database, person: string | undefined, signal: 
   let sent = '';
   while (!signal.aborted) {
     const needs = await readNeedsYou(db, person, new Date());
-    const seen = JSON.stringify(needs);
+    const seen = JSON.stringify({ ...needs, at: '' });
     if (seen !== sent) {
       sent = seen;
       yield { data: { kind: 'needs-you', needs } };

@@ -6,14 +6,10 @@
       "The agent's conversation as stored, streaming live while the agent runs, grouped by step and try, with times.",
       "Stop, at the top right of a task whose agent runs or waits, and its answer: Sending, Stopped, Waiting for the engine, or why it was refused.",
       "The Acting as menu in the top bar, which picks the person the dashboard acts as.",
-      "A not-found page for a key no task has, with a field that opens a task by its key."
+      "A not-found page for a key no task has, with a field that opens a task by its key.",
+      "Links in the top bar to Needs you and to Tasks, with the current page marked."
     ],
     "later": [
-      {
-        "id": "top-bar-links",
-        "unit": "U6",
-        "adds": "Links in the top bar to Needs you, the board, and all tasks, and the pages they open. Until then no page links to a list of tasks."
-      },
       {
         "id": "agent-panel",
         "unit": "U7",
@@ -23,6 +19,37 @@
         "id": "status-card",
         "unit": "U8",
         "adds": "The status card's next action, such as Approve, Send back, or Retry, a waiting reason shown as its instruction, the stepper of the task's steps, open reviews, and the evidence and attempts tabs."
+      }
+    ]
+  },
+  "overview": {
+    "shows": [
+      "Needs you at /: the tasks waiting on the person picked, each with its waiting reason as the engine wrote it, oldest first, then the gates they can approve, then their logins that stopped working or expire within 7 days, then every running task, updating live without a reload.",
+      "A red Failed mark beside the amber Needs you mark on a task that failed and waits for a person, each with its own word, as the owner picked.",
+      "The board at /board, one row per workflow that has tasks, with a column per published step and a link to the landed tasks.",
+      "The task list at /tasks, filtered by status, routine, and person through the URL, with each landed task's time from start to merge.",
+      "The empty states: with no routines, how to add one, and with no tasks, when the next routine looks for tickets."
+    ],
+    "later": [
+      {
+        "id": "people-page",
+        "unit": "U5",
+        "adds": "The People page that a login row's Replace login link opens, and its People link in the top bar."
+      },
+      {
+        "id": "agent-activity",
+        "unit": "U7",
+        "adds": "A plain line saying what the agent is doing now, which a running row could then show in place of the step that runs."
+      },
+      {
+        "id": "task-actions",
+        "unit": "U8",
+        "adds": "Approve, Send back, Answer, and Retry on the task page that each row's link opens, and the waiting reason shown there as its instruction."
+      },
+      {
+        "id": "routines-page",
+        "unit": "U9",
+        "adds": "The Routines page, where the empty state could then send a person to add a routine instead of naming the setup command."
       }
     ]
   }

@@ -5,14 +5,17 @@ import { EmptyWorld, Heading, page, taskHref, ViewSwitch } from './parts.tsx';
 import type { TaskRow } from './protocol.ts';
 import type { Board, BoardRow } from './read.ts';
 
+const waitsFor: Readonly<Record<NonNullable<TaskRow['waitingOn']>, string>> = { answer: 'Waits for your answer', approval: 'Waits for approval', outside_approval: 'Waits for an outside approval', retry: 'Waits for Retry' };
+
 function Card({ task }: { readonly task: TaskRow }) {
   return (
     <li data-task={task.key} style={{ display: 'flex', flexDirection: 'column', gap: 8, padding: 12, borderRadius: 8, background: color('surface'), border: `1px solid ${color('rule')}` }}>
       <a href={taskHref(task.key)} style={{ display: 'flex', flexDirection: 'column', gap: 2, color: color('ink'), textDecoration: 'none' }}>
         <span className="mono" style={{ color: color('muted') }}>{task.key}</span>
-        <span style={{ fontSize: 13, fontWeight: 500 }}>{task.title}</span>
+        <span style={{ fontSize: 13, fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{task.title}</span>
       </a>
       <StatusMarks marks={task.marks} />
+      {task.waitingOn === null ? null : <span style={{ fontSize: 13, color: color('muted') }}>{waitsFor[task.waitingOn]}</span>}
     </li>
   );
 }
@@ -24,7 +27,7 @@ function Row({ row }: { readonly row: BoardRow }) {
         {nameOf(row.workflow)}
         {row.landed === 0 ? null : (
           <a href="/tasks?state=landed" style={{ fontSize: 13, fontWeight: 400, color: color('muted') }}>
-            {row.landed === 1 ? '1 landed' : `${String(row.landed)} landed`}
+            {row.landed === 1 ? 'See 1 landed task' : `See ${String(row.landed)} landed tasks`}
           </a>
         )}
       </h2>
@@ -49,11 +52,13 @@ function Row({ row }: { readonly row: BoardRow }) {
 
 export function BoardPage({ board, zone }: { readonly board: Board; readonly zone: string }) {
   const { world } = board;
-  const open = board.rows.reduce((total, row) => total + row.columns.reduce((sum, column) => sum + column.tasks.length, 0), 0);
+  const shown = board.rows.flatMap(row => row.columns.flatMap(column => column.tasks));
+  const stopped = shown.filter(task => task.state === 'stopped').length;
+  const open = shown.length - stopped;
   return (
     <main style={page}>
-      <Heading title="Tasks" note={world.kind === 'tasks' ? `${open === 1 ? 'One open task' : `${String(open)} open tasks`}, by the step each one is at.` : undefined}>
-        <ViewSwitch current="board" />
+      <Heading title="Tasks" note={world.kind === 'tasks' ? `${String(open)} open and ${String(stopped)} stopped, at the step each one is at.` : undefined}>
+        {world.kind === 'tasks' ? <ViewSwitch current="board" /> : null}
       </Heading>
       {world.kind !== 'tasks' ? (
         <EmptyWorld world={world} zone={zone} />

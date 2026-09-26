@@ -25,7 +25,7 @@ export const taskHref = (key: string): string => `/tasks/${encodeURIComponent(ke
 
 export function Heading({ title, note, children }: { readonly title: string; readonly note?: string | undefined; readonly children?: ReactNode }) {
   return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 16, minHeight: 32 }}>
+    <div style={{ display: 'flex', alignItems: 'flex-start', gap: 16, minHeight: 44 }}>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
         <h1 style={{ fontSize: 20, lineHeight: '24px', fontWeight: 600 }}>{title}</h1>
         {note === undefined ? null : <p style={{ fontSize: 13, color: color('muted') }}>{note}</p>}
@@ -45,7 +45,7 @@ export function EmptyWorld({ world, zone }: { readonly world: Exclude<World, { k
       <h2 style={{ fontSize: 15, fontWeight: 600 }}>{title}</h2>
       {world.kind === 'no-routines' ? (
         <p style={{ color: color('muted') }}>
-          Add a routine to your setup file, then run <span className="mono">node services/engine/setup.ts</span> with that file, and AutoWorker starts finding tickets.
+          Add a routine to a setup file such as <span className="mono">setup.json</span>, then run <span className="mono">node services/engine/setup.ts setup.json</span>, and AutoWorker starts finding tickets.
         </p>
       ) : (
         <p style={{ color: color('muted') }}>{nextSentence(world, zone)}</p>

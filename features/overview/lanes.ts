@@ -137,7 +137,7 @@ const needsYou: Lane = {
       const sections = await attributesOf(page, '[data-section]', 'data-section');
       return [
         box !== null && box.y + box.height <= height ? pass('the task that needs your approval shows above the fold under Approve', `${key} at y ${String(Math.round(box.y))} under "${heading}", ${path}`) : fail('the task that needs your approval shows above the fold under Approve', box === null ? 'no gate row' : `its row ends at y ${String(Math.round(box.y + box.height))}`),
-        action === 'Review' ? pass('its action link says Review', action) : fail('its action link says Review', action),
+        action === 'Approve' ? pass('its action link says Approve', action) : fail('its action link says Approve', action),
         JSON.stringify(sections) === JSON.stringify(['waiting', 'gates', 'logins', 'running']) ? pass('Needs you orders waiting tasks, gates, logins, then running work', sections.join(', ')) : fail('Needs you orders waiting tasks, gates, logins, then running work', sections.join(', ')),
       ];
     });
@@ -307,7 +307,7 @@ const login: Lane = {
       const said = await textOf(page, row);
       const href = (await page.locator(`${row} a`).count()) === 0 ? null : await page.locator(`${row} a`).getAttribute('href');
       const path = await saved(page, shots, 'u6-login.png');
-      const fix = 'GitHub no longer accepts your login. Replace it on the People page with a new one.';
+      const fix = 'GitHub no longer accepts your login, so replace it with a new one.';
       return [
         said.includes(fix) ? pass('the login shows in Needs you with the exact fix', fix) : fail('the login shows in Needs you with the exact fix', said),
         href === '/people' ? pass('its link goes to the People page', `${href}, ${path}`) : fail('its link goes to the People page', href ?? 'no link'),
