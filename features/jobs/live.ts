@@ -29,7 +29,7 @@ const registry = { name: 'autoworker-registry', image: 'registry:3.0.0@sha256:6c
 const node = 'autoworker-control-plane';
 const attemptImageTag = `${registry.host}/autoworker-job:verify`;
 const pinnedCommit = '0d9dece83482cfa8bc8ff498bb56188f1eb69167';
-const thisRepository = 'https://github.com/braxtonkdev/autoworker-oss.git';
+const thisRepository = 'https://github.com/braxtonkin/awos.git';
 const codexPin = 'codex-cli 0.156.0';
 const readyBudgetMs = 30_000;
 const sweepBudgetMs = 5_000;
@@ -121,7 +121,7 @@ async function seed(db: Database): Promise<Seeded> {
     .with('saved', query => query.insertInto('human_action').values({ id: saving, at, person_id: person.id, kind: 'add_repository', repository_id: 1 }).returning('id'))
     .insertInto('repository')
     .columns(['github', 'branch', 'saved_by'])
-    .expression(eb => eb.selectFrom('saved').select([eb.val('braxtonkdev/autoworker-oss').as('github'), eb.val('main').as('branch'), 'saved.id']))
+    .expression(eb => eb.selectFrom('saved').select([eb.val('braxtonkin/awos').as('github'), eb.val('main').as('branch'), 'saved.id']))
     .returning('id')
     .executeTakeFirstOrThrow();
   const routine = await db.insertInto('routine').values({ creator_id: person.id, run_as_id: person.id }).returning('id').executeTakeFirstOrThrow();
