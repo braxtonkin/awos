@@ -93,7 +93,7 @@ export const seeds: Readonly<Record<SeedName, Seed>> = {
   },
   question: {
     plant: { kind: 'ticket', routine: 'work', work: 'question', assigned: true },
-    expect: { kind: 'task', state: 'waiting', step: 'specify', ...quiet, waitingOn: 'answer', reason: 'Answer the review specify left for task', choice: true },
+    expect: { kind: 'task', state: 'waiting', step: 'specify', ...quiet, waitingOn: 'answer', reason: 'Answer the question Specify asked in its review', choice: true },
   },
   'waiting-gate': {
     plant: { kind: 'ticket', routine: 'gated', work: 'catalog', assigned: true },
