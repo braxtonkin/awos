@@ -175,6 +175,8 @@ const kindsOn: Readonly<Record<TargetKind, readonly RequestKind[]>> = { task: ['
 
 const newTargetOdds = 0.3;
 
+type Joins = 'the target line' | 'any line';
+
 const saved: PayloadOf<'save_repository'> = {
   github: null,
   branch: 'main',
@@ -314,8 +316,9 @@ async function checkStep(world: World, move: string, detail: string): Promise<vo
   if (broken.length > 0) world.failure = { step: world.step, move, broken };
 }
 
-const askFor = (world: World, id: string, target: Target, kind: RequestKind): Asked => {
+const askFor = (world: World, id: string, target: Target, kind: RequestKind, joins: Joins = 'any line'): Asked => {
   const base = { id, person: world.person, at: now(world), target: target.id };
+  const startsALine = (): boolean => joins === 'any line' && world.random() < newTargetOdds;
   switch (kind) {
     case 'stop':
     case 'pause':
@@ -333,16 +336,16 @@ const askFor = (world: World, id: string, target: Target, kind: RequestKind): As
     case 'steer':
       return { ...base, kind, payload: { message: 'Also check the edge case.' } };
     case 'save_routine':
-      return world.random() < newTargetOdds ? { ...base, target: null, kind, payload: { ...draft, from: null } } : { ...base, kind, payload: draft };
+      return startsALine() ? { ...base, target: null, kind, payload: { ...draft, from: null } } : { ...base, kind, payload: draft };
     case 'save_repository':
-      return world.random() < newTargetOdds ? { ...base, target: null, kind, payload: { ...saved, github: `example/new-${id.slice(0, 8)}` } } : { ...base, kind, payload: { ...saved, fastTestCommand: `npm test -- --seed ${String(Math.floor(world.random() * 1e9))}` } };
+      return startsALine() ? { ...base, target: null, kind, payload: { ...saved, github: `example/new-${id.slice(0, 8)}` } } : { ...base, kind, payload: { ...saved, fastTestCommand: `npm test -- --seed ${String(Math.floor(world.random() * 1e9))}` } };
   }
 };
 
-function newAsk(world: World, target: Target | undefined = pick(world.random, world.targets)): Asked | undefined {
+function newAsk(world: World, target: Target | undefined = pick(world.random, world.targets), joins: Joins = 'any line'): Asked | undefined {
   if (target === undefined) return undefined;
   const kind = pick(world.random, kindsOn[target.on]);
-  return kind === undefined ? undefined : askFor(world, uuidFrom(world.random), target, kind);
+  return kind === undefined ? undefined : askFor(world, uuidFrom(world.random), target, kind, joins);
 }
 
 async function recordFate(world: World, row: string, logical: string): Promise<Fate> {
@@ -417,8 +420,8 @@ async function blockedOrSettled(db: Database, pid: number, settled: () => boolea
 
 async function race(world: World): Promise<string> {
   const target = pick(world.random, world.targets);
-  const first = newAsk(world, target);
-  const second = newAsk(world, target);
+  const first = newAsk(world, target, 'the target line');
+  const second = newAsk(world, target, 'the target line');
   if (target === undefined || first === undefined || second === undefined) return 'no target';
   const slow = connect(world.url, 1);
   const fast = connect(world.url, 1);
