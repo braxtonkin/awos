@@ -20,7 +20,7 @@ import { reaper } from './reaper.ts';
 import { beginFromNowhere, commitOf, jobs, latePush, performNext, replyLines, unparsedReplies, type Jobs, type JobLine, type StepMutantName } from './sim-jobs.ts';
 import { workflowsByName, type Workflows } from './start.ts';
 
-export const profileName = z.enum(['default', 'races', 'hangs', 'verdicts', 'people', 'reviews', 'needs-input', 'mixed', 'behavior', 'environment', 'crashes', 'db-pause', 'two-engines', 'jobs']);
+export const profileName = z.enum(['default', 'races', 'hangs', 'verdicts', 'people', 'reviews', 'needs-input', 'mixed', 'behavior', 'environment', 'conflicts', 'crashes', 'db-pause', 'two-engines', 'jobs']);
 
 export type ProfileName = z.infer<typeof profileName>;
 
@@ -96,6 +96,10 @@ const failedToVerify = 'Retry starts again at Implement, because Verify found th
 
 const environmentDown = "Verify's environment failed 4 times in a row. Check that the repository's Verify environment starts, then press Retry to run Verify again.";
 
+const checksFailed = 'Retry starts again at Implement, because checks failed three times. Press Retry with a note that says what to change.';
+
+const conflictedTooOften = 'Retry starts again at Implement, because the pull request conflicted with its base branch four times. Press Retry to merge it again.';
+
 const verified = reviewSchema.extend({ behavior: z.enum(['fixed', 'still_wrong']).nullable() });
 
 const agentStep = (name: string, reads: readonly string[], canEnd: boolean, needsRepository: boolean): StepKind =>
@@ -153,7 +157,8 @@ const codeChangeCopy = (returnTo: (from: string) => string): Workflow => ({
       failures: {
         fail: { kind: 'fail' },
         needs_input: { kind: 'ask' },
-        red_check: { kind: 'return', to: returnTo('land'), counter: 'landRounds', cap: 3, parks: 'Retry starts again at Implement, because checks failed three times. Press Retry with a note that says what to change.' },
+        red_check: { kind: 'return', to: returnTo('land'), counter: 'landRounds', cap: 3, parks: checksFailed },
+        conflict: { kind: 'return', to: returnTo('land'), counter: 'conflicts', cap: 4, parks: conflictedTooOften },
         changes_requested: {
           kind: 'review',
           to: 'implement',
@@ -176,7 +181,7 @@ export const workflows: readonly [Workflow, ...Workflow[]] = [codeChangeCopy(() 
 
 const retryInPlace: Workflows = new Map([codeChangeCopy(from => from), postCopy].map(workflow => [workflow.name, workflow]));
 
-export const parks = { rounds: failedToVerify, reruns: environmentDown } as const;
+export const parks = { rounds: failedToVerify, reruns: environmentDown, conflicts: conflictedTooOften } as const;
 
 const comment = (key: string, text: string): Owe => owe(actionKinds.ticketComment, { ticket: key, text, linkPullRequest: false });
 
@@ -211,6 +216,7 @@ const owes = (verdicted: Verdicted): readonly Owe[] => {
 const simulatedSendBacks: Readonly<Record<string, SendBack>> = {
   behavior_fail: { kind: 'behavior', evidence: 'The simulated Verify found the behavior still wrong.' },
   red_check: { kind: 'check', head: null, names: ['simulated'] },
+  conflict: { kind: 'conflict' },
   changes_requested: { kind: 'review', review: 'A simulated review asked for changes.' },
 };
 
@@ -441,6 +447,18 @@ export const profiles: Readonly<Record<ProfileName, Profile>> = {
     odds: { claim: 6, renew: 4, finish: 6, ...quietFaults, ...noPeople, approve: 3, ...jobLines },
     effects: { pass: 1, fail: 0, ask: 0, return: 0, rerun: 0, review: 0, await: 0 },
   },
+  conflicts: {
+    stepsPerTask: 80,
+    workers: 4,
+    nobodyEvery: 0,
+    leaseMs: 30_000,
+    reapEveryMs: 15_000,
+    ...oneEngine,
+    stepMs: 6_000,
+    burst: 5,
+    odds: { claim: 6, renew: 4, finish: 6, ...quietFaults, ...noPeople, approve: 3, ...jobLines },
+    effects: { pass: 1, fail: 0, ask: 0, return: 0, rerun: 0, review: 0, await: 0 },
+  },
   ...engineProfiles,
   jobs: {
     stepsPerTask: 15,
@@ -456,11 +474,11 @@ export const profiles: Readonly<Record<ProfileName, Profile>> = {
   },
 };
 
-const forcedAtChecks: Partial<Readonly<Record<ProfileName, StepVerdict>>> = { behavior: 'behavior_fail', environment: 'environment_fail' };
+const forcedVerdicts: Partial<Readonly<Record<ProfileName, StepVerdict>>> = { behavior: 'behavior_fail', environment: 'environment_fail', conflicts: 'conflict' };
 
 const pushChance: Readonly<Record<string, number>> = { implement: 0.8 };
 
-export const fingerprint = createHash('sha256').update(JSON.stringify({ moves, profiles, assignees, forcedAtChecks, workflows, pushChance })).digest('hex').slice(0, 16);
+export const fingerprint = createHash('sha256').update(JSON.stringify({ moves, profiles, assignees, forcedVerdicts, workflows, pushChance })).digest('hex').slice(0, 16);
 
 export type Plan = {
   readonly profile: ProfileName;
@@ -755,7 +773,7 @@ async function attemptInfo(db: Database, attempt: string): Promise<{ readonly wo
 }
 
 function verdictFor(turn: Turn, kind: StepKind): { readonly verdict: StepVerdict; readonly effect: Effect } | undefined {
-  const forced = forcedAtChecks[turn.plan.profile];
+  const forced = forcedVerdicts[turn.plan.profile];
   const declared: readonly (readonly [StepVerdict, Effect])[] = [
     ['pass', 'pass'],
     ...Object.entries(kind.failures).map(([verdict, failure]) => [verdict as StepVerdict, failure.kind] as const),

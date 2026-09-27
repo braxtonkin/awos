@@ -132,6 +132,13 @@ const sentBackByVerify: readonly Statement[] = [
   sql`update task set step = 'implement', approved = '{specify}', counts = '{"rounds": 1}' where id = 1`,
 ];
 
+const sentBackForConflict: readonly Statement[] = [
+  ...atLand,
+  sql`insert into attempt (task_id, routine_id, routine_version, step, epoch, run_as_id, started_at, lease_until, finished_at, verdict, output)
+      values (1, 1, 1, 'land', 0, 1, ${t0}, ${t0} + interval '30 seconds', ${t0} + interval '10 seconds', 'conflict', ${plantedReview})`,
+  sql`update task set step = 'implement', counts = '{"conflicts": 1}' where id = 1`,
+];
+
 const reworkOwing = (obligation: string | null) => sql`insert into attempt (task_id, routine_id, routine_version, step, epoch, run_as_id, started_at, lease_until, obligation)
   values (1, 1, 1, 'implement', 0, 1, ${t0} + interval '11 seconds', ${t0} + interval '41 seconds', ${obligation === null ? sql`null` : sql`${sql.lit(obligation)}::jsonb`})`;
 
@@ -505,6 +512,22 @@ export const properties = {
       },
     ],
   },
+  ConflictSparesCheckRounds: {
+    moment: 'each-step',
+    breaks: sql`select e.id as attempt, other.counter, s.was_counts ->> other.counter as was, s.counts ->> other.counter as count
+      from ended e
+      join diff s on s.id = e.task_id
+      join charges own on own.workflow = s.workflow and own.verdict = e.verdict::text
+      join charges other on other.workflow = s.workflow and other.kind = 'return' and other.counter <> own.counter
+      where e.verdict = 'conflict' and coalesce((s.counts ->> other.counter)::int, 0) > coalesce((s.was_counts ->> other.counter)::int, 0)`,
+    plants: [
+      {
+        setup: [...atLand, liveAttemptAtLand],
+        violation: sql`with finished as (update attempt set finished_at = ${t0} + interval '12 seconds', verdict = 'conflict', output = ${plantedReview} where finished_at is null returning task_id)
+          update task set step = 'implement', counts = '{"landRounds": 1}' from finished where task.id = finished.task_id`,
+      },
+    ],
+  },
   OutputsOnlyGrow: {
     moment: 'each-step',
     breaks: sql`select s.id, s.was_outputs, s.outputs from diff s where not (s.was_outputs <@ s.outputs)`,
@@ -699,13 +722,15 @@ export const properties = {
                   when sender.id is null and notes.count = 0 then a.obligation is not null
                   when sender.id is null then coalesce(a.obligation ->> 'kind', '') <> 'note'
                   when sender.verdict = 'behavior_fail' then coalesce(a.obligation ->> 'kind', '') <> 'behavior'
-                  when sender.verdict = 'red_check' then coalesce(a.obligation ->> 'kind', '') not in ('conflict', 'check')
+                  when sender.verdict = 'red_check' then coalesce(a.obligation ->> 'kind', '') <> 'check'
+                  when sender.verdict = 'conflict' then coalesce(a.obligation ->> 'kind', '') <> 'conflict'
                   when sender.verdict = 'changes_requested' then coalesce(a.obligation ->> 'kind', '') <> 'review'
                   else true
                 end)`,
     plants: [
       { setup: sentBackByVerify, violation: reworkOwing(null) },
       { setup: sentBackByVerify, violation: reworkOwing(checkOwed) },
+      { setup: sentBackForConflict, violation: reworkOwing(checkOwed) },
     ],
   },
   EndStagePassIsDone: {
@@ -899,14 +924,14 @@ function workflowFacts(workflows: readonly Workflow[]): Statement {
   );
   const charges = workflows.flatMap(workflow =>
     workflow.steps.flatMap(kind =>
-      Object.values(kind.failures).flatMap(failure =>
+      Object.entries(kind.failures).flatMap(([verdict, failure]) =>
         !('counter' in failure)
           ? []
-          : [sql`(${sql.lit(workflow.name)}, ${sql.lit(kind.name)}, ${sql.lit(failure.kind)}, ${sql.lit(failure.counter)}, ${sql.lit(failure.cap)}, ${'to' in failure ? sql.lit(failure.to) : sql`null::text`})`],
+          : [sql`(${sql.lit(workflow.name)}, ${sql.lit(kind.name)}, ${sql.lit(verdict)}, ${sql.lit(failure.kind)}, ${sql.lit(failure.counter)}, ${sql.lit(failure.cap)}, ${'to' in failure ? sql.lit(failure.to) : sql`null::text`})`],
       ),
     ),
   );
-  const chargeRows = charges.length === 0 ? sql`select null::text, null::text, null::text, null::text, null::int, null::text where false` : sql`values ${sql.join(charges)}`;
+  const chargeRows = charges.length === 0 ? sql`select null::text, null::text, null::text, null::text, null::text, null::int, null::text where false` : sql`values ${sql.join(charges)}`;
   const routes = workflows.flatMap(workflow =>
     workflow.steps.flatMap(kind =>
       Object.entries(kind.failures).flatMap(([verdict, failure]) =>
@@ -917,7 +942,7 @@ function workflowFacts(workflows: readonly Workflow[]): Statement {
   const routeRows = routes.length === 0 ? sql`select null::text, null::text, null::text, null::text where false` : sql`values ${sql.join(routes)}`;
   return sql`
     facts (workflow, step, position, is_last, irreversible, needs_repository, run_by, blocked) as (values ${sql.join(steps)}),
-    charges (workflow, step, kind, counter, cap, to_step) as (${chargeRows}),
+    charges (workflow, step, verdict, kind, counter, cap, to_step) as (${chargeRows}),
     routes (workflow, step, verdict, to_step) as (${routeRows}),`;
 }
 

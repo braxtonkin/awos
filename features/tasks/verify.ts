@@ -170,6 +170,8 @@ const guards = [
   'NoOneParksTask',
   'LateResultIsRefused',
   'RoundsAreCapped',
+  'ConflictsAreCapped',
+  'ConflictsCountApart',
   'EnvRerunsAreCapped',
   'LostAttemptsAreCapped',
   'StageRetriesAreCapped',
@@ -243,6 +245,7 @@ const properties = {
   TaskChangesOnlyWithItsAttempt: 'PROPERTIES',
   AttemptEndsOnlyWithItsTask: 'PROPERTIES',
   FailedRoundReturnsToImplement: 'PROPERTIES',
+  ConflictSparesCheckRounds: 'PROPERTIES',
   OutputsOnlyGrow: 'PROPERTIES',
   StageAdvancesOnlyOnPass: 'PROPERTIES',
   DoneIsFinal: 'PROPERTIES',
@@ -282,11 +285,11 @@ const tasksModel = defineModel({
   configs: {
     pr: {
       file: 'Tasks.cfg',
-      floors: { Tasks: 2, Workers: 2, MaxRounds: 2, MaxEnvReruns: 2, MaxLost: 2, MaxStageRetries: 1, MaxInputWaits: 1, MaxHumanActions: 2, MaxReassignments: 1, MaxLaunchFaults: 1 },
+      floors: { Tasks: 2, Workers: 2, MaxRounds: 2, MaxConflicts: 2, MaxEnvReruns: 2, MaxLost: 2, MaxStageRetries: 1, MaxInputWaits: 1, MaxHumanActions: 2, MaxReassignments: 1, MaxLaunchFaults: 1 },
     },
     nightly: {
       file: 'Tasks.nightly.cfg',
-      floors: { Tasks: 2, Workers: 2, MaxRounds: 3, MaxEnvReruns: 3, MaxLost: 3, MaxStageRetries: 2, MaxInputWaits: 2, MaxHumanActions: 3, MaxReassignments: 1, MaxLaunchFaults: 1 },
+      floors: { Tasks: 2, Workers: 2, MaxRounds: 3, MaxConflicts: 3, MaxEnvReruns: 3, MaxLost: 3, MaxStageRetries: 2, MaxInputWaits: 2, MaxHumanActions: 3, MaxReassignments: 1, MaxLaunchFaults: 1 },
     },
   },
   guards,
@@ -312,6 +315,9 @@ const tasksModel = defineModel({
     breaks('FailureParksTask', 'a failed stage stops the task', 'OnlyAPersonStops'),
     unsettled('RoundsAreCapped', 'verify rounds have no cap', loopsBetweenImplementAndVerify),
     breaks('RoundsAreCapped', 'verify rounds have no cap', 'RoundsCapped'),
+    unsettled('ConflictsAreCapped', 'conflicts have no cap', loopsFromLandToImplement),
+    breaks('ConflictsAreCapped', 'conflicts have no cap', 'RoundsCapped'),
+    breaks('ConflictsCountApart', 'a conflict spends a failed-check round', 'ConflictSparesCheckRounds'),
     unsettled('EnvRerunsAreCapped', 'environment reruns have no cap', rerunsVerifyForever),
     breaks('EnvRerunsAreCapped', 'environment reruns have no cap', 'EnvRerunsCapped'),
     unsettled('LostAttemptsAreCapped', 'lost attempts have no cap', losesAttemptsForever),
@@ -463,7 +469,24 @@ async function profileChecks(postgres: TestPostgres, profile: ProfileName, optio
     ...(profile === 'jobs' ? [jobFaultsReached(runs)] : []),
     ...(profile === 'behavior' ? [checksParkAtTheirCap(runs, parks.rounds, 'every task that reached Verify waits after 3 rounds with the instruction for that wait, unless its attempts were lost first')] : []),
     ...(profile === 'environment' ? [checksParkAtTheirCap(runs, parks.reruns, 'every task that reached Verify parked at the rerun cap, unless its attempts were lost first, and no round was charged')] : []),
+    ...(profile === 'conflicts' ? [conflictsParkAtTheirCap(runs)] : []),
   ];
+}
+
+function conflictsParkAtTheirCap(runs: readonly Run[]): Check {
+  const name = 'conflicts: every task that reached Land waits there after 4 conflicts, past the 3 rounds a failed check may take, with the instruction for that wait, unless its attempts were lost first, and no conflict spent a failed-check round';
+  const settled = runs.flatMap(run => run.tasks.map(task => ({ seed: run.seed, ...task })));
+  const atLand = settled.filter(task => task.workflow === 'code-change' && task.step === 'land');
+  const lostThere = atLand.filter(task => task.reason === lostTooOften).length;
+  const wrong = atLand.filter(task => task.state !== 'waiting' || (task.reason !== parks.conflicts && task.reason !== lostTooOften));
+  const charged = settled.filter(task => typeof task.counts === 'object' && task.counts !== null && 'landRounds' in task.counts);
+  const problems = [
+    ...wrong.slice(0, 3).map(task => `seed ${String(task.seed)} task ${task.key} is ${task.state} at land: ${task.reason ?? 'no instruction'}`),
+    ...charged.slice(0, 3).map(task => `seed ${String(task.seed)} task ${task.key} was charged a failed-check round`),
+  ];
+  return atLand.length > lostThere && problems.length === 0
+    ? pass(name, `${String(atLand.length - lostThere)} tasks waited at land with: ${parks.conflicts} ${String(lostThere)} more parked there first because their attempts were lost.`)
+    : fail(name, problems.length === 0 ? 'no task waited at land for its conflicts' : problems.join('; '));
 }
 
 function laterReviewsReached(runs: readonly Run[]): Check {
