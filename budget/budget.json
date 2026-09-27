@@ -27,8 +27,8 @@
       "files": [
         "features/e2e/**"
       ],
-      "lines": 6769,
-      "characters": 343351,
+      "lines": 6881,
+      "characters": 350921,
       "longest-line": 471
     },
     {
@@ -38,9 +38,9 @@
         "**/*.tla",
         "**/*.cfg"
       ],
-      "lines": 2346,
-      "characters": 74618,
-      "longest-line": 251
+      "lines": 2374,
+      "characters": 75817,
+      "longest-line": 199
     },
     {
       "name": "feature-verification",
@@ -51,8 +51,8 @@
         "{features,services,shared}/**/*-model.ts",
         "{features,services,shared}/**/*.test.ts"
       ],
-      "lines": 20329,
-      "characters": 986899,
+      "lines": 20410,
+      "characters": 992049,
       "longest-line": 504
     },
     {
@@ -61,8 +61,8 @@
       "files": [
         "db/migrations/**"
       ],
-      "lines": 1463,
-      "characters": 64187,
+      "lines": 1510,
+      "characters": 65469,
       "longest-line": 220
     },
     {
@@ -83,8 +83,8 @@
         "docs/**",
         "*.md"
       ],
-      "lines": 742,
-      "characters": 214598
+      "lines": 752,
+      "characters": 219769
     },
     {
       "name": "product",
@@ -94,8 +94,8 @@
         "services/**",
         "shared/**"
       ],
-      "lines": 14194,
-      "characters": 669416,
+      "lines": 14229,
+      "characters": 671484,
       "longest-line": 374
     }
   ],
@@ -110,7 +110,7 @@
     },
     "migrations": {
       "why": "Every migration runs forward and back in the migrations scenario and in every simulation's database.",
-      "ceiling": 44
+      "ceiling": 45
     },
     "tables": {
       "why": "Each table is state that every later migration, query, and simulator predicate must keep consistent.",
@@ -154,7 +154,7 @@
       "Outbox": 1126209,
       "Requests": 158167,
       "Schedule": 376613,
-      "Tasks": 5424892
+      "Tasks": 10284028
     }
   },
   "seconds": {
