@@ -165,6 +165,24 @@ export const lanes: readonly Lane[] = [
     procedure: 'Move the run branch forward at the first stored Implement event, so the pull request conflicts. Pass when Land sends the task back, Implement merges the new base, and the run reaches clean.',
     deciders: named({ exactly: ['base moved under the pull request', 'conflict resolved by a merge', 'clean'] }),
   },
+  {
+    ...run,
+    number: 16,
+    slug: 'base-conflicts',
+    fault: 'base-conflicts',
+    procedure:
+      "Move the run branch forward at the first stored Implement event and as each of the next two Implement attempts is claimed, so each rework merges a base that has already moved again, as SBX-66's siblings' merges did. Pass when Land sends the task back for a conflict three times, each rework pushes a merge, and the run reaches clean.",
+    deciders: named({ exactly: ['conflicts resolved by three merges', 'clean'] }),
+  },
+  {
+    ...run,
+    number: 17,
+    slug: 'stays-red',
+    fault: 'stays-red',
+    procedure:
+      "The stand-in's first Implement adds a smoke test that fails in CI, and each rework changes a note but not the test. Pass when Land sends the task back for the red check three times and the task waits at Land because checks on the pull request failed three times.",
+    deciders: named({ exactly: ['checks stayed red three times'] }),
+  },
 ];
 
 export const allCommands = ['npm run check', 'npm run verify -- guardrails', 'npm run verify -- models', 'npm test'] as const;

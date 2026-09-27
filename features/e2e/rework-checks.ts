@@ -17,7 +17,10 @@ export const reworkCheckNames: Readonly<Record<RehearsalName, string>> = {
   'still-wrong': 'behavior fixed from its evidence',
   'ticket-conflict': 'rework asked about the ticket',
   'pushes-nothing': 'rework ended once',
+  'stays-red': 'checks stayed red three times',
 };
+
+const checksFailedThrice = 'Retry starts again at Implement, because checks on the pull request failed three times.';
 
 function factsCheck(name: string, facts: readonly Fact[]): Check {
   const detail = facts.map(fact => fact.said).join('; ');
@@ -40,8 +43,9 @@ const listed = (attempts: readonly Attempt[]): string => attempts.map(attempt =>
 
 const after = (attempts: readonly Attempt[], sender: Attempt): readonly Attempt[] => attempts.filter(attempt => attempt.step === 'implement' && Number(attempt.id) > Number(sender.id));
 
-const redSendBack = (attempts: readonly Attempt[]): Attempt | undefined =>
-  attempts.find(attempt => attempt.step === 'land' && attempt.verdict === 'red_check' && !JSON.stringify(attempt.output).includes(conflictSentBack));
+const sentBackForRed = (attempt: Attempt): boolean => attempt.step === 'land' && attempt.verdict === 'red_check' && !JSON.stringify(attempt.output).includes(conflictSentBack);
+
+const redSendBack = (attempts: readonly Attempt[]): Attempt | undefined => attempts.find(sentBackForRed);
 
 const stillWrong = (attempts: readonly Attempt[]): Attempt | undefined => attempts.find(attempt => attempt.step === 'verify' && attempt.verdict === 'behavior_fail');
 
@@ -127,9 +131,23 @@ async function endedOnce({ db, ticket }: Reworked): Promise<Check> {
   ]);
 }
 
+async function stayedRed({ db, ticket }: Reworked): Promise<Check> {
+  const name = reworkCheckNames['stays-red'];
+  const attempts = await attemptsOf(db, ticket);
+  const red = attempts.filter(sentBackForRed);
+  const task = await taskOf(db, ticket);
+  const reason = task?.waiting_reason ?? '';
+  return factsCheck(name, [
+    { holds: red.length === 3, said: `Land sent the task back for a red check ${String(red.length)} times: ${listed(red)}` },
+    { holds: task?.state === 'waiting' && task.waiting_on === 'retry' && task.step === 'land', said: `the task is ${task?.state ?? 'missing'} on ${task?.waiting_on ?? 'nothing'} at ${task?.step ?? 'no step'}` },
+    { holds: reason.startsWith(checksFailedThrice), said: `the waiting reason is: ${reason || 'none'}` },
+  ]);
+}
+
 export const reworkChecks: Readonly<Record<RehearsalName, (reworked: Reworked) => Promise<Check>>> = {
   'red-check': redCheckFixed,
   'still-wrong': behaviorFixed,
   'ticket-conflict': askedAboutTicket,
   'pushes-nothing': endedOnce,
+  'stays-red': stayedRed,
 };

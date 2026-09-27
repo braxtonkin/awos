@@ -52,7 +52,7 @@ export const solutions: Readonly<Record<string, Solution>> = {
 
 export const identity = (entry: Pick<Entry, 'name'>): string => `export function ${entry.name}(value: unknown): unknown {\n  return value;\n}\n`;
 
-export const rehearsalNames = ['red-check', 'still-wrong', 'ticket-conflict', 'pushes-nothing'] as const;
+export const rehearsalNames = ['red-check', 'still-wrong', 'ticket-conflict', 'pushes-nothing', 'stays-red'] as const;
 
 export type RehearsalName = (typeof rehearsalNames)[number];
 
