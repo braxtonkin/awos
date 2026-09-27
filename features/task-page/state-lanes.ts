@@ -5,6 +5,7 @@ import { z } from 'zod';
 import type { Database } from '../../shared/db/client.ts';
 import { reduce } from '../../shared/items.ts';
 import { reproduction } from '../../shared/reproduction.ts';
+import { reworkObligation } from '../../shared/rework.ts';
 import { open, shoot } from '../../tools/verify/browser.ts';
 import { fail, pass, type Line } from '../../tools/verify/check.ts';
 import type { Lane } from '../../tools/verify/dashboard.ts';
@@ -19,6 +20,8 @@ const redCheckSeed = 'failed-after-red-check';
 const behaviorSeed = 'failed-behavior';
 const redCheckStory = 'pass pass pass handed_off red_check pass pass handed_off red_check fail fail fail';
 const redCheck = 'a check failed: check';
+const owedCheck = 'the failed check `check`';
+const pushedNothing = `Implement pushed nothing, though the task came back to fix ${owedCheck}.`;
 const foundNothing = 'found nothing to change';
 const stillRunning = 'Still running';
 const retryButton = '[data-retry="send"]';
@@ -197,14 +200,21 @@ const reasons: Lane = {
   },
 };
 
-type Stored = { readonly id: string; readonly step: string; readonly verdict: string | null; readonly finished: boolean };
+type Stored = { readonly id: string; readonly step: string; readonly verdict: string | null; readonly finished: boolean; readonly owes: string | null };
+
+const owedOf = (obligation: unknown): string | null => {
+  const owed = reworkObligation.safeParse(obligation).data;
+  if (owed === undefined) return null;
+  return owed.kind === 'check' ? `the failed check ${owed.checks.map(each => `\`${each.name}\``).join(', ')}` : `a ${owed.kind}`;
+};
 
 const storedAttempts = async (db: Database, key: string): Promise<readonly Stored[]> =>
-  (await db.selectFrom('attempt').innerJoin('task', 'task.id', 'attempt.task_id').select(['attempt.id', 'attempt.step', 'attempt.verdict', 'attempt.finished_at']).where('task.key', '=', key).orderBy('attempt.id').execute()).map(row => ({
+  (await db.selectFrom('attempt').innerJoin('task', 'task.id', 'attempt.task_id').select(['attempt.id', 'attempt.step', 'attempt.verdict', 'attempt.finished_at', 'attempt.obligation']).where('task.key', '=', key).orderBy('attempt.id').execute()).map(row => ({
     id: row.id,
     step: row.step,
     verdict: row.verdict,
     finished: row.finished_at !== null,
+    owes: owedOf(row.obligation),
   }));
 
 const replyOf = async (db: Database, attempt: { readonly id: string } | undefined): Promise<string | undefined> => {
@@ -256,16 +266,10 @@ const live: Lane = {
         const before = await cardOf(page);
         const repeats = before.headline === '' ? 0 : await page.locator('[aria-label="Agent"]').getByText(before.headline, { exact: true }).count();
         await page.locator(retryButton).click();
-        const running = await until('Retry to start Implement again', async () => (await storedAttempts(db, key)).find(each => !each.finished && !seeded.some(old => old.id === each.id)), claimMs);
-        await page.reload({ waitUntil: 'load' });
-        await page.locator('[data-tab="attempts"][aria-selected="true"]').waitFor();
-        const runningRow = (await textsOf(page, 'data-attempt-row')).get(running.id) ?? 'no row';
-        await page.locator(`[data-attempt-row="${running.id}"]`).scrollIntoViewIfNeeded();
-        shotPaths.push(await saved('u8-live-running.png'));
-        await until('the task to wait for Retry again', async () => {
-          const now = await db.selectFrom('task').select('task.state').where('task.key', '=', key).executeTakeFirstOrThrow();
-          const attempts = await storedAttempts(db, key);
-          return now.state === 'waiting' && attempts.every(each => each.finished) && attempts.length > seeded.length + 1 ? true : undefined;
+        await until('Retry to start Implement again', async () => (await storedAttempts(db, key)).find(each => !seeded.some(old => old.id === each.id)), claimMs);
+        const parked = await until('the task to wait for Retry again', async () => {
+          const now = await db.selectFrom('task').select(['task.state', 'task.waiting_reason']).where('task.key', '=', key).executeTakeFirstOrThrow();
+          return now.state === 'waiting' && (await storedAttempts(db, key)).every(each => each.finished) ? now : undefined;
         }, runsMs);
         const { rows, stored } = await agreed(page, db, key);
         const ran = stored.filter(each => !seeded.some(old => old.id === each.id));
@@ -277,20 +281,22 @@ const live: Lane = {
         await page.locator('[aria-label="Status"]').scrollIntoViewIfNeeded();
         shotPaths.push(await saved('u8-live-after.png'));
         const disagree = rowsDisagree(rows, stored);
-        const newRows = [...rows.values()].slice(-ran.length).join(' | ');
-        const reloaded = `the reload showed attempt ${running.id} as "${runningRow}"`;
+        const reworks = seeded.filter(each => each.owes !== null);
+        const retried = `${ran.map(each => `${each.step} ${each.id} ${each.verdict ?? 'live'} owes ${each.owes ?? 'nothing'}`).join(', ')}; waiting: ${parked.waiting_reason ?? ''}`;
         const named = task.state === 'waiting' && task.waiting_on === 'retry' && (task.waiting_reason ?? '').startsWith(failedThrice) && seeded.map(each => each.verdict ?? 'live').join(' ') === redCheckStory;
         const taken = shotPaths.join(', ');
         return [
           check(named, 'the seed reads back as SBX-60 did', `${key} ${task.state} at ${task.step}: ${task.waiting_reason ?? ''}; attempts: ${seeded.map(each => `${each.step} ${each.verdict ?? 'live'}`).join(', ')}`),
+          check(reworks.length > 0 && reworks.every(each => each.owes === owedCheck), 'each seeded rework owes the failed check that sent it back', reworks.map(each => `${each.step} ${each.id} owes ${each.owes ?? 'nothing'}`).join(', ')),
           check(before.headline.includes(foundNothing), 'the status card says the agent found nothing to change', before.text),
           check(seededReply !== undefined && before.text.includes(`“${seededReply}”`), "the status card quotes the agent's own last message", `${before.text} | the agent said: ${seededReply ?? 'nothing'}`),
           check(before.text.includes(redCheck), "the status card names the send-back's reason", before.text),
           check(/^[^.]+\.$/.test(before.headline), "the status card's headline is one sentence", before.headline),
           check(before.headline !== '' && repeats === 0, 'the agent panel does not repeat the headline', `${String(repeats)} copies in the panel`),
-          check(ran.length > 1 && disagree.length === 0, 'the Attempts tab follows every attempt that ran while the page was open, without a reload', `${disagree.length === 0 ? newRows : disagree.join('; ')}; ${reloaded}`),
-          check(newestReply !== undefined && after.text.includes(`“${newestReply}”`) && after.text.includes(redCheck), 'the status card quotes the newest attempt, which ended while the page was open', `${after.text} | the agent said: ${newestReply ?? 'nothing'}`),
-          check(ran.length > 0 && unshown.length === 0, 'the agent panel shows each attempt that ran while the page was open', unshown.length === 0 ? ran.map(each => each.id).join(', ') : `missing ${unshown.join(', ')}`),
+          check(ran.length === 1 && ran[0]?.owes === owedCheck && (parked.waiting_reason ?? '').startsWith(pushedNothing), 'Retry runs Implement once, owing the failed check, and the task waits again because it pushed nothing', retried),
+          check(ran.length > 0 && disagree.length === 0, 'the Attempts tab shows the attempt Retry started, without a reload', disagree.length === 0 ? ran.map(each => rows.get(each.id) ?? '').join(' | ') : disagree.join('; ')),
+          check(newestReply !== undefined && after.text.includes(`“${newestReply}”`) && after.text.includes(owedCheck), 'the status card quotes the newest attempt and names the failed check, without a reload', `${after.text} | the agent said: ${newestReply ?? 'nothing'}`),
+          check(ran.length > 0 && unshown.length === 0, 'the agent panel shows the attempt that ran while the page was open', unshown.length === 0 ? ran.map(each => each.id).join(', ') : `missing ${unshown.join(', ')}`),
           check(errors.length === 0, 'the page raised no errors', errors.length === 0 ? taken : `${errors.join('; ')} (${taken})`),
         ];
       }),

@@ -1657,7 +1657,7 @@ export async function probeReaper(postgres: TestPostgres, expiring: number): Pro
     const world = await setUp(db, profile, expiring * profile.stepsPerTask, engines);
     for (const task of world.tasks.slice(0, expiring)) {
       const runAs = await runsAs(db, task);
-      const outcome = await claim(db, task, new Date(epoch), profile.leaseMs, runAs, await beginFromNowhere(db, byName, new Map(), task, runAs));
+      const outcome = await claim(db, task, new Date(epoch), profile.leaseMs, runAs, await beginFromNowhere(db, byName, task, runAs));
       if ('refused' in outcome) throw new Error(`the probe could not claim task ${task}: ${outcome.refused}`);
     }
     startEngine(engines, 0);
