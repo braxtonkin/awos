@@ -14,6 +14,10 @@ async function killAll(...users: readonly Account[]): Promise<void> {
   for (const user of users) await contained('sh', ['-c', 'kill -KILL -1 2>/dev/null; true'], { as: user, cwd: '/', env: { PATH: path() }, timeoutMs: 10_000, graceMs: 100 });
 }
 
+async function clearSharedTemp(...users: readonly Account[]): Promise<void> {
+  for (const user of users) await contained('sh', ['-c', 'find /tmp /var/tmp /dev/shm -mindepth 1 -maxdepth 1 -user "$(id -u)" -exec rm -rf -- {} + 2>/dev/null; true'], { as: user, cwd: '/', env: { PATH: path() }, timeoutMs: 60_000, graceMs: 100 });
+}
+
 async function readScript(codex: Account): Promise<{ readonly script: string } | { readonly reason: string }> {
   const read = await contained('sh', ['-c', `test -f "$1" && head -c ${String(scriptLimit + 1)} "$1"`, 'sh', reproductionPath], {
     as: codex,
@@ -76,6 +80,7 @@ const inTree = 'cd "$1" || exit 125; shift; exec sh "$@"';
 async function side(env: JobEnvironment, plan: ReproducePlan, commit: string, script: string, limits: Limits): Promise<Side> {
   const { codex, reproduce: runner } = await accounts();
   await killAll(codex, runner);
+  await clearSharedTemp(codex, runner);
   const made = await checkout(env, commit, script);
   if ('failed' in made) return { commit, checkout: made.failed, setup: null, run: null };
   const scrubbed = { PATH: path(), HOME: `${made.folder}/home`, TMPDIR: `${made.folder}/tmp`, LANG: 'C.UTF-8', CI: 'true' };

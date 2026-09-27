@@ -1,0 +1,10 @@
+{
+  "why": "Each side of a Verify reproduction clears the agent's and the other side's files from the shared temp directories, and the reproduce lane proves it on kind",
+  "raise": {
+    "characters/docs": 152,
+    "characters/feature-verification": 979,
+    "characters/product": 313,
+    "lines/feature-verification": 17,
+    "lines/product": 4
+  }
+}
