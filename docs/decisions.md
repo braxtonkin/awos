@@ -801,6 +801,24 @@ Rejected options:
 - **Let the agent fetch the base.** Only the bridge holds the token, and a push stays the bridge's alone.
 - **Merge only when Land's check log names a file the base changed.** A log cannot say which base change broke the merge, and SBX-93's did not.
 
+### Only a person contests Verify's evidence
+
+Decided 27 Sep 2026 by the owner, after SBX-73 and SBX-93 on braxtonkin/awos-game. Verify's evidence was wrong both times. SBX-73's script failed on a file the agent's own run had left in `/tmp`, and SBX-93's scripts timed the wrong reference. A rework that finds Verify wrong ends without a change, and the task waits for a person, who corrects the ticket or sends a note. AutoWorker adds no route for a rework to contest Verify and no action that reruns Verify alone.
+
+Rejected options:
+
+- **A Verify again action, and a rework outcome that says the evidence is wrong.** It spares a person on a wrong verdict, at the cost of a new person action and a new Implement outcome in the task model. The owner judged that a person stepping in is fine.
+- **Only the Verify again action.** The same kind of cost for a smaller part of the case.
+
+### Each repository ignores its own scratch files
+
+Decided 27 Sep 2026 by the owner, after SBX-73's rework committed its simulator output, `.sbx-73-sim.out`, which then merged into braxtonkin/awos-game. The Job commits what the workspace holds, and a repository keeps its scratch patterns in its own `.gitignore`, as SBX-86 did for `*.out`.
+
+Rejected options:
+
+- **Commit only the files the agent names.** It makes a stray file impossible, at the cost of a new required field in Implement's review and a failed check whenever the agent forgets a file.
+- **Commit everything, and show new files to Verify and on the task page.** It shows the problem without preventing it.
+
 ## Open
 
 Each open question names the current lean or default. A lean is not a decision.
