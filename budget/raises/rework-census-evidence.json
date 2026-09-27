@@ -1,6 +1,0 @@
-{
-  "why": "The frontier waits for the latest Verify evidence, because a Verify that finds the behavior still wrong sends the task back to Implement, and a later Verify may pass.",
-  "raise": {
-    "characters/e2e-harness": 47
-  }
-}

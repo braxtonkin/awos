@@ -1,7 +1,0 @@
-{
-  "why": "Replaying the rework census on the Codex stand-in needs four rehearsals (red check, still wrong, ticket conflict, pushes nothing), a fake GitHub that reports the failed job's steps and log, lanes 11 to 15 that decide on each rehearsal's own check, and those checks.",
-  "raise": {
-    "characters/e2e-harness": 15782,
-    "lines/e2e-harness": 292
-  }
-}

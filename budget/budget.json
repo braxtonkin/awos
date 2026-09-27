@@ -27,8 +27,8 @@
       "files": [
         "features/e2e/**"
       ],
-      "lines": 6478,
-      "characters": 327177,
+      "lines": 6769,
+      "characters": 343351,
       "longest-line": 471
     },
     {
@@ -38,8 +38,8 @@
         "**/*.tla",
         "**/*.cfg"
       ],
-      "lines": 2335,
-      "characters": 74123,
+      "lines": 2346,
+      "characters": 74618,
       "longest-line": 251
     },
     {
@@ -51,8 +51,8 @@
         "{features,services,shared}/**/*-model.ts",
         "{features,services,shared}/**/*.test.ts"
       ],
-      "lines": 20107,
-      "characters": 971548,
+      "lines": 20329,
+      "characters": 986899,
       "longest-line": 504
     },
     {
@@ -61,8 +61,8 @@
       "files": [
         "db/migrations/**"
       ],
-      "lines": 1438,
-      "characters": 62967,
+      "lines": 1463,
+      "characters": 64187,
       "longest-line": 220
     },
     {
@@ -72,8 +72,8 @@
         "tools/**",
         "eslint.config.ts"
       ],
-      "lines": 7288,
-      "characters": 334318,
+      "lines": 7296,
+      "characters": 334727,
       "longest-line": 547
     },
     {
@@ -83,8 +83,8 @@
         "docs/**",
         "*.md"
       ],
-      "lines": 731,
-      "characters": 206159
+      "lines": 742,
+      "characters": 214598
     },
     {
       "name": "product",
@@ -94,8 +94,8 @@
         "services/**",
         "shared/**"
       ],
-      "lines": 13754,
-      "characters": 640974,
+      "lines": 14194,
+      "characters": 669416,
       "longest-line": 374
     }
   ],
@@ -110,7 +110,7 @@
     },
     "migrations": {
       "why": "Every migration runs forward and back in the migrations scenario and in every simulation's database.",
-      "ceiling": 43
+      "ceiling": 44
     },
     "tables": {
       "why": "Each table is state that every later migration, query, and simulator predicate must keep consistent.",
@@ -118,7 +118,7 @@
     },
     "named-constraints-indexes-triggers": {
       "why": "Named guards are the invariants the store enforces. Each should come with a mutant or a reason it has none, so growth is catalog work too.",
-      "ceiling": 209
+      "ceiling": 210
     },
     "tla-models": {
       "why": "Each model runs in the models job with every mutant on every change.",
