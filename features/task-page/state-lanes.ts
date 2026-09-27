@@ -32,7 +32,7 @@ const stepsList = 'ol[aria-label="Steps"] > li';
 const approveButton = '[aria-label="Open review"] [data-act="approve"]';
 const movesOnMs = 60_000;
 const failedThrice = 'The Implement step failed 3 times in a row.';
-const story = 'pass pass pass handed_off red_check fail fail fail';
+const story = 'pass pass pass handed_off conflict fail fail fail';
 const reproduced = 'The reproduction failed on the base commit (exit 1) and passed on the change (exit 0).';
 const noChange = 'The agent made no change.';
 const conflict = 'conflicts with its base branch';
@@ -162,7 +162,7 @@ const reasons: Lane = {
         const bar = steps.map((each, index) => ({ tried: tried.has(each.name), after: index > current, state: shownBar[index]?.state ?? null, label: shownBar[index]?.label ?? '' }));
         const barText = bar.map((each, index) => `${steps[index]?.name ?? '?'} ${each.label} [${each.state ?? 'missing'}]`).join(', ');
         const later = bar.filter(each => each.tried && each.after).map(each => each.label).join(', ');
-        const expectedClosed = attempts.flatMap(each => (each.verdict === 'red_check' ? [{ id: each.id, says: conflict }] : each.verdict === 'fail' ? [{ id: each.id, says: noChange }] : []));
+        const expectedClosed = attempts.flatMap(each => (each.verdict === 'conflict' ? [{ id: each.id, says: conflict }] : each.verdict === 'fail' ? [{ id: each.id, says: noChange }] : []));
         const unsaid = expectedClosed.filter(each => !(closedRows.get(each.id) ?? '').toLowerCase().includes(each.says.toLowerCase()));
         const reddened = [...closedRows.values(), ...openedRows.values()].filter(row => /a check on the pull request went red/i.test(row));
         const recordedWords = attempts.filter(each => each.finished_at !== null).map(each => ({ id: each.id, words: wordsOf(each.output) }));
