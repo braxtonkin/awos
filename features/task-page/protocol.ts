@@ -1,10 +1,10 @@
 import { z } from 'zod';
-import type { TaskState, Verdict, WaitingOn } from '../../shared/db/types.ts';
+import type { TaskState, WaitingOn } from '../../shared/db/types.ts';
 import type { Transcript } from '../../shared/items.ts';
 import { reproduction } from '../../shared/reproduction.ts';
 import { review } from '../../shared/review.ts';
 import { said, type Said } from '../../shared/said.ts';
-import { marks } from '../../shared/task-status.ts';
+import { marks, verdict } from '../../shared/task-status.ts';
 import type { Action } from './tool-actions.ts';
 
 export type Cursor = { readonly attempt: string; readonly line: number };
@@ -19,8 +19,6 @@ export const cursorOf = (text: string | null): Cursor | undefined => {
 export const textOf = (cursor: Cursor): string => `${cursor.attempt}:${String(cursor.line)}`;
 
 const moment = z.iso.datetime({ offset: true });
-
-export const verdict = z.enum(['behavior_fail', 'changes_requested', 'environment_fail', 'fail', 'handed_off', 'lost', 'needs_input', 'not_launched', 'pass', 'red_check', 'review_required', 'stopped']) satisfies z.ZodType<Verdict>;
 
 const attempt = z.strictObject({
   id: z.string(),

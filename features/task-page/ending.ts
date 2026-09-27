@@ -18,6 +18,7 @@ const told: Readonly<Record<Verdict, Told | null>> = {
   stopped: { word: 'Stopped by a person', failed: null },
   fail: null,
   red_check: null,
+  conflict: null,
 };
 
 type Ended = Pick<AttemptSummary, 'step' | 'verdict' | 'outcome' | 'summary' | 'body'>;

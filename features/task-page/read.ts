@@ -7,8 +7,8 @@ import { reproduction } from '../../shared/reproduction.ts';
 import { answerFrom, payloads } from '../../shared/requests.ts';
 import { review, type Answer, type Review } from '../../shared/review.ts';
 import { saidKinds, type Said } from '../../shared/said.ts';
-import { marksOf } from '../../shared/task-status.ts';
-import { taskState, verdict, waitingOn, type AttemptSummary, type Cursor, type Evidence, type Field, type Kept, type Line, type Live, type Shown, type TaskLive } from './protocol.ts';
+import { marksOf, verdict } from '../../shared/task-status.ts';
+import { taskState, waitingOn, type AttemptSummary, type Cursor, type Evidence, type Field, type Kept, type Line, type Live, type Shown, type TaskLive } from './protocol.ts';
 import { extend } from './timeline.ts';
 
 export type Header = {
