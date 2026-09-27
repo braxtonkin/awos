@@ -42,7 +42,7 @@ function startChild(command: readonly string[], env: Readonly<Record<string, str
     send: line => child.stdin?.write(`${line}\n`),
     stop: async () => {
       if (child.exitCode === null && child.signalCode === null) child.kill('SIGTERM');
-      const code = await Promise.race([exited, wait(childStopMs).then(() => 'late' as const)]);
+      const code = await Promise.race([exited, wait(childStopMs, undefined, { ref: false }).then(() => 'late' as const)]);
       if (code !== 'late') return code;
       child.kill('SIGKILL');
       return exited;
@@ -117,7 +117,7 @@ const started: Started[] = [];
 
 export const worldsStarted = (): readonly Started[] => [...started];
 
-async function loginUrl(owner: Kysely<unknown>, ownerUrl: string): Promise<string> {
+export async function loginUrl(owner: Kysely<unknown>, ownerUrl: string): Promise<string> {
   const password = randomBytes(18).toString('hex');
   const exists = await sql<{ found: boolean }>`select exists (select from pg_roles where rolname = ${loginRole}) as found`.execute(owner);
   if (exists.rows[0]?.found === true) await sql`alter role ${sql.id(loginRole)} login password ${sql.lit(password)}`.execute(owner);
@@ -127,6 +127,18 @@ async function loginUrl(owner: Kysely<unknown>, ownerUrl: string): Promise<strin
   url.password = password;
   return url.toString();
 }
+
+export type Dashboard = Child & { readonly origin: string };
+
+export function startDashboard(database: string, key: Readonly<Record<string, string>>, host: string, port: number, echo: (line: string) => void): Dashboard {
+  const child = startChild([process.execPath, next, 'start', dashboardFolder, '-p', String(port), '-H', host], { DATABASE_URL: database, NEXT_TELEMETRY_DISABLED: '1', ...key }, line => {
+    echo(`dashboard: ${line}`);
+  });
+  return { ...child, origin: `http://${host}:${String(port)}` };
+}
+
+export const dashboardAnswers = (dashboard: Dashboard): Promise<void> =>
+  until('the dashboard answering', dashboardReadyMs, () => fetch(`${dashboard.origin}/tasks/NOPE-1`).then(response => response.status === 404, () => false));
 
 export const agents = ['stand-in', 'real'] as const;
 
@@ -138,7 +150,7 @@ export async function withWorld<T>(seeds: readonly string[], echo: (line: string
   const engine = startChild([process.execPath, join(root, 'tools/verify/main.ts'), 'local-engine', ...seeds.flatMap(seed => ['--seed', seed]), '--agent', agent], key, line => {
     echo(`local-engine: ${line}`);
   });
-  let dashboard: Child | undefined;
+  let dashboard: Dashboard | undefined;
   let owner: Kysely<unknown> | undefined;
   const stopping = (): void => {
     void dashboard?.stop();
@@ -157,12 +169,10 @@ export async function withWorld<T>(seeds: readonly string[], echo: (line: string
     }));
     owner = adminClient(ownerUrl);
     const port = await freePort();
-    const origin = `http://127.0.0.1:${String(port)}`;
     const database = await loginUrl(owner, ownerUrl);
-    dashboard = startChild([process.execPath, next, 'start', dashboardFolder, '-p', String(port), '-H', '127.0.0.1'], { DATABASE_URL: database, NEXT_TELEMETRY_DISABLED: '1', ...key }, line => {
-      echo(`dashboard: ${line}`);
-    });
-    await until('the dashboard answering', dashboardReadyMs, () => fetch(`${origin}/tasks/NOPE-1`).then(response => response.status === 404, () => false));
+    dashboard = startDashboard(database, key, '127.0.0.1', port, echo);
+    await dashboardAnswers(dashboard);
+    const { origin } = dashboard;
     started.push({ seeds, readySeconds: (performance.now() - began) / 1000 });
     echo(`dashboard ready at ${origin}`);
     const command = (sent: string, answer: string) => async (): Promise<void> => {

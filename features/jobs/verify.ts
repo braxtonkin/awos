@@ -1,8 +1,8 @@
 import { execFile, spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { cp, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { BatchV1Api, CoreV1Api, KubeConfig } from '@kubernetes/client-node';
@@ -16,6 +16,7 @@ import { liveScenario } from './live.ts';
 import { jobName } from './launch.ts';
 import { imageReference } from './settings.ts';
 import { sweepOnce } from './sweep.ts';
+import { mergeProblem, withoutSetup, type Baseline, type Git } from './workspace.ts';
 
 const run = promisify(execFile);
 const root = fileURLToPath(new URL('../../', import.meta.url));
@@ -42,7 +43,7 @@ const launchWith = (login: string, guard = 'true'): string =>
     "const image = imageReference.parse('example.com/job@sha256:' + '0'.repeat(64));",
     "const settings = { image, namespace: 'default', serviceAccount: 'autoworker-job', deadlineSeconds: 60 };",
     "const copy = accessOnly('{}');",
-    `export const planted = ${guard} ? manifests({ attempt: '1', taskKey: 'K-1', branch: 'autoworker/K-1-attempt-1', step: 'specify', image, repositoryUrl: 'https://example.com/r.git', startCommit: '', afterTurn: { kind: 'push' }, attemptToken: '', engineUrl: '', runAs: { name: 'n', email: 'e@example.com', githubToken: 't', codexLogin: ${login} } }, settings) : copy;`,
+    `export const planted = ${guard} ? manifests({ attempt: '1', taskKey: 'K-1', branch: 'autoworker/K-1-attempt-1', step: 'specify', image, repositoryUrl: 'https://example.com/r.git', startCommit: '', plan: { kind: 'push', setup: null, merge: null }, attemptToken: '', engineUrl: '', runAs: { name: 'n', email: 'e@example.com', githubToken: 't', codexLogin: ${login} } }, settings) : copy;`,
   ].join('\n');
 
 const typePlants = [
@@ -218,11 +219,114 @@ async function sweepPastAFailure(): Promise<Check> {
   }
 }
 
+type Repo = { readonly git: Git; readonly write: (path: string, content: string) => Promise<void>; readonly remove: (path: string) => Promise<void> };
+
+const gitEnvironment = { PATH: process.env['PATH'] ?? '/usr/bin:/bin', HOME: tmpdir(), GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_AUTHOR_NAME: 'Probe', GIT_AUTHOR_EMAIL: 'probe@example.com', GIT_COMMITTER_NAME: 'Probe', GIT_COMMITTER_EMAIL: 'probe@example.com' };
+
+async function inRepo<T>(files: Readonly<Record<string, string>>, work: (repo: Repo, start: string) => Promise<T>): Promise<T> {
+  const folder = await mkdtemp(join(tmpdir(), 'autoworker-workspace-'));
+  const tree = join(folder, 'workspace');
+  const git: Git = (args, input) => {
+    const ran = spawnSync('git', [`--git-dir=${join(folder, 'attempt.git')}`, `--work-tree=${tree}`, ...args], { encoding: 'utf8', env: gitEnvironment, ...(input === undefined ? {} : { input }) });
+    return ran.status === 0 ? Promise.resolve(ran.stdout.trim()) : Promise.reject(new Error(`git ${args.join(' ')}: ${ran.stderr.trim()}`));
+  };
+  const write = async (path: string, content: string): Promise<void> => {
+    await mkdir(dirname(join(tree, path)), { recursive: true });
+    await writeFile(join(tree, path), content);
+  };
+  const repo: Repo = { git, write, remove: path => rm(join(tree, path)) };
+  try {
+    spawnSync('git', ['init', '--quiet', '--bare', join(folder, 'attempt.git')], { env: gitEnvironment });
+    await git(['config', 'core.bare', 'false']);
+    for (const [path, content] of Object.entries(files)) await write(path, content);
+    await git(['add', '--all']);
+    await git(['commit', '--quiet', '-m', 'start']);
+    return await work(repo, await git(['rev-parse', 'HEAD']));
+  } finally {
+    await rm(folder, { recursive: true, force: true });
+  }
+}
+
+const snapshotOf = async (git: Git): Promise<string> => {
+  await git(['add', '--all']);
+  return git(['write-tree']);
+};
+
+const contents = async (git: Git, tree: string): Promise<string> => {
+  const paths = (await git(['ls-tree', '-r', '--name-only', tree])).split('\n');
+  const shown = await Promise.all(paths.map(async path => `${path}=${await git(['show', `${tree}:${path}`])}`));
+  return shown.join('; ');
+};
+
+async function setupOutputChecks(): Promise<readonly Check[]> {
+  const start = { 'src/a.ts': 'a', 'package-lock.json': 'lock 1', 'old.txt': 'old' };
+  const setUpIn = async ({ git, write, remove }: Repo): Promise<Baseline> => {
+    const before = await snapshotOf(git);
+    await write('made-by-setup.txt', 'setup');
+    await write('package-lock.json', 'lock 2');
+    await remove('old.txt');
+    return { before, after: await snapshotOf(git) };
+  };
+  return inRepo(start, async (repo, commit) => {
+    const baseline = await setUpIn(repo);
+    await repo.git(['add', '--all']);
+    const idle = await withoutSetup(repo.git, baseline);
+    const startTree = await repo.git(['rev-parse', `${commit}^{tree}`]);
+    await repo.write('src/a.ts', 'a changed');
+    await repo.write('src/b.ts', 'b');
+    await repo.write('made-by-setup.txt', 'kept by the agent');
+    await repo.git(['add', '--all']);
+    const edited = await contents(repo.git, await withoutSetup(repo.git, baseline));
+    const expected = 'made-by-setup.txt=kept by the agent; old.txt=old; package-lock.json=lock 1; src/a.ts=a changed; src/b.ts=b';
+    const idleName = "a do-nothing agent's push tree is its start commit's tree after a setup that adds, rewrites, and deletes files (F3)";
+    const editedName = "the push tree keeps the agent's edits, including one to a file the setup made, and drops the setup's own changes";
+    return [
+      idle === startTree ? pass(idleName, startTree) : fail(idleName, `${idle} is ${await contents(repo.git, idle)}, not the start tree ${startTree}`),
+      edited === expected ? pass(editedName, edited) : fail(editedName, `${edited}, not ${expected}`),
+    ];
+  });
+}
+
+const treeWith = async ({ git, write }: Repo, from: string, files: Readonly<Record<string, string | null>>): Promise<string> => {
+  await git(['read-tree', from]);
+  for (const [file, content] of Object.entries(files)) {
+    if (content === null) await git(['rm', '--cached', '--quiet', '--ignore-unmatch', file]);
+    else {
+      await write(file, content);
+      await git(['add', file]);
+    }
+  }
+  return git(['write-tree']);
+};
+
+const commitWith = async (repo: Repo, parent: string, files: Readonly<Record<string, string>>): Promise<string> => repo.git(['commit-tree', await treeWith(repo, parent, files), '-p', parent, '-m', 'side']);
+
+async function mergeGuardChecks(): Promise<readonly Check[]> {
+  return inRepo({ 'README.md': 'readme' }, async (repo, common) => {
+    const start = await commitWith(repo, common, { 'src/a.ts': 'ours' });
+    const merge = await commitWith(repo, common, { 'src/a.ts': 'theirs', 'notes.md': 'the base moved' });
+    const cases: readonly (readonly [string, Readonly<Record<string, string | null>>, string | null])[] = [
+      ["a resolution that keeps both sides' changes", { 'src/a.ts': 'ours\ntheirs', 'notes.md': 'the base moved' }, null],
+      ["the task's own version of the conflicted file, with the base's other change kept", { 'src/a.ts': 'ours', 'notes.md': 'the base moved' }, null],
+      ['conflict markers left in the conflicted file', { 'src/a.ts': '<<<<<<< HEAD\nours\n||||||| base\n=======\ntheirs\n>>>>>>> base', 'notes.md': 'the base moved' }, '`src/a.ts` still holds conflict markers'],
+      ['a change only the base made, taken back', { 'src/a.ts': 'ours\ntheirs', 'notes.md': null }, 'the merge takes back what the base branch changed in `notes.md`'],
+    ];
+    const checks: Check[] = [];
+    for (const [what, files, expected] of cases) {
+      const problem = await mergeProblem(repo.git, { start, merge, tree: await treeWith(repo, start, files) });
+      const name = `the bridge publishes a merge of the base only when its tree holds the base: ${what}`;
+      checks.push(problem === expected ? pass(name, problem ?? 'published') : fail(name, `${problem ?? 'published'}, not ${expected ?? 'published'}`));
+    }
+    return checks;
+  });
+}
+
 export const scenarios: readonly Scenario[] = [
   {
     name: 'jobs',
-    summary: "proves the launcher's invariants without a cluster: the AccessOnlyLogin input, the digest-only image column, the boundaries of services/job, and the pins",
-    run: async () => [typeGuards(), ...(await boundaryPlants()), await imageColumn(), refreshTokenRefused(), await pins(), await sweepPastAFailure()],
+    summary:
+      "proves the launcher's invariants without a cluster: the AccessOnlyLogin input, the digest-only image column, the boundaries of services/job, the pins, a push tree that leaves out the setup's own changes, and the guards on a merge of the base",
+    run: async () => [typeGuards(), ...(await boundaryPlants()), await imageColumn(), refreshTokenRefused(), await pins(), await sweepPastAFailure(), ...(await setupOutputChecks()), ...(await mergeGuardChecks())],
   },
   liveScenario,
 ];

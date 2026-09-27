@@ -1,64 +1,14 @@
 import { spawn } from 'node:child_process';
-import { outputLimit, reproductionPath, type RanScript, type Reproduction, type Side } from '../../shared/reproduction.ts';
-import { accounts, asBridge, asUser, bridgeGit, layout, path, run, type Account, type JobEnvironment } from './workspace.ts';
+import { outputLimit, reproductionPath, scriptFile, type Reproduction, type Side } from '../../shared/reproduction.ts';
+import { accounts, asBridge, asUser, bridgeGit, contained, kept, layout, path, run, setupMs, type Account, type JobEnvironment } from './workspace.ts';
 
 export type ReproducePlan = { readonly base: string; readonly change: string; readonly setup: string | null };
 
 export type Limits = { readonly setupMs: number; readonly runMs: number; readonly graceMs: number };
 
-export const reproduceLimits: Limits = { setupMs: 600_000, runMs: 300_000, graceMs: 2_000 };
+export const reproduceLimits: Limits = { setupMs, runMs: 300_000, graceMs: 2_000 };
 
 const scriptLimit = outputLimit;
-
-const kept = (text: string): string => (text.length <= outputLimit ? text : `[first ${String(text.length - outputLimit)} characters cut]\n${text.slice(-outputLimit)}`);
-
-type Contained = { readonly as: Account; readonly cwd: string; readonly env: Readonly<Record<string, string>>; readonly timeoutMs: number; readonly graceMs: number };
-
-function contained(command: string, args: readonly string[], given: Contained): Promise<RanScript> {
-  return new Promise(resolve => {
-    const child = spawn(command, args, { cwd: given.cwd, env: given.env, uid: given.as.uid, gid: given.as.gid, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
-    let output = '';
-    let timedOut = false;
-    const keep = (chunk: Buffer): void => {
-      output = (output + chunk.toString('utf8')).slice(-(outputLimit * 2));
-    };
-    child.stdout.on('data', keep);
-    child.stderr.on('data', keep);
-    const group = (): void => {
-      if (child.pid !== undefined) {
-        try {
-          process.kill(-child.pid, 'SIGKILL');
-        } catch {
-          return;
-        }
-      }
-    };
-    const timer = setTimeout(() => {
-      timedOut = true;
-      group();
-    }, given.timeoutMs);
-    let finished = false;
-    const finish = (exitCode: number | null): void => {
-      if (finished) return;
-      finished = true;
-      clearTimeout(timer);
-      group();
-      resolve({ exitCode, timedOut, output: kept(output) });
-    };
-    child.on('error', error => {
-      output += `\n${error.message}`;
-      finish(null);
-    });
-    child.on('exit', code => {
-      setTimeout(() => {
-        finish(code);
-      }, given.graceMs);
-    });
-    child.on('close', code => {
-      finish(code);
-    });
-  });
-}
 
 async function killAll(...users: readonly Account[]): Promise<void> {
   for (const user of users) await contained('sh', ['-c', 'kill -KILL -1 2>/dev/null; true'], { as: user, cwd: '/', env: { PATH: path() }, timeoutMs: 10_000, graceMs: 100 });
@@ -113,9 +63,9 @@ async function checkout(env: JobEnvironment, commit: string, script: string): Pr
     await ensureCommit(env, bridgeRun, commit);
     const folder = await run('mktemp', ['-d', '/tmp/autoworker-run.XXXXXX'], asRunner);
     await run('mkdir', [`${folder}/tree`, `${folder}/home`, `${folder}/tmp`], asRunner);
-    await run('sh', ['-c', 'cat > "$1"', 'sh', `${folder}/reproduce.sh`], { ...asRunner, input: script });
+    await run('sh', ['-c', 'cat > "$1"', 'sh', `${folder}/${scriptFile}`], { ...asRunner, input: script });
     await extract(bridgeRun, runner, commit, `${folder}/tree`);
-    return { folder, file: `${folder}/reproduce.sh` };
+    return { folder, file: `${folder}/${scriptFile}` };
   } catch (error) {
     return { failed: kept(error instanceof Error ? error.message : String(error)) };
   }

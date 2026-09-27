@@ -17,7 +17,7 @@ import { buildAttemptImage, ensureRegistry, jobNamespace, kindAddress, kubernete
 import { kind } from '../../tools/verify/kind.ts';
 import { agents, type Agent } from '../../tools/verify/dashboard.ts';
 import { withPostgres } from '../../tools/verify/postgres.ts';
-import { accessCopy, actAs, applySetup, closeStore, driverSettings, fakeCodexLogin, openStore, standInImage, startEngine, type Engine, type Store } from './autoworker.ts';
+import { accessCopy, actAs, applySetup, closeStore, driverSettings, fakeCodexLogin, openStore, standInImage, supervise, type Store, type Supervised } from './autoworker.ts';
 import { catalog, scripts, type Entry, type Script, type ScriptName } from './catalog.ts';
 import { ticking } from './codex-stand-in.ts';
 import { localLogins, startLocalWorld, type LocalWorld } from './local-world.ts';
@@ -32,7 +32,6 @@ const serviceAccount = 'autoworker-job';
 const settleMs = 8 * 60_000;
 const pollMs = 1_000;
 const namespaceGoneMs = 120_000;
-const restartDelayMs = 1_000;
 const longTicks = 3_600;
 const steerText = 'Also log the start time once.';
 const expiredTokenVariable = 'EXPIRED_GITHUB_TOKEN';
@@ -54,7 +53,7 @@ const routines = {
 
 type RoutineName = keyof typeof routines;
 
-export const seedNames = ['running', 'steer-acted', 'question', 'waiting-gate', 'failed-behavior', 'failed-environment', 'stopped', 'done', 'expired', 'nobody-to-run-as', 'login-expired', 'no-tasks', 'no-routines'] as const;
+export const seedNames = ['running', 'steer-acted', 'question', 'waiting-gate', 'failed-behavior', 'failed-environment', 'stopped', 'done', 'expired', 'failed-after-conflict', 'nobody-to-run-as', 'login-expired', 'no-tasks', 'no-routines'] as const;
 
 export type SeedName = (typeof seedNames)[number];
 
@@ -105,6 +104,7 @@ export const seeds: Readonly<Record<SeedName, Seed>> = {
   stopped: { plant: { kind: 'ticket', routine: 'work', work: 'longStream', assigned: true, then: 'stop' }, expect: { kind: 'task', state: 'stopped', step: 'specify', ...quiet } },
   done: { plant: { kind: 'past' }, expect: { kind: 'task', state: 'done', step: 'land', ...quiet } },
   expired: { plant: { kind: 'past' }, expect: { kind: 'task', state: 'done', step: 'land', ...quiet, aged: true } },
+  'failed-after-conflict': { plant: { kind: 'past' }, expect: waitsForRetry('implement', 'The Implement step failed 3 times in a row.') },
   'nobody-to-run-as': { plant: { kind: 'ticket', routine: 'unassigned', work: 'longStream', assigned: false }, expect: waitsForRetry('specify', 'Nobody can run this task yet.') },
   'login-expired': { plant: { kind: 'login' }, expect: { kind: 'login', state: 'invalid' } },
   'no-tasks': { plant: { kind: 'empty', routines: true }, expect: { kind: 'world', routines: true, tasks: 0 } },
@@ -257,56 +257,6 @@ function setupFile(login: string, wanted: readonly Wanted[], withRoutines: boole
           ...(routine.runAs === undefined ? {} : { runAs: routine.runAs }),
         }))
       : [],
-  };
-}
-
-type Supervised = { readonly stop: () => Promise<void>; readonly hold: () => Promise<void>; readonly release: () => void; readonly starts: () => number; readonly said: () => string };
-
-function supervise(store: Store, settings: Readonly<Record<string, string>>, stopping: AbortSignal, out: (line: string) => void): Supervised {
-  const stopped = new AbortController();
-  const signal = AbortSignal.any([stopping, stopped.signal]);
-  let engine: Engine = startEngine(store, settings);
-  let starts = 1;
-  let said = '';
-  let held: PromiseWithResolvers<void> | undefined;
-  const watching = (async () => {
-    while (!signal.aborted) {
-      const ended = await Promise.race([engine.exited.then(() => 'exited' as const), once(signal, 'abort').then(() => 'stopping' as const)]);
-      if (ended === 'stopping') return;
-      said += engine.said();
-      if (held !== undefined) {
-        out('the engine is held stopped until start-engine');
-        const released = await Promise.race([held.promise.then(() => true), once(signal, 'abort').then(() => false)]);
-        if (!released) return;
-      } else {
-        out(`the engine exited, so local-engine starts it again in ${String(restartDelayMs)} ms`);
-      }
-      const waited = await wait(restartDelayMs, undefined, { signal }).then(
-        () => true,
-        () => false,
-      );
-      if (!waited) return;
-      engine = startEngine(store, settings);
-      starts += 1;
-    }
-  })();
-  return {
-    stop: async () => {
-      stopped.abort();
-      await watching;
-      await engine.stop();
-    },
-    hold: async () => {
-      held ??= Promise.withResolvers();
-      await engine.kill();
-    },
-    release: () => {
-      const releasing = held;
-      held = undefined;
-      releasing?.resolve();
-    },
-    starts: () => starts,
-    said: () => said + engine.said(),
   };
 }
 

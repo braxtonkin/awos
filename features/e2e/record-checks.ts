@@ -4,12 +4,19 @@ import type { Database } from '../../shared/db/client.ts';
 import { reduce } from '../../shared/items.ts';
 import { behaviorOf, reproduction } from '../../shared/reproduction.ts';
 import { fail, pass, type Check } from '../../tools/verify/check.ts';
+import type { Fault } from './autoworker.ts';
 import { leftovers, type CleanSources } from './clean.ts';
 import { attemptsInOrder, evidenceRows, taskFor } from './record.ts';
 
 export const agentModel = 'gpt-6-luna';
 
 const stepOrder = ['specify', 'implement', 'verify', 'land'] as const;
+
+const faultStepOrders: Readonly<Record<Fault, readonly string[]>> = {
+  'engine-restart': stepOrder,
+  'lost-job': stepOrder,
+  'base-conflict': ['specify', 'implement', 'verify', 'implement', 'verify', 'land'],
+};
 
 export const agentSteps: ReadonlySet<string> = new Set<string>(['specify', 'implement', 'verify']);
 
@@ -32,16 +39,17 @@ async function replayed(db: Database, attempt: string): Promise<{ readonly store
   return { stored, replayed: transcript.items.filter(item => item.status === 'completed').map(item => item.id) };
 }
 
-export async function recordChecks(db: Database, ticket: string, runAs: string, description: string): Promise<readonly Check[]> {
+export async function recordChecks(db: Database, ticket: string, runAs: string, description: string, fault: Fault | undefined): Promise<readonly Check[]> {
   const tasks = await db.selectFrom('task').select(['id', 'state']).where('key', '=', ticket).execute();
   const task = await taskFor(db, ticket);
   if (task === undefined) return [fail('record: one task for the ticket', `no task has the key ${ticket}`)];
   const attempts = await attemptsInOrder(db, task.id);
   const described = attempts.map(attempt => `${attempt.id} ${attempt.step} ${attempt.verdict ?? 'live'}`).join(', ');
   const passed = attempts.filter(attempt => attempt.verdict === 'pass').map(attempt => attempt.step);
+  const expectedOrder = fault === undefined ? stepOrder : faultStepOrders[fault];
   const checks: Check[] = [
     check('record: one task for the ticket, and it is done', tasks.length === 1 && task.state === 'done', `${String(tasks.length)} task rows, state ${task.state}`),
-    check('record: attempts in step order with their verdicts', JSON.stringify(passed) === JSON.stringify(stepOrder) && attempts.every(attempt => attempt.verdict !== null), described),
+    check('record: attempts in step order with their verdicts', JSON.stringify(passed) === JSON.stringify(expectedOrder) && attempts.every(attempt => attempt.verdict !== null), described),
     check(`record: every attempt ran as ${runAs}`, attempts.length > 0 && attempts.every(attempt => attempt.runAs === runAs), attempts.map(attempt => `${attempt.id} as ${attempt.runAs}`).join(', ')),
   ];
   const prompts = await db.selectFrom('attempt_command').innerJoin('attempt', 'attempt.id', 'attempt_command.attempt_id').select(['attempt.id', 'attempt_command.input']).where('attempt.task_id', '=', task.id).where('attempt_command.kind', '=', 'turn.start').orderBy('attempt.id').execute();

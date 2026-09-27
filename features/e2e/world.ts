@@ -1,3 +1,4 @@
+import type { Agent } from '../../tools/verify/dashboard.ts';
 import { githubTokenFromEnvironment, githubWithToken, type GitHub } from './github.ts';
 import { jiraAt, jiraLoginFromEnvironment, type Jira } from './jira.ts';
 
@@ -11,6 +12,7 @@ export type EngineWorld = {
   readonly codexLogin: () => Promise<string>;
   readonly image: (attemptImage: string) => Promise<string>;
   readonly trustLogins: boolean;
+  readonly agent: Agent;
 };
 
 export type World = {
@@ -35,6 +37,7 @@ export function sandboxWorld(repository: string, codexLogin: () => Promise<strin
       codexLogin,
       image: attemptImage => Promise.resolve(attemptImage),
       trustLogins: false,
+      agent: 'real',
     },
     stop: () => Promise.resolve(),
   };

@@ -19,9 +19,19 @@ export const textOf = (cursor: Cursor): string => `${cursor.attempt}:${String(cu
 
 const moment = z.iso.datetime({ offset: true });
 
-const verdict = z.enum(['behavior_fail', 'changes_requested', 'environment_fail', 'fail', 'handed_off', 'lost', 'needs_input', 'not_launched', 'pass', 'red_check', 'review_required', 'stopped']) satisfies z.ZodType<Verdict>;
+export const verdict = z.enum(['behavior_fail', 'changes_requested', 'environment_fail', 'fail', 'handed_off', 'lost', 'needs_input', 'not_launched', 'pass', 'red_check', 'review_required', 'stopped']) satisfies z.ZodType<Verdict>;
 
-const attempt = z.strictObject({ id: z.string(), step: z.string(), startedAt: moment, finishedAt: moment.nullable(), verdict: verdict.nullable(), summary: z.string().nullable() });
+const attempt = z.strictObject({
+  id: z.string(),
+  step: z.string(),
+  person: z.string(),
+  startedAt: moment,
+  finishedAt: moment.nullable(),
+  verdict: verdict.nullable(),
+  outcome: z.string().nullable(),
+  summary: z.string().nullable(),
+  body: z.string().nullable(),
+});
 
 export type AttemptSummary = z.infer<typeof attempt>;
 

@@ -2,24 +2,24 @@ import { readFile } from 'node:fs/promises';
 import { parseArgs } from 'node:util';
 import type { z } from 'zod';
 import { checksOf, fail, pass, type Check, type Line, type Scenario } from '../../tools/verify/check.ts';
-import { accessCopy, fakeCodexLogin, faultNames, runAsNames, standInImage, type Fault, type RunAs } from './autoworker.ts';
+import { agents, type Agent } from '../../tools/verify/dashboard.ts';
+import { faultNames, runAsNames, type Fault, type RunAs } from './autoworker.ts';
 import { Catalog, catalog, type Entry } from './catalog.ts';
 import { cleanScenarios } from './clean-lanes.ts';
 import { driverNames, type DriverName } from './driver.ts';
 import { githubFromEnvironment, githubPayloads } from './github.ts';
 import { createRunBranch, runEndToEnd, type Inspect, type RunResult } from './harness.ts';
+import { holdScenario } from './hold.ts';
 import { jiraPayloads } from './jira.ts';
 import { laneLines, lanes, laneTen } from './lanes.ts';
 import { parsePayload, PayloadRejected } from './payload.ts';
 import { parkedScenario } from './parked.ts';
 import { seconds } from './report.ts';
 import { launchFaultsScenario } from './launch-faults.ts';
+import { openWorld } from './open-world.ts';
 import { roundTripScenario } from './round-trip.ts';
-import { kindAddress } from '../../tools/verify/cluster.ts';
-import { kind } from '../../tools/verify/kind.ts';
-import { startLocalWorld } from './local-world.ts';
 import { worldScenario } from './world-lane.ts';
-import { sandboxWorld, worldNames, type World, type WorldName } from './world.ts';
+import { worldNames, type WorldName } from './world.ts';
 import { standInSolutionsScenario } from './stand-in-check.ts';
 import { localEngineScenario } from './local-engine.ts';
 import { localReadScenario } from './local-read.ts';
@@ -33,38 +33,6 @@ const schemas: Readonly<Record<string, z.ZodType>> = {
   catalog: Catalog,
 };
 
-const agentNames = ['stand-in', 'real'] as const;
-
-type AgentName = (typeof agentNames)[number];
-
-async function openWorld(name: WorldName, repository: string, agent: AgentName): Promise<World> {
-  const broken = (checksOf(await kind.run(['up']))).find(check => !check.passed);
-  if (broken !== undefined) throw new Error(`kind did not come up: ${broken.name}, ${broken.detail}`);
-  switch (name) {
-    case 'sandbox':
-      return sandboxWorld(repository, accessCopy);
-    case 'local':
-      return localWorld(repository, agent);
-  }
-}
-
-async function localWorld(repository: string, agent: AgentName): Promise<World> {
-  const local = await startLocalWorld(await kindAddress(), repository);
-  return {
-    name: 'local',
-    jira: local.jira,
-    github: local.github,
-    engine: {
-      settings: { ...local.engine.settings },
-      secrets: { github: local.engine.secrets.GITHUB_TOKEN, jiraLogin: local.engine.secrets.AUTOWORKER_JIRA_LOGIN },
-      codexLogin: agent === 'real' ? accessCopy : () => Promise.resolve(fakeCodexLogin()),
-      image: agent === 'real' ? attemptImage => Promise.resolve(attemptImage) : standInImage,
-      trustLogins: true,
-    },
-    stop: local.stop,
-  };
-}
-
 const shuffled = <T>(items: readonly T[]): readonly T[] =>
   items
     .map(item => ({ item, key: Math.random() }))
@@ -73,7 +41,7 @@ const shuffled = <T>(items: readonly T[]): readonly T[] =>
 
 type Series = {
   readonly world: WorldName;
-  readonly agent: AgentName;
+  readonly agent: Agent;
   readonly repository: string;
   readonly driver: DriverName;
   readonly entries: readonly Entry[];
@@ -142,8 +110,8 @@ function seriesFrom(values: Parsed, inspect: Inspect | undefined): Series | Chec
   if (driver === undefined) return fail('driver named', `--driver must be one of ${driverNames.join(', ')}`);
   const world = worldNames.find(name => name === values.world);
   if (world === undefined) return fail('world named', `--world must be one of ${worldNames.join(', ')}`);
-  const agent = agentNames.find(name => name === values.agent);
-  if (agent === undefined) return fail('agent named', `--agent must be one of ${agentNames.join(', ')}`);
+  const agent = agents.find(name => name === values.agent);
+  if (agent === undefined) return fail('agent named', `--agent must be one of ${agents.join(', ')}`);
   const fault = values.fault === undefined ? undefined : faultNames.find(name => name === values.fault);
   if (values.fault !== undefined && fault === undefined) return fail('fault named', `--fault must be one of ${faultNames.join(', ')}`);
   if (fault !== undefined && driver !== 'autoworker') return fail('fault needs AutoWorker', '--fault works only with --driver autoworker');
@@ -176,7 +144,11 @@ function seriesFrom(values: Parsed, inspect: Inspect | undefined): Series | Chec
 
 const e2e: Scenario = {
   name: 'e2e',
-  summary: 'files an SBX ticket on a new e2e/run-* branch per run, lets a driver (AutoWorker by default) take it to merged and clean, checks the record, and posts a report; --runs N runs in a row and stops at the first failure, --fault injects engine-restart or lost-job, --world local runs offline against fakes on kind',
+  summary:
+    [
+      'files an SBX ticket on a new e2e/run-* branch per run, lets a driver (AutoWorker by default) take it to merged and clean, checks the record, and posts a report;',
+      '--runs N runs in a row and stops at the first failure, --fault injects engine-restart, lost-job, or base-conflict, --world local runs offline against fakes on kind',
+    ].join(' '),
   run: async args => {
     const { values } = parseArgs({ args: [...args], options: seriesOptions, allowPositionals: true });
     const series = seriesFrom(values, undefined);
@@ -250,6 +222,8 @@ const plants: readonly Plant[] = [
   { schema: 'jira.myself', valid: { accountId: 'a' }, remove: ['accountId'] },
   { schema: 'github.pull', valid: pull, remove: ['merged_at'] },
   { schema: 'github.pulls', valid: [pull], remove: [0, 'head', 'sha'] },
+  { schema: 'github.commit', valid: { sha: 'abc', tree: { sha: 'def' }, parents: [{ sha: 'ghi' }] }, remove: ['tree', 'sha'] },
+  { schema: 'github.tree', valid: { sha: 'abc', tree: [{ path: 'src/title-case.ts', mode: '100644', type: 'blob', sha: 'def' }], truncated: false }, remove: ['tree', 0, 'sha'] },
   { schema: 'github.checkRuns', valid: { total_count: 1, check_runs: [{ name: 'sandbox', status: 'completed', conclusion: 'success', completed_at: 'c', html_url: 'https://github.com/owner/repository/runs/1' }] }, remove: ['check_runs', 0, 'conclusion'] },
   { schema: 'catalog', valid: catalog, remove: [0, 'acceptance'] },
 ];
@@ -297,4 +271,4 @@ const e2ePayload: Scenario = {
   },
 };
 
-export const scenarios: readonly Scenario[] = [e2e, p7Lane, worldScenario, e2eBranch, e2ePayload, ...cleanScenarios, roundTripScenario, launchFaultsScenario, parkedScenario, standInSolutionsScenario, localEngineScenario, localReadScenario];
+export const scenarios: readonly Scenario[] = [e2e, p7Lane, worldScenario, e2eBranch, e2ePayload, ...cleanScenarios, roundTripScenario, launchFaultsScenario, parkedScenario, standInSolutionsScenario, localEngineScenario, localReadScenario, holdScenario];

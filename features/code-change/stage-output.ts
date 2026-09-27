@@ -1,8 +1,9 @@
 import { z } from 'zod';
 import { actionKinds, owe, ticket, type Owe, type OwedKinds } from '../../shared/actions.ts';
-import type { AgentSteps, Change, Earlier, Reply, Settled, StepInput, Verdicted } from '../../shared/agent-step.ts';
+import type { AgentSteps, BaseMerge, Change, Earlier, History, Reply, Settled, StepInput, Verdicted, Workspace } from '../../shared/agent-step.ts';
 import { behaviorOf, evidenceText, type Reproduction } from '../../shared/reproduction.ts';
-import { review } from '../../shared/review.ts';
+import { review, type Review } from '../../shared/review.ts';
+import { isConflictSendBack, landStep } from './land.ts';
 import { workflow } from './workflow.ts';
 
 type Kind = OwedKinds<typeof workflow>;
@@ -24,25 +25,38 @@ const planOf = (earlier: readonly Earlier[]): string => {
   return plan.success ? plan.data.plan : 'No plan was recorded.';
 };
 
+const sinceLastPass = (earlier: readonly Earlier[]): readonly Earlier[] => earlier.slice(earlier.findLastIndex(entry => entry.step === 'implement' && entry.verdict === 'pass') + 1);
+
+const reportOf = ({ evidence, output }: Earlier): string => evidenceText(evidence) ?? textOf(output) ?? JSON.stringify(output);
+
 function cameBack(earlier: readonly Earlier[]): string | null {
-  const lastImplement = earlier.findLastIndex(entry => entry.step === 'implement');
-  const after = earlier.slice(lastImplement + 1).findLast(entry => entry.step !== 'specify' && entry.step !== 'implement' && entry.verdict !== 'pass');
-  if (after === undefined || lastImplement < 0) return null;
-  const evidence = evidenceText(after.evidence);
-  return [`The task came back from ${after.step} with ${after.verdict}.`, evidence ?? textOf(after.output) ?? JSON.stringify(after.output)].join('\n\n');
+  const after = sinceLastPass(earlier).findLast(entry => entry.step !== 'specify' && entry.step !== 'implement' && entry.verdict !== 'pass');
+  if (after === undefined) return null;
+  return [`The task came back from ${after.step} with ${after.verdict}.`, reportOf(after)].join('\n\n');
 }
 
-function input({ step, ticket: { key, title, description }, earlier }: StepInput): string {
+function lastFailure(earlier: readonly Earlier[], step: string, verdict: Earlier['verdict']): string | null {
+  const last = sinceLastPass(earlier).findLast(entry => entry.step === step);
+  return last?.verdict === verdict ? ['Your last attempt at this step failed.', reportOf(last)].join('\n\n') : null;
+}
+
+const workspace = ({ step, earlier }: History): Workspace => ({
+  setup: step === 'implement' || step === 'verify',
+  mergesBase: step === 'implement' && sinceLastPass(earlier).some(entry => entry.step === landStep && entry.verdict === 'red_check' && isConflictSendBack(entry.output)),
+});
+
+const mergeFirst = ({ branch, head }: BaseMerge): string =>
+  `AutoWorker started merging \`${head}\`, the head of \`${branch}\` when this attempt started, into this branch before your turn, and left the merge uncommitted. Finish that merge first, as your instructions say.`;
+
+function input({ step, ticket: { key, title, description }, earlier, merge }: StepInput): string {
   const named = description === null ? `Ticket ${key}: ${title}` : `Ticket ${key}: ${title}\n\n${description.trim()}`;
   switch (step) {
     case 'specify':
       return named;
-    case 'implement': {
-      const back = cameBack(earlier);
-      return [named, `Plan:\n\n${planOf(earlier)}`, ...(back === null ? [] : [back])].join('\n\n');
-    }
+    case 'implement':
+      return [named, `Plan:\n\n${planOf(earlier)}`, cameBack(earlier), merge === null ? null : mergeFirst(merge), lastFailure(earlier, 'implement', 'fail')].filter(part => part !== null).join('\n\n');
     case 'verify':
-      return [named, `Plan:\n\n${planOf(earlier)}`].join('\n\n');
+      return [named, `Plan:\n\n${planOf(earlier)}`, lastFailure(earlier, 'verify', 'environment_fail')].filter(part => part !== null).join('\n\n');
     default:
       throw new Error(`Code change has no agent step ${step}.`);
   }
@@ -56,11 +70,12 @@ function settleVerify(output: unknown, reproduced: Reproduction | null): Settled
 
 const madeNoChange = "Implement made no change: the attempt pushed no commit, and it did not start from a lost attempt's push. Verify can only compare a change with the base, so the attempt failed.";
 
-const noChange = { outcome: 'fail', summary: 'The agent made no change.', blocks: [{ kind: 'text', title: null, body: madeNoChange }] };
+const failed = (summary: string, body: string): Review => ({ outcome: 'blocked', summary, blocks: [{ kind: 'text', title: null, body }] });
 
 function settleImplement(output: unknown, change: Change): Settled {
+  if (change.declined !== null) return { output: failed('AutoWorker pushed nothing.', `AutoWorker pushed nothing, because ${change.declined}.`), evidence: null, observed: 'fail' };
   const changed = change.pushed !== null || change.carried !== null;
-  return changed ? { output, evidence: null, observed: null } : { output: noChange, evidence: null, observed: 'fail' };
+  return changed ? { output, evidence: null, observed: null } : { output: failed('The agent made no change.', madeNoChange), evidence: null, observed: 'fail' };
 }
 
 function settle({ step, output, change, reproduction: reproduced }: Reply): Settled {
@@ -93,7 +108,7 @@ function implemented(verdicted: Verdicted): readonly Owe<Kind>[] {
   const opened = pullRequest.kind !== 'none'
     ? []
     : [owe(actionKinds.prOpenDraft, { repository: repository.github, head: taskBranch.name, base: repository.branch, title: `${named.key}: ${named.title}`, body: textOf(output) ?? named.title })];
-  return [...advanced, ...opened, ...comment(named.key, 'AutoWorker pushed the change to its draft pull request.', true), ...deletions(verdicted)];
+  return [...advanced, ...opened, ...comment(named.key, `AutoWorker pushed ${head} to its draft pull request.`, true), ...deletions(verdicted)];
 }
 
 const ended = ({ ends, endStatus, startStatus, ticket: named }: Verdicted): readonly Owe<Kind>[] =>
@@ -125,4 +140,4 @@ function stepOwes(verdicted: Verdicted): readonly Owe<Kind>[] {
   }
 }
 
-export const agentSteps: AgentSteps<Kind> = { input, settle, owes };
+export const agentSteps: AgentSteps<Kind> = { workspace, input, settle, owes };

@@ -30,13 +30,13 @@ const later = (now: Date, ms: number): Date => new Date(now.getTime() + ms);
 const hasLiveAttempt = (eb: ExpressionBuilder<DB, 'task'>) =>
   eb.exists(eb.selectFrom('attempt').select('attempt.id').whereRef('attempt.task_id', '=', 'task.id').where('attempt.finished_at', 'is', null));
 
-export type Start = { readonly commit: string; readonly inherited: boolean };
+export type Start = { readonly commit: string; readonly inherited: boolean; readonly merge: string | null };
 
 export async function claim(db: Database, task: string, now: Date, leaseMs: number, runAs: string | null, start: Start | null): Promise<Claim> {
   try {
     const inserted = await db
       .insertInto('attempt')
-      .columns(['task_id', 'routine_id', 'routine_version', 'step', 'epoch', 'run_as_id', 'started_at', 'lease_until', 'branch', 'start_commit', 'last_pushed'])
+      .columns(['task_id', 'routine_id', 'routine_version', 'step', 'epoch', 'run_as_id', 'started_at', 'lease_until', 'branch', 'start_commit', 'last_pushed', 'merge_head'])
       .expression(
         db
           .selectFrom('task')
@@ -60,6 +60,7 @@ export async function claim(db: Database, task: string, now: Date, leaseMs: numb
             ).as('branch'),
             eb.cast<string | null>(eb.val(start?.commit ?? null), 'text').as('start_commit'),
             eb.cast<string | null>(eb.val(start?.inherited === true ? start.commit : null), 'text').as('last_pushed'),
+            eb.cast<string | null>(eb.val(start?.merge ?? null), 'text').as('merge_head'),
           ])
           .where('task.id', '=', task),
       )

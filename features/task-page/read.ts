@@ -2,13 +2,13 @@ import { sql } from 'kysely';
 import { jsonArrayFrom } from 'kysely/helpers/postgres';
 import { z } from 'zod';
 import type { Database } from '../../shared/db/client.ts';
-import type { Verdict } from '../../shared/db/types.ts';
 import { emptyTranscript } from '../../shared/items.ts';
+import { reproduction, type Reproduction } from '../../shared/reproduction.ts';
 import { answerFrom, payloads } from '../../shared/requests.ts';
 import { review, type Answer, type Review } from '../../shared/review.ts';
 import { saidKinds, type Said } from '../../shared/said.ts';
 import { marksOf } from '../../shared/task-status.ts';
-import { taskState, waitingOn, type AttemptTranscript, type Cursor, type Kept, type Line, type TaskLive } from './protocol.ts';
+import { taskState, verdict, waitingOn, type AttemptSummary, type AttemptTranscript, type Cursor, type Kept, type Line, type TaskLive } from './protocol.ts';
 import { extend } from './timeline.ts';
 
 export type Header = {
@@ -25,14 +25,13 @@ export type Step = { readonly name: string; readonly gate: boolean };
 
 export type Field = { readonly name: string; readonly text: string };
 
-export type Evidence = { readonly attempt: string; readonly step: string; readonly recordedAt: string; readonly blocks: readonly Field[]; readonly facts: readonly Field[] };
+export type Shown = { readonly kind: 'reproduction'; readonly reproduction: Reproduction } | { readonly kind: 'fields'; readonly blocks: readonly Field[]; readonly facts: readonly Field[] };
 
-export type AttemptRow = { readonly id: string; readonly step: string; readonly verdict: Verdict | null; readonly person: string; readonly startedAt: string; readonly finishedAt: string | null };
+export type Evidence = { readonly attempt: string; readonly step: string; readonly recordedAt: string; readonly shown: Shown };
 
 export type TaskRecord = {
   readonly steps: readonly Step[];
   readonly evidence: readonly Evidence[];
-  readonly attempts: readonly AttemptRow[];
   readonly mergeQueued: boolean;
 };
 
@@ -52,12 +51,24 @@ const moment = z.union([z.date(), z.string()]).transform(value => new Date(value
 
 const id = z.union([z.string(), z.number()]).transform(String);
 
-const verdict = z.enum(['behavior_fail', 'changes_requested', 'environment_fail', 'fail', 'handed_off', 'lost', 'needs_input', 'not_launched', 'pass', 'red_check', 'review_required', 'stopped']) satisfies z.ZodType<Verdict>;
-
 const reviewOf = (output: unknown): Review | null => {
   const parsed = review.loose().safeParse(output);
   return parsed.success ? { outcome: parsed.data.outcome, summary: parsed.data.summary, blocks: parsed.data.blocks } : null;
 };
+
+const recorded = z.looseObject({ outcome: z.string().nullable().catch(null), summary: z.string(), blocks: z.array(z.unknown()).catch([]) });
+
+const textBlock = z.object({ kind: z.literal('text'), body: z.string() });
+
+type Words = Pick<AttemptSummary, 'outcome' | 'summary' | 'body'>;
+
+function wordsOf(output: unknown): Words {
+  const parsed = recorded.safeParse(output);
+  if (!parsed.success) return { outcome: null, summary: null, body: null };
+  const bodies = parsed.data.blocks.flatMap(block => textBlock.safeParse(block).data?.body.trim() ?? []).filter(body => body !== '');
+  const summary = parsed.data.summary.trim();
+  return { outcome: parsed.data.outcome, summary: summary === '' ? null : summary, body: bodies.length === 0 ? null : bodies.join('\n\n') };
+}
 
 const snapshotRow = z.object({
   state: taskState,
@@ -67,7 +78,7 @@ const snapshotRow = z.object({
   review_attempt: id.nullable(),
   stopped_by_name: z.string().nullable(),
   stopped_at: moment.nullable(),
-  attempts: z.array(z.object({ id, step: z.string(), started_at: moment, finished_at: moment.nullable(), verdict: verdict.nullable(), output: z.unknown() })),
+  attempts: z.array(z.object({ id, step: z.string(), person: z.string(), started_at: moment, finished_at: moment.nullable(), verdict: verdict.nullable(), output: z.unknown() })),
   lines: z.array(z.object({ attempt: id, seq: z.coerce.number(), at: moment, body: z.unknown() })),
   requests: z.array(
     z.object({
@@ -176,7 +187,12 @@ export async function snapshot(db: Database, task: string, range: Range): Promis
       'stopper.name as stopped_by_name',
       'stop.at as stopped_at',
       jsonArrayFrom(
-        eb.selectFrom('attempt').select(['attempt.id', 'attempt.step', 'attempt.started_at', 'attempt.finished_at', 'attempt.verdict', 'attempt.output']).whereRef('attempt.task_id', '=', 'task.id').orderBy('attempt.id'),
+        eb
+          .selectFrom('attempt')
+          .innerJoin('person', 'person.id', 'attempt.run_as_id')
+          .select(['attempt.id', 'attempt.step', 'person.name as person', 'attempt.started_at', 'attempt.finished_at', 'attempt.verdict', 'attempt.output'])
+          .whereRef('attempt.task_id', '=', 'task.id')
+          .orderBy('attempt.id'),
       ).as('attempts'),
       jsonArrayFrom(
         eb
@@ -223,7 +239,7 @@ export async function snapshot(db: Database, task: string, range: Range): Promis
       waitingReason: parsed.waiting_reason,
       marks: marksOf({ state: parsed.state, waitingOn: parsed.waiting_on, newestVerdict: newest?.verdict ?? null }),
       stoppedBy: parsed.stopped_by_name === null || parsed.stopped_at === null ? null : { name: parsed.stopped_by_name, at: parsed.stopped_at },
-      attempts: parsed.attempts.map(each => ({ id: each.id, step: each.step, startedAt: each.started_at, finishedAt: each.finished_at, verdict: each.verdict, summary: reviewOf(each.output)?.summary ?? null })),
+      attempts: parsed.attempts.map(each => ({ id: each.id, step: each.step, person: each.person, startedAt: each.started_at, finishedAt: each.finished_at, verdict: each.verdict, ...wordsOf(each.output) })),
       review: waitingReview === undefined || asked === null ? null : { attempt: waitingReview.id, review: asked },
     },
     lines: parsed.lines,
@@ -278,16 +294,21 @@ function leavesOf(value: unknown, path: readonly string[]): readonly Leaf[] {
   return [];
 }
 
-const fieldsOf = (body: unknown): Pick<Evidence, 'blocks' | 'facts'> => {
+const fieldsOf = (body: unknown): Shown => {
   const leaves = leavesOf(body, []);
   const bare = ({ name, text }: Leaf): Field => ({ name, text });
-  return { blocks: leaves.filter(leaf => leaf.block).map(bare), facts: leaves.filter(leaf => !leaf.block).map(bare) };
+  return { kind: 'fields', blocks: leaves.filter(leaf => leaf.block).map(bare), facts: leaves.filter(leaf => !leaf.block).map(bare) };
+};
+
+const shownOf = (body: unknown): Shown => {
+  const parsed = reproduction.safeParse(body);
+  return parsed.success ? { kind: 'reproduction', reproduction: parsed.data } : fieldsOf(body);
 };
 
 const mergeKind = 'pr.merge';
 
 async function recordOf(db: Database, task: { readonly id: string; readonly workflow: string; readonly gates: readonly string[] }): Promise<TaskRecord> {
-  const [steps, evidence, attempts, merge] = await Promise.all([
+  const [steps, evidence, merge] = await Promise.all([
     db.selectFrom('published_workflow_step').select('published_workflow_step.name').where('published_workflow_step.workflow', '=', task.workflow).orderBy('published_workflow_step.position').execute(),
     db
       .selectFrom('evidence')
@@ -296,19 +317,11 @@ async function recordOf(db: Database, task: { readonly id: string; readonly work
       .where('evidence.task_id', '=', task.id)
       .orderBy('evidence.attempt_id')
       .execute(),
-    db
-      .selectFrom('attempt')
-      .innerJoin('person', 'person.id', 'attempt.run_as_id')
-      .select(['attempt.id', 'attempt.step', 'attempt.verdict', 'person.name', 'attempt.started_at', 'attempt.finished_at'])
-      .where('attempt.task_id', '=', task.id)
-      .orderBy('attempt.id')
-      .execute(),
     db.selectFrom('outbox').select('outbox.kind').where('outbox.task_id', '=', task.id).where('outbox.kind', '=', mergeKind).where('outbox.state', 'in', ['owed', 'done']).executeTakeFirst(),
   ]);
   return {
     steps: steps.map(step => ({ name: step.name, gate: task.gates.includes(step.name) })),
-    evidence: evidence.map(row => ({ attempt: row.attempt_id, step: row.step, recordedAt: row.recorded_at.toISOString(), ...fieldsOf(row.body) })),
-    attempts: attempts.map(row => ({ id: row.id, step: row.step, verdict: row.verdict, person: row.name, startedAt: row.started_at.toISOString(), finishedAt: row.finished_at?.toISOString() ?? null })),
+    evidence: evidence.map(row => ({ attempt: row.attempt_id, step: row.step, recordedAt: row.recorded_at.toISOString(), shown: shownOf(row.body) })),
     mergeQueued: merge !== undefined,
   };
 }
@@ -318,7 +331,7 @@ export async function readTask(db: Database, key: string, now: Date = new Date()
     .selectFrom('task')
     .innerJoin('routine_version as version', join => join.onRef('version.routine_id', '=', 'task.routine_id').onRef('version.version', '=', 'task.found_version'))
     .leftJoin('repository', 'repository.id', 'task.repository_id')
-    .select(eb => [
+    .select([
       'task.id',
       'task.key',
       'task.title',
@@ -328,14 +341,6 @@ export async function readTask(db: Database, key: string, now: Date = new Date()
       'version.name as routine',
       'repository.github',
       'repository.branch',
-      eb
-        .selectFrom('attempt')
-        .innerJoin('person', 'person.id', 'attempt.run_as_id')
-        .select('person.name')
-        .whereRef('attempt.task_id', '=', 'task.id')
-        .orderBy('attempt.id', 'desc')
-        .limit(1)
-        .as('runs_as'),
     ])
     .where('task.key', '=', key)
     .executeTakeFirst();
@@ -350,7 +355,7 @@ export async function readTask(db: Database, key: string, now: Date = new Date()
       title: header.title,
       routine: header.routine,
       repository: header.github === null || header.branch === null ? null : `${header.github} → ${header.branch}`,
-      runsAs: header.runs_as,
+      runsAs: found.live.attempts.at(-1)?.person ?? null,
       foundAt: header.found_at.toISOString(),
     },
     record,

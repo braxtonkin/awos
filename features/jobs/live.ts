@@ -16,7 +16,7 @@ import { docker } from '../../tools/verify/docker.ts';
 import { kind } from '../../tools/verify/kind.ts';
 import { withPostgres } from '../../tools/verify/postgres.ts';
 import { connectCluster, labels, type Cluster } from '../../shared/cluster.ts';
-import type { JobAfterTurn } from '../../shared/workflow.ts';
+import type { JobPlan } from '../../shared/workflow.ts';
 import { containerName, imageFor, jobName, jobState, launch, manifests, type JobState } from './launch.ts';
 import { imageReference, type ImageReference, type JobSettings } from './settings.ts';
 import { sweepOnce } from './sweep.ts';
@@ -174,7 +174,7 @@ type Options = {
   readonly startCommit?: string;
   readonly script?: string;
   readonly deadlineSeconds?: number;
-  readonly afterTurn?: JobAfterTurn;
+  readonly plan?: JobPlan;
   readonly engineUrl?: string;
 };
 
@@ -191,7 +191,7 @@ async function start(world: World, options: Options = {}): Promise<Started> {
     image: options.image ?? world.image,
     repositoryUrl: options.repositoryUrl ?? thisRepository,
     startCommit: options.startCommit ?? pinnedCommit,
-    afterTurn: options.afterTurn ?? { kind: 'push' as const },
+    plan: options.plan ?? { kind: 'push' as const, setup: null, merge: null },
     attemptToken: token,
     engineUrl: options.engineUrl ?? `http://${world.address}:9`,
     runAs: { name: 'Probe Person', email: 'probe@example.com', githubToken: world.githubToken, codexLogin: world.login },
@@ -742,7 +742,7 @@ async function reproduceLane(world: World): Promise<readonly Check[]> {
         step: 'verify',
         repositoryUrl: server.url('reproduce.git'),
         startCommit: change,
-        afterTurn: { kind: 'reproduce', base, setup: 'echo setup > setup-ran.txt' },
+        plan: { kind: 'reproduce', base, setup: 'echo setup > setup-ran.txt' },
         script: reproduceScript(script, leftovers),
       });
       await settled(world, started.attempt);

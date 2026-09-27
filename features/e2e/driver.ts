@@ -19,7 +19,6 @@ const checkPollMs = 10_000;
 
 export type Assignment = Drive & {
   readonly jira: Jira;
-  readonly github: GitHub;
   readonly workdir: string;
 };
 

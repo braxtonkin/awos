@@ -1,13 +1,13 @@
 'use client';
 
 import { useState } from 'react';
-import type { Verdict } from '../../shared/db/types.ts';
-import { isFailed } from '../../shared/task-status.ts';
+import { failing, isFailed } from '../../shared/task-status.ts';
 import { clock } from '../../shared/ui/clock.ts';
 import { StatusMarks } from '../../shared/ui/status.tsx';
 import { color } from '../../shared/ui/tokens.ts';
 import { useFrames, type Stream } from '../../shared/ui/use-frames.ts';
-import { frame, type TaskLive } from './protocol.ts';
+import { failureOf, whyOf } from './ending.ts';
+import { frame, type AttemptSummary, type TaskLive } from './protocol.ts';
 import { stepName } from './time.ts';
 import { numbered } from './timeline.ts';
 
@@ -19,52 +19,37 @@ export function useLive(initial: TaskLive, stream: Stream): TaskLive {
   return task;
 }
 
-type Card = { readonly headline: string; readonly instruction: string | null; readonly notes: readonly string[] };
+type Card = { readonly headline: string; readonly reason: string | null; readonly instruction: string | null; readonly notes: readonly string[] };
 
 type Landing = { readonly mergeQueued: boolean; readonly took: string | null };
 
-const failures: Readonly<Record<Verdict, ((step: string) => string) | null>> = {
-  behavior_fail: step => `${step} found the behavior still wrong.`,
-  environment_fail: step => `${step} could not run because the environment broke, not the change.`,
-  fail: step => `${step} failed.`,
-  red_check: () => 'A check on the pull request is red.',
-  lost: step => `The agent stopped answering during ${step}.`,
-  not_launched: step => `The agent could not start ${step}.`,
-  changes_requested: null,
-  handed_off: null,
-  needs_input: null,
-  pass: null,
-  review_required: null,
-  stopped: null,
-};
-
-const triedOf = (live: TaskLive): string | null => {
-  const newest = live.attempts.at(-1);
-  return newest === undefined ? null : (live.attempts.findLast(each => each.step !== newest.step && each.summary !== null)?.summary ?? null);
-};
-
 const mergeQueueNote = 'Stop does not recall a pull request from the merge queue.';
+
+const leadUpOf = (task: TaskLive, failed: AttemptSummary): string | null => {
+  const before = task.attempts.findLast(each => each.step !== failed.step);
+  if (before === undefined) return null;
+  if (before.verdict !== 'pass') return whyOf(before);
+  return before.summary === null ? null : `What it tried: ${before.summary}`;
+};
 
 function waitingCard(task: TaskLive, notes: readonly string[]): Card {
   const newest = task.attempts.at(-1);
   const step = stepName(task.step);
   const instruction = task.waitingReason;
-  const verdict = newest?.verdict ?? null;
-  if (verdict !== null && newest !== undefined && isFailed({ state: task.state, waitingOn: task.waitingOn, newestVerdict: verdict })) {
-    const failed = failures[verdict];
-    const tried = triedOf(task);
-    return { headline: failed === null ? `${stepName(newest.step)} failed.` : failed(stepName(newest.step)), instruction, notes: tried === null ? notes : [`What it tried: ${tried}`, ...notes] };
+  if (newest !== undefined && isFailed({ state: task.state, waitingOn: task.waitingOn, newestVerdict: newest.verdict })) {
+    const leadUp = leadUpOf(task, newest);
+    return { ...failureOf(newest), instruction, notes: leadUp === null ? notes : [leadUp, ...notes] };
   }
   switch (task.waitingOn) {
     case 'approval':
-      return { headline: `Waiting for your approval of ${step}.`, instruction, notes };
+      return { headline: `Waiting for your approval of ${step}.`, reason: null, instruction, notes };
     case 'answer':
-      return { headline: `Waiting for your answer to the question ${step} asked.`, instruction, notes };
+      return { headline: `Waiting for your answer to the question ${step} asked.`, reason: null, instruction, notes };
     case 'outside_approval':
-      return { headline: 'Waiting for an approval outside AutoWorker.', instruction, notes };
+      return { headline: 'Waiting for an approval outside AutoWorker.', reason: null, instruction, notes };
     case 'retry':
     case null:
-      return { headline: `${step} waits for you.`, instruction, notes };
+      return { headline: `${step} waits for you.`, reason: null, instruction, notes };
   }
 }
 
@@ -72,7 +57,7 @@ function stoppedNext(task: TaskLive): string {
   const step = stepName(task.step);
   if (task.waitingOn === 'approval') return `Retry brings back the approval of ${step}, without running it again.`;
   const verdict = task.attempts.at(-1)?.verdict ?? null;
-  return verdict !== null && failures[verdict] !== null ? 'Retry starts the agent again.' : `Retry starts the agent again at ${step}.`;
+  return verdict !== null && failing[verdict] ? 'Retry starts the agent again.' : `Retry starts the agent again at ${step}.`;
 }
 
 function cardOf(task: TaskLive, landing: Landing, zone: string): Card {
@@ -87,14 +72,14 @@ function cardOf(task: TaskLive, landing: Landing, zone: string): Card {
           : numbered(task.attempts, newest.id) <= 1
             ? `${step} has been running since ${clock(newest.startedAt, zone)}.`
             : `${step} has been running again since ${clock(newest.startedAt, zone)}, on try ${String(numbered(task.attempts, newest.id))}.`;
-      return { headline, instruction: 'Follow the agent on the right, and stop it there if it goes wrong.', notes };
+      return { headline, reason: null, instruction: 'Follow the agent on the right, and stop it there if it goes wrong.', notes };
     }
     case 'waiting':
       return waitingCard(task, notes);
     case 'stopped':
-      return { headline: task.stoppedBy === null ? `This task stopped during ${stepName(task.step)}.` : `${task.stoppedBy.name} stopped this task at ${clock(task.stoppedBy.at, zone)}.`, instruction: stoppedNext(task), notes };
+      return { headline: task.stoppedBy === null ? `This task stopped during ${stepName(task.step)}.` : `${task.stoppedBy.name} stopped this task at ${clock(task.stoppedBy.at, zone)}.`, reason: null, instruction: stoppedNext(task), notes };
     case 'done':
-      return { headline: 'The task landed.', instruction: null, notes: landing.took === null ? [] : [`It took ${landing.took} from start to merge.`] };
+      return { headline: 'The task landed.', reason: null, instruction: null, notes: landing.took === null ? [] : [`It took ${landing.took} from start to merge.`] };
   }
 }
 
@@ -109,6 +94,11 @@ export function StatusCard({ initial, landing, stream, zone }: StatusCardProps) 
       <p data-card="headline" style={{ margin: 0, fontSize: 15, lineHeight: '22px', fontWeight: 600 }}>
         {card.headline}
       </p>
+      {card.reason === null ? null : (
+        <p data-card="reason" style={{ margin: 0, fontSize: 14, lineHeight: '20px' }}>
+          {card.reason}
+        </p>
+      )}
       {card.instruction === null ? null : (
         <p data-card="instruction" style={{ margin: 0, fontSize: 14, lineHeight: '20px' }}>
           {card.instruction}

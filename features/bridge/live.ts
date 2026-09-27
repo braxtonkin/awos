@@ -188,9 +188,9 @@ function settingsFor(world: World, overrides: Partial<BridgeSettings> = {}): Bri
   };
 }
 
-function startBridge(world: World, afterTurn: AfterTurn = () => Promise.resolve([]), overrides: Partial<BridgeSettings> = {}): Run {
+function startBridge(world: World, afterTurn: AfterTurn = () => Promise.resolve({ lines: [], declined: null }), overrides: Partial<BridgeSettings> = {}): Run {
   const log: string[] = [];
-  const ending = runBridge(settingsFor(world, overrides), afterTurn, line => log.push(`${new Date().toISOString()} ${line}`));
+  const ending = runBridge(settingsFor(world, overrides), { beforeTurn: () => Promise.resolve(undefined), afterTurn }, line => log.push(`${new Date().toISOString()} ${line}`));
   return { ending, log };
 }
 
@@ -439,7 +439,7 @@ function pushes(): Pushes {
   return {
     afterTurn: () => {
       count += 1;
-      return Promise.resolve([]);
+      return Promise.resolve({ lines: [], declined: null });
     },
     count: () => count,
   };
@@ -499,7 +499,7 @@ async function finishingLane(world: World): Promise<readonly Check[]> {
     const sent = await personSteers(world.db, world.attempt, 'Also check the edge case.', new Date());
     steer = typeof sent === 'string' ? undefined : sent.seq;
     await wait(3000);
-    return [];
+    return { lines: [], declined: null };
   });
   const ended = await endingCheck(run, 0);
   const delivery = (await deliveries(world.db, world.attempt)).find(command => command.seq === steer)?.state;
@@ -641,7 +641,7 @@ async function lostAnswerLane(world: World): Promise<readonly Check[]> {
   await sendCommand(world.db, world.attempt, { kind: 'turn.start', prompt: tickPrompt(2), outputSchema: null }, new Date());
   const proxy = await answerLosingProxy(world.engine.url, 3000);
   try {
-    const run = startBridge(world, () => Promise.resolve([]), { engineUrl: proxy.url });
+    const run = startBridge(world, () => Promise.resolve({ lines: [], declined: null }), { engineUrl: proxy.url });
     const ended = await endingCheck(run, 0);
     const row = await world.db.selectFrom('attempt').select(['verdict']).where('id', '=', world.attempt).executeTakeFirstOrThrow();
     const lostName = "the engine's answer to the end line was lost, and posts failed for 3 s after it";
@@ -662,7 +662,7 @@ async function latePushLane(world: World): Promise<readonly Check[]> {
   const run = startBridge(world, async () => {
     await world.db.updateTable('attempt').set({ finished_at: new Date(), verdict: 'stopped' }).where('id', '=', world.attempt).execute();
     pushed += 1;
-    return [{ kind: 'pushed', commit, branch: 'autoworker/LANE-1-attempt-1' }];
+    return { lines: [{ kind: 'pushed', commit, branch: 'autoworker/LANE-1-attempt-1' }], declined: null };
   });
   const ended = await endingCheck(run, 1, 'ended');
   const row = await world.db.selectFrom('attempt').select(['verdict', 'last_pushed']).where('id', '=', world.attempt).executeTakeFirstOrThrow();

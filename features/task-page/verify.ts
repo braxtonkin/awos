@@ -176,6 +176,7 @@ export const screens: readonly Screen[] = [
   state('task-done', 'done', null),
   state('task-evidence', 'failed-behavior', 'evidence'),
   state('task-attempts', 'failed-behavior', 'attempts'),
+  state('task-conflict', 'failed-after-conflict', null),
   task('task-running', 'running', [{ waitFor: '[data-live="true"]' }]),
   task('task-waiting', 'question'),
   task('task-empty', 'nobody-to-run-as'),

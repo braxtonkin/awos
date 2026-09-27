@@ -271,7 +271,7 @@ Rejected options:
 - **Record the change working, after only.** It takes one run instead of two, but it can't prove the bug existed or that the script would have caught it.
 - **A test in CI only, with no live run.** It repeats for free, but bugs that show only in a live environment slip past it.
 
-Reopened and refined 25 Sep 2026. The rule stays: the script fails on the base commit, passes on the change, and the verdict comes from trusted records. What changed is who runs the script. The agent only writes it, at `/tmp/autoworker-reproduce.sh`. After the turn, the Job's own code checks out the base commit and the change, each fresh, runs the repository's setup command and then the script in each, and posts both exit codes to the engine as one `reproduced` event. The engine settles the behavior from that event alone. Fixed means the base run failed and the change run passed, still wrong means the change run failed, and anything else, such as a base run that passes, a failed checkout or setup, or a run out of time, means Verify could not check it. A Verify Job pushes nothing.
+Reopened and refined 25 Sep 2026. The rule stays: the script fails on the base commit, passes on the change, and the verdict comes from trusted records. What changed is who runs the script. The agent only writes it, at `/tmp/autoworker-reproduce.sh`. After the turn, the Job's own code checks out the base commit and the change, each fresh, runs the repository's setup command and then the script in each, and posts both exit codes to the engine as one `reproduced` event. The engine settles the behavior from that event alone. Fixed means the base run failed and the change run passed, still wrong means the change run failed, and anything else, such as a base run that passes, a failed checkout or setup, a base run whose script could not run, or a run out of time, means Verify could not check it. A Verify Job pushes nothing.
 
 The script is the agent's code, so it runs as a third user, `reproduce`, not as `codex` and never as the bridge. It gets a scrubbed environment with its own home and temporary folder, a time limit per run, and a limit on kept output. It can read neither the bridge's environment nor its git folder, nor the Codex login in the `codex` home. The Job kills every `codex` and `reproduce` process before and between the runs, and each run gets a new folder that only `reproduce` can write, so nothing the agent left behind and nothing the first run did reaches the second.
 
@@ -289,6 +289,14 @@ Rejected options for the refinement:
 
 - **Keep matching the agent's commands, with a looser matcher.** Every fix to the matcher still trusts what the agent says it ran and where, and slugify failed 4 times on the matcher alone.
 - **Run the script as `codex`, the agent's own user.** It is one user fewer, but the script can then read the Codex login and write into folders the agent's leftover processes can reach.
+
+Refined 26 Sep 2026 after SBX-54 on braxtonkin/awos-game. Its script ended with `rg: not found` at line 6 on both commits, exit 127, because `rg` is in the agent's sandbox but not where the Job runs the script. The engine settled that as still wrong, Implement had nothing to fix and pushed nothing three times, and the task parked. Now a base run could not run its script when it exits 126 or 127, the shell's codes for a command it cannot execute or find, or when the shell reports a missing command or a syntax error on a line of the script itself. Verify could not check the behavior then, so the attempt ends `environment_fail` and Verify runs again. The evidence names the command, and the next Verify attempt's input holds the failed attempt's evidence. Another shell's `not found`, such as an npm script's, counts only through the exit code, because a bug can print one.
+
+Rejected options for the SBX-54 refinement:
+
+- **A verdict and route of its own for a script that cannot run.** It needs an enum migration and every record of verdicts, and `environment_fail` already runs Verify again.
+- **A missing command on either commit.** A command missing only on the change can be the change's doing, which Implement can fix, so that case stays still wrong.
+- **Exits 126 and 127 alone.** A script that goes on past a missing command, as `rg foo || true` does, exits with its own code, and dash exits 2 at a syntax error.
 
 ### The core ships one public Job image
 
@@ -721,6 +729,34 @@ Rejected options:
 - **Units lower the ceilings.** Every unit would edit the same numbers, so the budget file would conflict in almost every integration.
 - **Tight time budgets.** Local times swing with machine load, so a tight ceiling fails healthy runs and teaches agents to raise it without looking. The distinct state count is the ratchet for model cost, because it does not depend on load.
 - **A raise that states the new ceiling.** Two parallel raises of the same area would each count the same room, so a raise states the amount it adds.
+
+### The setup command runs before Implement's and Verify's turns
+
+Decided 26 Sep 2026 after the e2e-hold run on braxtonkin/awos-game. The repository's setup command reached only Verify's reproduction, so each Implement agent ran `npm ci` inside its turn, and with eight Jobs starting at once some downloads hung or timed out, and those agents ended blocked. Now a workflow's plug says which steps set up, which Code change says for Implement, and the Job runs the command in `/workspace` as `codex` before the turn, with a scrubbed environment and the reproduction's 600 s limit. It runs inside the bridge, after the bridge starts posting and before it initializes the app server, so heartbeats renew the lease and the engine holds the turn until setup ends. A failed or timed-out setup does not stop the turn, and the prompt tells the agent the command already ran and where its log is. The push leaves out every change the setup made that the agent did not change again, so an Implement with no net change still fails. Verify's reproduction is unchanged.
+
+Rejected options:
+
+- **Setup in `prepareWorkspace`, before the bridge.** Nothing renews the lease there, and a hung download could outlast the 900 s start lease.
+- **Setup before every agent step.** Specify changes no file, and eight Specify Jobs start together at the head of every batch.
+- **Setup as the `reproduce` user.** Only `codex` can write `/workspace`. The setup can read the Codex login, as the agent's own `npm ci` could before.
+
+Refined 26 Sep 2026 after SBX-54 on the same repository. Verify's agent wrote its script but could not try it, because `vitest` was not installed in its workspace. Code change's plug now says Verify sets up too, and a plan's setup command follows the plug for both kinds of step, so a Verify Job runs it before the turn and in each fresh checkout of its reproduction.
+
+Rejected option for the SBX-54 refinement:
+
+- **A setting of its own for the reproduction's setup.** The turn and the reproduction need the same installed tools, and one setting cannot disagree with itself.
+
+### A conflict rework merges the base head its claim read
+
+Decided 26 Sep 2026 after the same run, where five of eight tasks waited with "The Implement step failed 3 times in a row". Land sent each conflicting pull request back with `red_check`, but the rework started from the task's head on the old base, the Job fetched only that commit, and `cameBack` forgot the send-back after the first failed rework, so each agent pushed nothing. Now Code change's plug says an Implement attempt merges the base when Land's exact conflict output, which the five waiting tasks hold too, came after Implement last passed. The claim reads the base branch's head with the `git ls-remote` a first attempt uses and records it as `attempt.merge_head`, so the stored prompt and a retried launch name one commit. The Job fetches it with the start commit and starts `git merge --no-commit` as `codex` before the turn. After the turn the bridge commits a merge with that head as its second parent only while the agent's repository still holds the merge, no conflicted file holds a new conflict marker, and no file only the base changed is back to the branch's version. Otherwise it pushes nothing, and the end line's `declined` reason fails the attempt and reaches the next one. A merge counts as the attempt's change, and every other push keeps F3. `Land.tla` already assumed a rework clears the conflict, so no model changes, and the e2e fault `base-conflict` proves the path on kind.
+
+Rejected options:
+
+- **Land records the base head from its GraphQL read.** The five waiting tasks' outputs hold no head, so they would need a second rule.
+- **The worker reads the base head at launch and stores nothing.** The prompt is stored once, but a retried launch rebuilds the Secret, so the two could name different commits.
+- **The Job reads the base itself.** The prompt, stored before the Job runs, could not name the commit.
+- **The agent runs the merge, and the bridge always adds the base as a parent.** After an aborted merge that publishes a commit that reverts the base.
+- **A verdict or route of its own for a conflict.** It needs an enum migration and every record of verdicts, and `red_check` already returns to Implement.
 
 ## Open
 

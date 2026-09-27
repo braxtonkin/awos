@@ -9,13 +9,15 @@ export type Earlier = { readonly step: string; readonly verdict: Verdict; readon
 
 export type Ticket = { readonly key: string; readonly title: string; readonly description: string | null };
 
-export type StepInput = {
-  readonly step: string;
-  readonly ticket: Ticket;
-  readonly earlier: readonly Earlier[];
-};
+export type History = { readonly step: string; readonly earlier: readonly Earlier[] };
 
-export type Change = { readonly pushed: string | null; readonly carried: string | null };
+export type Workspace = { readonly setup: boolean; readonly mergesBase: boolean };
+
+export type BaseMerge = { readonly branch: string; readonly head: string };
+
+export type StepInput = History & { readonly ticket: Ticket; readonly merge: BaseMerge | null };
+
+export type Change = { readonly pushed: string | null; readonly carried: string | null; readonly declined: string | null };
 
 export type Reply = { readonly step: string; readonly output: unknown; readonly change: Change; readonly reproduction: Reproduction | null };
 
@@ -41,6 +43,7 @@ export type Verdicted = {
 };
 
 export type AgentSteps<K extends string = string> = {
+  readonly workspace: (history: History) => Workspace;
   readonly input: (given: StepInput) => string;
   readonly settle: (reply: Reply) => Settled;
   readonly owes: (verdicted: Verdicted) => readonly Owe<K>[];

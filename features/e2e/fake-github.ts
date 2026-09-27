@@ -384,11 +384,36 @@ export async function startFakeGitHub(settings: FakeGitHubSettings): Promise<Fak
     return { status: 204 };
   }
 
+  const parentsOf = async (commit: string) =>
+    (await gitOut(['rev-list', '--parents', '-n', '1', commit]))
+      .split(' ')
+      .slice(1)
+      .map(parent => ({ sha: parent }));
+
   async function readCommit(ref: string): Promise<Answer> {
     const commit = await commitOf(ref);
     if (commit === undefined) return validation(`No commit found for SHA: ${ref}`);
-    const [, ...parents] = (await gitOut(['rev-list', '--parents', '-n', '1', commit])).split(' ');
-    return json({ sha: commit, html_url: `${holder.web}/commit/${commit}`, parents: parents.map(parent => ({ sha: parent })) });
+    return json({ sha: commit, html_url: `${holder.web}/commit/${commit}`, parents: await parentsOf(commit) });
+  }
+
+  async function readGitCommit(sha: string): Promise<Answer> {
+    const commit = await commitOf(sha);
+    if (commit === undefined) return refusal(404, 'Not Found');
+    return json({ sha: commit, tree: { sha: await gitOut(['rev-parse', `${commit}^{tree}`]) }, parents: await parentsOf(commit) });
+  }
+
+  async function readTree(asked: Asked, tree: string): Promise<Answer> {
+    const listed = await git(['ls-tree', ...(asked.query.has('recursive') ? ['-r'] : []), '-z', tree]);
+    if (listed.code !== 0) return refusal(404, 'Not Found');
+    const entries = listed.out
+      .split('\0')
+      .filter(line => line !== '')
+      .map(line => line.split('\t'))
+      .map(([meta = '', path = '']) => {
+        const [mode = '', type = '', object = ''] = meta.split(' ');
+        return { path, mode, type, sha: object };
+      });
+    return json({ sha: tree, tree: entries, truncated: false });
   }
 
   function checkRuns(asked: Asked, commit: string): Answer {
@@ -490,6 +515,8 @@ export async function startFakeGitHub(settings: FakeGitHubSettings): Promise<Fak
     { method: 'POST', path: /^\/graphql$/, answer: graphql },
     { method: 'POST', path: at('/git/trees'), answer: writeTree },
     { method: 'POST', path: at('/git/commits'), answer: writeCommit },
+    { method: 'GET', path: at('/git/commits/([0-9a-f]{40})'), answer: (_asked, [commit = '']) => readGitCommit(commit) },
+    { method: 'GET', path: at('/git/trees/([0-9a-f]{40})'), answer: (asked, [tree = '']) => readTree(asked, tree) },
     { method: 'POST', path: at('/statuses/([0-9a-f]{40})'), answer: (asked, [commit = '']) => writeStatus(asked, commit) },
     { method: 'GET', path: at('/git/ref/heads/(.+)'), answer: (_asked, [branch = '']) => readRef(branch) },
     { method: 'GET', path: at('/git/matching-refs/heads/(.*)'), answer: (_asked, [prefix = '']) => matchingRefs(prefix) },

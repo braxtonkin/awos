@@ -144,7 +144,7 @@ function parseLine(line: Line): Parsed {
     case 'reproduced':
       return { method: null, itemId: null, fragment: false, body: nulFree(line.reproduction), clientId: null, responseTo: null };
     case 'end':
-      return { method: null, itemId: null, fragment: false, body: {}, clientId: null, responseTo: null };
+      return { method: null, itemId: null, fragment: false, body: line.declined === undefined ? {} : { declined: withoutNul(line.declined) }, clientId: null, responseTo: null };
     case 'app': {
       let json: unknown;
       try {

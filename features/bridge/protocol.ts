@@ -51,7 +51,7 @@ const pushedLine = z.object({ kind: z.literal('pushed'), commit, branch: z.strin
 
 const reproducedLine = z.object({ kind: z.literal('reproduced'), reproduction });
 
-const endLine = z.object({ kind: z.literal('end') });
+const endLine = z.object({ kind: z.literal('end'), declined: z.string().min(1).max(4_000).optional() });
 
 export type LineBody = z.infer<typeof appLine> | z.infer<typeof pushedLine> | z.infer<typeof reproducedLine> | z.infer<typeof endLine>;
 
