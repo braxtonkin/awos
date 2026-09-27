@@ -1,0 +1,11 @@
+{
+  "why": "The task page's live lanes: SBX-60's record as a past seed, a fake Jira ticket for each past seed so Retry can run it, and two u8 lanes that hold the page open while attempts end.",
+  "raise": {
+    "characters/docs": 579,
+    "characters/e2e-harness": 281,
+    "characters/feature-verification": 77,
+    "characters/product": 10394,
+    "lines/feature-verification": 1,
+    "lines/product": 162
+  }
+}
