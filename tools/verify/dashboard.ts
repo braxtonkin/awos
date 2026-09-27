@@ -19,13 +19,14 @@ const next = join(root, 'node_modules/next/dist/bin/next');
 const engineReadyMs = 10 * 60_000;
 const dashboardReadyMs = 60_000;
 const childStopMs = 4 * 60_000;
+const dashboardStopMs = 10_000;
 const probeMs = 250;
 const commandMs = 60_000;
 const loginRole = 'dashboard_web';
 
 export type Child = { readonly said: () => string; readonly send: (line: string) => void; readonly exited: Promise<number | null>; readonly stop: () => Promise<number | null> };
 
-function startChild(command: readonly string[], env: Readonly<Record<string, string>>, echo: (line: string) => void): Child {
+function startChild(command: readonly string[], env: Readonly<Record<string, string>>, echo: (line: string) => void, stopMs = childStopMs): Child {
   const [executable = process.execPath, ...args] = command;
   const child: ChildProcess = spawn(executable, args, { cwd: root, env: { ...process.env, ...env }, stdio: ['pipe', 'pipe', 'pipe'] });
   let said = '';
@@ -42,7 +43,7 @@ function startChild(command: readonly string[], env: Readonly<Record<string, str
     send: line => child.stdin?.write(`${line}\n`),
     stop: async () => {
       if (child.exitCode === null && child.signalCode === null) child.kill('SIGTERM');
-      const code = await Promise.race([exited, wait(childStopMs, undefined, { ref: false }).then(() => 'late' as const)]);
+      const code = await Promise.race([exited, wait(stopMs, undefined, { ref: false }).then(() => 'late' as const)]);
       if (code !== 'late') return code;
       child.kill('SIGKILL');
       return exited;
@@ -133,7 +134,7 @@ export type Dashboard = Child & { readonly origin: string };
 export function startDashboard(database: string, key: Readonly<Record<string, string>>, host: string, port: number, echo: (line: string) => void): Dashboard {
   const child = startChild([process.execPath, next, 'start', dashboardFolder, '-p', String(port), '-H', host], { DATABASE_URL: database, NEXT_TELEMETRY_DISABLED: '1', ...key }, line => {
     echo(`dashboard: ${line}`);
-  });
+  }, dashboardStopMs);
   return { ...child, origin: `http://${host}:${String(port)}` };
 }
 

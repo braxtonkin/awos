@@ -15,6 +15,7 @@ import { engineHandlesSigtermFrom } from '../../tools/verify/engine.ts';
 import { adminClient, withPostgres } from '../../tools/verify/postgres.ts';
 import { closeStore, driverSettings, inJobNamespace, openStore, setUpAutoWorker, supervise, until, type Plan, type Store, type Supervised } from './autoworker.ts';
 import { openWorld } from './open-world.ts';
+import { seconds } from './report.ts';
 import { sandboxCommands, sandboxSeed } from './sandbox-seed.ts';
 import { worldNames, type WorldName } from './world.ts';
 
@@ -225,8 +226,16 @@ async function serve(port: number, store: Store, routine: Routine, settings: Rea
       }
     }
   } finally {
-    await dashboard.stop();
-    await engine?.stop(engineStopGraceMs);
+    const told = stop.told();
+    out(`stop: ${told === undefined ? 'the hold ends' : `the hold got ${told}`}, so it stops the dashboard, then the engine`);
+    const dashboardAt = performance.now();
+    const code = await dashboard.stop();
+    out(`stop: the dashboard ended ${code === null ? 'by a signal' : `with exit code ${String(code)}`} after ${seconds(performance.now() - dashboardAt)}`);
+    if (engine !== undefined) {
+      const engineAt = performance.now();
+      await engine.stop(engineStopGraceMs);
+      out(`stop: the engine ended after ${seconds(performance.now() - engineAt)}`);
+    }
   }
   return engine === undefined ? lines : [...lines, info('engine starts', 'passed', String(engine.starts())), stoppedCheck(engine.said())];
 }
