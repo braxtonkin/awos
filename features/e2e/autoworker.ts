@@ -20,7 +20,7 @@ import type { GitHub } from './github.ts';
 import { taskFor } from './record.ts';
 import { sandboxCommands } from './sandbox-seed.ts';
 import { reworkCheckNames, reworkChecks } from './rework-checks.ts';
-import { identity, rehearsalNames, rehearsedTicket, type RehearsalName } from './solutions.ts';
+import { identity, modulesList, modulesListing, modulesTest, rehearsalNames, rehearsedTicket, type RehearsalName } from './solutions.ts';
 import type { EngineWorld } from './world.ts';
 
 const run = promisify(execFile);
@@ -410,6 +410,8 @@ async function continuedCheck(db: Database, ticket: string, fault: 'engine-resta
 
 const baseMovedNotes = 'notes/base-moved.md';
 
+export const baseBroke = 'base moved without a conflict and broke the merge';
+
 const conflictSentBack = 'the pull request conflicts with its base branch';
 
 const sentBackForConflict = (attempt: { readonly step: string; readonly verdict: string | null }): boolean => attempt.step === 'land' && attempt.verdict === 'conflict';
@@ -631,6 +633,16 @@ async function driveInNamespace(drive: Drive, core: CoreV1Api, image: string, ad
             movedBase = await drive.github.advanceBranch(drive.branch, files, `Move ${drive.branch} forward under ${drive.ticket} for the base-conflict fault`);
             drive.check(pass('base moved under the pull request', `${drive.branch} moved to ${movedBase} at the first stored event of Implement attempt ${hit.attempt}, with its own ${drive.entry.file} and ${baseMovedNotes}`));
           }
+          if (hit !== undefined && drive.fault === 'base-breaks') {
+            const before = await drive.github.branchHead(drive.branch);
+            const modules = before === undefined ? [] : [...(await blobsAt(drive.github, before)).keys()].filter(path => path.startsWith('src/')).sort();
+            const files = [
+              { path: modulesList, content: modulesListing(modules) },
+              { path: modulesTest.path, content: modulesTest.source },
+            ];
+            movedBase = await drive.github.advanceBranch(drive.branch, files, `Move ${drive.branch} forward under ${drive.ticket} with a test that every module is listed, for the base-breaks fault`);
+            drive.check(pass(baseBroke, `${drive.branch} moved to ${movedBase} at the first stored event of Implement attempt ${hit.attempt}, adding ${modulesTest.path} and ${modulesList}, which lists ${modules.join(', ') || 'nothing'} and not ${drive.entry.file}`));
+          }
         }
         const moveLimit = drive.fault === undefined ? undefined : moveLimits[drive.fault];
         if (hit !== undefined && moveLimit !== undefined && moves.length < moveLimit) {
@@ -657,7 +669,7 @@ async function driveInNamespace(drive: Drive, core: CoreV1Api, image: string, ad
         await wait(watchEveryMs, undefined, { signal: drive.signal }).catch(() => undefined);
       }
       if (park !== undefined) drive.check(fail('task never parked after the fault', parkedText(drive.ticket, park)));
-      const rehearsed = (name: RehearsalName) => () => reworkChecks[name]({ db: store.db, ticket: drive.ticket, github: drive.github, branch: drive.branch });
+      const rehearsed = (name: RehearsalName) => () => reworkChecks[name]({ db: store.db, ticket: drive.ticket, github: drive.github, branch: drive.branch, entryFile: drive.entry.file, movedBase });
       const endChecks: Readonly<Record<Fault, () => Promise<Check>>> = {
         'engine-restart': () => continuedCheck(store.db, drive.ticket, 'engine-restart', hit),
         'lost-job': () => continuedCheck(store.db, drive.ticket, 'lost-job', hit),
@@ -669,6 +681,7 @@ async function driveInNamespace(drive: Drive, core: CoreV1Api, image: string, ad
         'ticket-conflict': rehearsed('ticket-conflict'),
         'pushes-nothing': rehearsed('pushes-nothing'),
         'stays-red': rehearsed('stays-red'),
+        'base-breaks': rehearsed('base-breaks'),
       };
       if (drive.fault !== undefined) drive.check(await endChecks[drive.fault]());
       if (drive.world.agent === 'stand-in') drive.check(await setupCheck(store.db, drive.ticket));

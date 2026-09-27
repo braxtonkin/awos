@@ -2,9 +2,9 @@ import { review } from '../../shared/review.ts';
 import type { Database } from '../../shared/db/client.ts';
 import { fail, pass, type Check } from '../../tools/verify/check.ts';
 import type { GitHub } from './github.ts';
-import { checksPass, favicon, forbidden, stillWrongSign, untouchable, type RehearsalName } from './solutions.ts';
+import { checksPass, favicon, forbidden, modulesList, stillWrongSign, untouchable, type RehearsalName } from './solutions.ts';
 
-export type Reworked = { readonly db: Database; readonly ticket: string; readonly github: GitHub; readonly branch: string };
+export type Reworked = { readonly db: Database; readonly ticket: string; readonly github: GitHub; readonly branch: string; readonly entryFile: string; readonly movedBase: string | undefined };
 
 type Fact = { readonly holds: boolean; readonly said: string };
 
@@ -16,6 +16,7 @@ export const reworkCheckNames: Readonly<Record<RehearsalName, string>> = {
   'ticket-conflict': 'rework asked about the ticket',
   'pushes-nothing': 'rework ended once',
   'stays-red': 'checks stayed red three times',
+  'base-breaks': 'check rework fixed from the merge',
 };
 
 const checksFailedThrice = 'Retry starts again at Implement, because checks on the pull request failed three times.';
@@ -142,10 +143,36 @@ async function stayedRed({ db, ticket }: Reworked): Promise<Check> {
   ]);
 }
 
+async function fixedFromMerge({ db, ticket, github, branch, entryFile, movedBase }: Reworked): Promise<Check> {
+  const name = reworkCheckNames['base-breaks'];
+  if (movedBase === undefined) return factsCheck(name, [{ holds: false, said: 'the base never moved, because no Implement event was stored' }]);
+  const attempts = await attemptsOf(db, ticket);
+  const land = redSendBack(attempts);
+  if (land === undefined) return factsCheck(name, [{ holds: false, said: `no Land attempt sent the task back for a red check after ${branch} moved to ${movedBase}; attempts: ${listed(attempts)}` }]);
+  const rework = after(attempts, land)[0];
+  if (rework === undefined) return factsCheck(name, [{ holds: false, said: `no Implement attempt followed Land attempt ${land.id}` }]);
+  const parents = rework.pushed === null ? [] : (await github.commit(rework.pushed)).parents;
+  const task = await taskOf(db, ticket);
+  const head = await github.branchHead(branch);
+  const listing = head === undefined ? undefined : (await github.blobs((await github.commit(head)).tree)).get(modulesList);
+  const listedEntry = listing?.includes(`- ${entryFile}\n`) === true;
+  return factsCheck(name, [
+    { holds: true, said: `Land attempt ${land.id} sent the task back for a red check after ${branch} moved to ${movedBase}` },
+    { holds: rework.prompt.includes(movedBase), said: `Implement attempt ${rework.id}'s prompt ${rework.prompt.includes(movedBase) ? 'names' : 'does not name'} the base commit ${movedBase}` },
+    {
+      holds: rework.verdict === 'pass' && parents.length === 2 && parents.includes(movedBase),
+      said: `Implement attempt ${rework.id} ended ${rework.verdict ?? 'live'} and pushed ${rework.pushed === null ? 'nothing' : `${rework.pushed} with the parents ${parents.join(' and ') || 'none'}`}`,
+    },
+    { holds: task?.state === 'done', said: `the task is ${task?.state ?? 'missing'}${task?.waiting_reason == null ? '' : `, and it waits because: ${task.waiting_reason}`}` },
+    { holds: listedEntry, said: `${branch}'s ${modulesList} ${listedEntry ? 'lists' : 'does not list'} ${entryFile}` },
+  ]);
+}
+
 export const reworkChecks: Readonly<Record<RehearsalName, (reworked: Reworked) => Promise<Check>>> = {
   'red-check': redCheckFixed,
   'still-wrong': behaviorFixed,
   'ticket-conflict': askedAboutTicket,
   'pushes-nothing': endedOnce,
   'stays-red': stayedRed,
+  'base-breaks': fixedFromMerge,
 };

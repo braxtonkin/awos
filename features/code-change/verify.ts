@@ -269,6 +269,33 @@ function sentBackChecks(): readonly Check[] {
 const reworkInput = (earlier: readonly Earlier[], obligation: ReworkObligation | null): string =>
   agentSteps.input({ step: 'implement', ticket: { key: 'SBX-49', title: 'Add scores', description: null }, earlier, obligation });
 
+const plantedToken = `ghp_${'x'.repeat(36)}`;
+
+const sbx93Check = 'npx vitest run test/catch-up.test.ts -t "offline catch-up credits every machine, perk, and achievement"';
+
+const sbx93Script = [
+  'set -e',
+  `export GITHUB_TOKEN=${plantedToken}`,
+  ...Array.from({ length: 48 }, (_, index) => `node scripts/seed-state.mjs --machine m${String(index)} --perk p${String(index % 7)} --achievement a${String(index % 11)} --saved-at ${String(1_700_000_000 + index * 60)}`),
+  'export CATCH_UP_NOW=$((1700000000 + 3600))',
+  sbx93Check,
+].join('\n');
+
+function longScriptCheck(): Check {
+  const name = `SBX-93 replayed: a behavior rework's input holds Verify's whole script of ${String(sbx93Script.length)} characters, redacted, with the run outputs still trimmed`;
+  const evidence: Reproduction = { state: 'ran', script: sbx93Script, base: side(base, said(1, 'x'.repeat(5000))), change: side(head, said(1, 'y'.repeat(5000))) };
+  const owed = agentSteps.sentBack(entry('verify', 'behavior_fail', doneReview, evidence));
+  const given = owed.kind === 'behavior' ? reworkInput([...passedOnce.slice(0, 2), entry('verify', 'behavior_fail', doneReview, evidence)], { ...owed, notes: [] }) : '';
+  const facts: readonly (readonly [string, boolean])[] = [
+    ['the script is longer than 4,000 characters', sbx93Script.length > 4000],
+    ['the input holds the script through its last line', given.includes(`${sbx93Check}\n\`\`\``)],
+    ['the input redacts the token in the script', given.includes('export GITHUB_TOKEN=[redacted]') && !given.includes(plantedToken)],
+    ['the input trims each run output', given.split('[cut after 4000 characters]').length === 3],
+  ];
+  const missing = facts.filter(([, holds]) => !holds).map(([what]) => what);
+  return missing.length === 0 ? pass(name, facts.map(([what]) => what).join('; ')) : fail(name, `fails: ${missing.join('; ')}. The input ends: ${given.slice(-600)}`);
+}
+
 function reworkChecks(): readonly Check[] {
   const failedTwice = [...conflicted, entry('implement', 'fail', noChangeOutput), entry('implement', 'fail', noChangeOutput)];
   const cases: readonly (readonly [string, readonly Earlier[], ReworkObligation | null, readonly string[], readonly string[]])[] = [
@@ -669,7 +696,7 @@ export const scenarios: readonly Scenario[] = [
   {
     name: 'code-change',
     summary: "checks the Code change declaration against the task model's shape and runs each step's judge on reviews of every outcome",
-    run: () => Promise.resolve([shapeCheck(), builtCheck(), ...judgeChecks(), ...settleChecks(), unrunnableCheck(), ...pullEvidenceChecks(), ...unopenedEvidenceChecks(), ...implementChecks(), ...sentBackChecks(), ...reworkChecks(), promptCheck()]),
+    run: () => Promise.resolve([shapeCheck(), builtCheck(), ...judgeChecks(), ...settleChecks(), unrunnableCheck(), ...pullEvidenceChecks(), ...unopenedEvidenceChecks(), ...implementChecks(), ...sentBackChecks(), ...reworkChecks(), longScriptCheck(), promptCheck()]),
   },
   landModel,
   {
