@@ -1166,7 +1166,7 @@ export const scenarios: readonly Scenario[] = [
   },
   {
     name: 'tasks-seed',
-    summary: "writes a past seed's story, done, expired, or failed-after-conflict, as task --key of the routine --routine in the database at --database, through the tasks feature's claim, advance, and handOff with earlier times, and checks it ends in the state the seed declares",
+    summary: "writes a past seed's story, done, expired, failed-after-conflict, or failed-after-red-check, as task --key of the routine --routine in the database at --database, through the tasks feature's claim, advance, and handOff with earlier times, and checks it ends in the state the seed declares",
     run: seedChecks,
   },
   {

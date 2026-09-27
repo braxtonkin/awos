@@ -4,7 +4,7 @@ import { resultOf } from './ending.ts';
 import { Folded } from './folded.tsx';
 import type { AttemptSummary } from './protocol.ts';
 import { stepName } from './time.ts';
-import { numbered } from './timeline.ts';
+import { numbered, runsAsOf } from './timeline.ts';
 
 const cell = { padding: '8px 12px', borderBottom: `1px solid ${color('rule')}`, textAlign: 'left', verticalAlign: 'top' } as const;
 
@@ -29,10 +29,9 @@ function Result({ row }: { readonly row: AttemptSummary }) {
   );
 }
 
-type AttemptsTabProps = { readonly attempts: readonly AttemptSummary[]; readonly runsAs: string | null };
-
-export function AttemptsTab({ attempts, runsAs }: AttemptsTabProps) {
+export function AttemptsTab({ attempts }: { readonly attempts: readonly AttemptSummary[] }) {
   if (attempts.length === 0) return <p style={{ margin: 0, color: color('muted') }}>No attempt has started yet.</p>;
+  const runsAs = runsAsOf(attempts);
   const someoneElse = attempts.some(row => row.person !== runsAs);
   return (
     <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>

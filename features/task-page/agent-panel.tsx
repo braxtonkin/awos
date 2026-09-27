@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { deliveryOf, type Said } from '../../shared/said.ts';
 import { isFailed, type Mark } from '../../shared/task-status.ts';
 import { DeliveryLine } from '../../shared/ui/delivery.tsx';
@@ -8,24 +8,23 @@ import { ReviewCard } from '../../shared/ui/review.tsx';
 import type { SendAction } from '../../shared/ui/sending.ts';
 import { StatusMarks } from '../../shared/ui/status.tsx';
 import { color, type ColorName } from '../../shared/ui/tokens.ts';
-import { useFrames, type Stream } from '../../shared/ui/use-frames.ts';
+import type { Sent } from '../../shared/ui/use-send.ts';
 import { Message } from './message.tsx';
 import { nowOf, type Tone } from './now.ts';
-import { frame, type AttemptTranscript, type Kept, type TaskLive } from './protocol.ts';
+import type { AttemptTranscript, Kept, TaskLive } from './protocol.ts';
 import { Retry } from './retry.tsx';
 import { Stop } from './stop.tsx';
-import { extend } from './timeline.ts';
 import { Transcript } from './transcript.tsx';
 
 export type PanelActions = { readonly stop: SendAction; readonly steer: SendAction; readonly retry: SendAction; readonly review: SendAction };
 
 export type AgentPanelProps = {
   readonly task: string;
-  readonly initial: readonly AttemptTranscript[];
+  readonly attempts: readonly AttemptTranscript[];
   readonly live: TaskLive;
   readonly said: readonly Said[];
+  readonly onSent: Sent;
   readonly kept: Kept;
-  readonly stream: Stream;
   readonly actions: PanelActions;
   readonly zone: string;
 };
@@ -33,8 +32,6 @@ export type AgentPanelProps = {
 const tones: Readonly<Record<Tone, ColorName>> = { run: 'run', attn: 'attn', muted: 'ink' };
 
 const marked: Readonly<Partial<Record<Tone, Mark>>> = { attn: 'needs-you' };
-
-const merged = (known: readonly Said[], entry: Said): readonly Said[] => (known.some(each => each.request === entry.request) ? known : [...known, entry]);
 
 type Dock = 'question' | 'retry' | 'message' | 'none';
 
@@ -56,21 +53,10 @@ function Docked({ children, label }: { readonly children: ReactNode; readonly la
   );
 }
 
-export function AgentPanel({ task: taskId, initial, live, said: saidFirst, kept, stream, actions, zone }: AgentPanelProps) {
-  const [attempts, setAttempts] = useState(initial);
-  const [task, setTask] = useState(live);
-  const [said, setSaid] = useState(saidFirst);
+export function AgentPanel({ task: taskId, attempts, live: task, said, onSent, kept, actions, zone }: AgentPanelProps) {
   const [draft, setDraft] = useState('');
   const scroller = useRef<HTMLDivElement>(null);
   const pinned = useRef(true);
-  useFrames(stream, frame, next => {
-    if (next.kind === 'line') setAttempts(known => extend(known, [next]));
-    if (next.kind === 'task') setTask(next.task);
-    if (next.kind === 'said') setSaid(next.said);
-  });
-  const onSent = useCallback((entry: Said) => {
-    setSaid(known => merged(known, entry));
-  }, []);
   useEffect(() => {
     const box = scroller.current;
     if (box !== null && pinned.current) box.scrollTop = box.scrollHeight;

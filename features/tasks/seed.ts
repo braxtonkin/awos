@@ -56,6 +56,19 @@ const reproduced: Reproduction = {
   change: { commit: changeCommit, checkout: null, setup: installed, run: { exitCode: 0, timedOut: false, output: 'PASS test/prices.test.ts: 3 tests passed.' } },
 };
 
+const smokeTested: Reproduction = {
+  state: 'ran',
+  script: 'set -e\nnpm run smoke\n',
+  base: { commit: baseCommit, checkout: null, setup: installed, run: { exitCode: 1, timedOut: false, output: 'npm error Missing script: "smoke"' } },
+  change: { commit: changeCommit, checkout: null, setup: installed, run: { exitCode: 0, timedOut: false, output: 'PASS test/smoke.test.ts: the sandbox starts and answers.' } },
+};
+
+const handedOff = engineSaid('handed_off', said('Land owed pr.mark-ready.', `GitHub reported green-draft at ${changeCommit}, so Land owed pr.mark-ready.`));
+
+const redCheck = engineSaid('red_check', said('Land sent the task back to Implement.', 'Land sent the task back, because a check failed: check.'));
+
+const smokeWired = said('The requested smoke test wiring is present; all mandated checks pass.', 'npm run smoke runs test/smoke.test.ts, npm run check runs it after the unit tests, and both pass here.');
+
 export const pastSeeds = {
   done: { title: 'Seeded work that ended recently', endedMsAgo: 2 * hourMs, turns: [passes, passes, passes, passes], ends: { state: 'done' } },
   expired: { title: 'Seeded work that ended long ago', endedMsAgo: 31 * dayMs, turns: [passes, passes, passes, passes], ends: { state: 'done' } },
@@ -71,6 +84,25 @@ export const pastSeeds = {
       changedNothing(stillRounded),
       changedNothing(stillRounded),
       changedNothing(stillRounded),
+    ],
+    ends: { state: 'waiting', waitingOn: 'retry', reason: 'The Implement step failed 3 times in a row. Read its attempts on this page, fix what stopped them, then press Retry to run it again.' },
+  },
+  'failed-after-red-check': {
+    title: 'Wire the smoke test into the sandbox checks',
+    endedMsAgo: hourMs,
+    turns: [
+      answered(said('Add an npm run smoke script and run it from npm run check.', 'Add test/smoke.test.ts, which starts the sandbox and calls it once, add npm run smoke, and run it from npm run check.')),
+      answered(said('Added the smoke test and ran it from npm run check.', 'test/smoke.test.ts starts the sandbox and calls it once, and npm run check runs it after the unit tests.')),
+      reproducing(said('Wrote a script that runs npm run smoke.', 'The script fails while the sandbox has no smoke script and passes once npm run smoke runs the test.'), smokeTested),
+      handedOff,
+      redCheck,
+      answered(said('Made the smoke test wait for the sandbox to listen.', 'test/smoke.test.ts now waits for the port before it calls the sandbox, so it no longer races the start.')),
+      reproducing(said('Wrote a script that runs npm run smoke.', 'The script fails while the sandbox has no smoke script and passes once npm run smoke runs the test.'), smokeTested),
+      handedOff,
+      redCheck,
+      changedNothing(smokeWired),
+      changedNothing(smokeWired),
+      changedNothing(smokeWired),
     ],
     ends: { state: 'waiting', waitingOn: 'retry', reason: 'The Implement step failed 3 times in a row. Read its attempts on this page, fix what stopped them, then press Retry to run it again.' },
   },
