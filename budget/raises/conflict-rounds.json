@@ -1,0 +1,8 @@
+{
+  "why": "Lanes 16 and 17 replay SBX-66 on the Codex stand-in: a run branch that moves under three Implement attempts, so Land finds a new conflict after each rework, and checks that stay red through three reworks, so Land parks for failed checks. They prove conflicts and failed checks count apart (D2), and the feature map names both (C3).",
+  "raise": {
+    "characters/docs": 519,
+    "characters/e2e-harness": 5657,
+    "lines/e2e-harness": 85
+  }
+}
