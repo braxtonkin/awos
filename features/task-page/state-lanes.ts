@@ -152,6 +152,7 @@ const reasons: Lane = {
         const steps = await db.selectFrom('published_workflow_step').select('published_workflow_step.name').where('published_workflow_step.workflow', '=', task.workflow).orderBy('published_workflow_step.position').execute();
         const evidence = await db.selectFrom('evidence').select(['evidence.attempt_id', 'evidence.body']).where('evidence.task_id', '=', task.id).orderBy('evidence.attempt_id').execute();
         const reason = task.waiting_reason ?? '';
+        const reply = await replyOf(db, attempts.at(-1));
         const named = task.state === 'waiting' && task.waiting_on === 'retry' && reason.startsWith(failedThrice) && task.step === attempts.at(-1)?.step && attempts.map(each => each.verdict ?? 'live').join(' ') === story;
         const tried = new Set(attempts.map(each => each.step));
         const current = steps.findIndex(each => each.name === task.step);
@@ -175,7 +176,8 @@ const reasons: Lane = {
         const taken = shotPaths.join(', ');
         return [
           check(named, 'the seed reads back as named', `${key} ${task.state} at ${task.step}, waiting on ${task.waiting_on ?? 'nothing'}: ${reason}; attempts: ${attempts.map(each => `${each.step} ${each.verdict ?? 'live'}`).join(', ')}`),
-          check(card.toLowerCase().includes(noChange.toLowerCase()), 'the status card says the agent made no change', card),
+          check(headline.includes(foundNothing), 'the status card says the agent found nothing to change', card),
+          check(reply !== undefined && card.includes(`“${reply}”`), "the status card quotes the agent's own last message", `${card} | the agent said: ${reply ?? 'nothing'}`),
           check(card.includes(conflict), 'the status card names the conflict with the base branch', card),
           check(card !== '' && !/a check on the pull request/i.test(card), 'the status card does not call the conflict a red check', card),
           check(/^[^.]+\.$/.test(headline), "the status card's headline is one sentence", headline),
@@ -205,7 +207,7 @@ const storedAttempts = async (db: Database, key: string): Promise<readonly Store
     finished: row.finished_at !== null,
   }));
 
-const replyOf = async (db: Database, attempt: Stored | undefined): Promise<string | undefined> => {
+const replyOf = async (db: Database, attempt: { readonly id: string } | undefined): Promise<string | undefined> => {
   if (attempt === undefined) return undefined;
   const lines = await db.selectFrom('attempt_event').select('body').where('attempt_event.attempt_id', '=', attempt.id).where('attempt_event.kind', '=', 'app').orderBy('attempt_event.seq').execute();
   const text = reduce(lines).items.findLast(item => item.type === 'agentMessage' && item.status === 'completed')?.text;

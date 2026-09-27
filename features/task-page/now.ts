@@ -19,9 +19,14 @@ export const reviewOf = (text: string): Review | undefined => {
   }
 };
 
-const firstLine = (text: string): string => {
+export const firstLine = (text: string): string => {
   const line = text.trim().split('\n')[0] ?? '';
   return line.length > 140 ? `${line.slice(0, 139)}…` : line;
+};
+
+export const lastReply = (attempts: readonly AttemptTranscript[], attempt: string): Review | undefined => {
+  const text = attempts.find(each => each.attempt === attempt)?.transcript.items.findLast(item => item.type === 'agentMessage' && item.status === 'completed')?.text;
+  return text === undefined ? undefined : reviewOf(text);
 };
 
 function doing(item: Item | undefined, action: Action | undefined): string {

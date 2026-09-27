@@ -1,11 +1,13 @@
 'use client';
 
+import type { Review } from '../../shared/review.ts';
 import { failing, isFailed } from '../../shared/task-status.ts';
 import { between, clock } from '../../shared/ui/clock.ts';
 import { StatusMarks } from '../../shared/ui/status.tsx';
 import { color } from '../../shared/ui/tokens.ts';
-import { failureOf, whyOf } from './ending.ts';
-import type { AttemptSummary, TaskLive } from './protocol.ts';
+import { failureOf, foundNothing, whyOf } from './ending.ts';
+import { firstLine, lastReply } from './now.ts';
+import type { AttemptSummary, AttemptTranscript, TaskLive } from './protocol.ts';
 import { stepName } from './time.ts';
 import { numbered } from './timeline.ts';
 
@@ -19,21 +21,28 @@ const tookOf = (attempts: readonly AttemptSummary[]): string | null => {
   return first === undefined || last === undefined || last === null ? null : between(first.startedAt, last);
 };
 
-const leadUpOf = (task: TaskLive, failed: AttemptSummary): string | null => {
+type LeadUp = { readonly sentBack: boolean; readonly words: string };
+
+const leadUpOf = (task: TaskLive, failed: AttemptSummary): LeadUp | null => {
   const before = task.attempts.findLast(each => each.step !== failed.step);
   if (before === undefined) return null;
-  if (before.verdict !== 'pass') return whyOf(before);
-  return before.summary === null ? null : `What it tried: ${before.summary}`;
+  const words = before.verdict === 'pass' ? (before.summary === null ? null : `What it tried: ${before.summary}`) : whyOf(before);
+  return words === null ? null : { sentBack: before.verdict !== 'pass', words };
 };
 
-function waitingCard(task: TaskLive, notes: readonly string[]): Card {
+function failedCard(task: TaskLive, failed: AttemptSummary, reply: Review | undefined, notes: readonly string[]): Card {
+  const leadUp = leadUpOf(task, failed);
+  const instruction = task.waitingReason;
+  if (!foundNothing(failed, reply)) return { ...failureOf(failed), instruction, notes: leadUp === null ? notes : [leadUp.words, ...notes] };
+  const said = `The agent said: “${firstLine(reply.summary)}”`;
+  return { headline: `${stepName(failed.step)} found nothing to change.`, reason: leadUp?.sentBack === true ? `${leadUp.words} ${said}` : said, instruction, notes };
+}
+
+function waitingCard(task: TaskLive, reply: Review | undefined, notes: readonly string[]): Card {
   const newest = task.attempts.at(-1);
   const step = stepName(task.step);
   const instruction = task.waitingReason;
-  if (newest !== undefined && isFailed({ state: task.state, waitingOn: task.waitingOn, newestVerdict: newest.verdict })) {
-    const leadUp = leadUpOf(task, newest);
-    return { ...failureOf(newest), instruction, notes: leadUp === null ? notes : [leadUp, ...notes] };
-  }
+  if (newest !== undefined && isFailed({ state: task.state, waitingOn: task.waitingOn, newestVerdict: newest.verdict })) return failedCard(task, newest, reply, notes);
   switch (task.waitingOn) {
     case 'approval':
       return { headline: `Waiting for your approval of ${step}.`, reason: null, instruction, notes };
@@ -54,7 +63,7 @@ function stoppedNext(task: TaskLive): string {
   return verdict !== null && failing[verdict] ? 'Retry starts the agent again.' : `Retry starts the agent again at ${step}.`;
 }
 
-function cardOf(task: TaskLive, zone: string): Card {
+function cardOf(task: TaskLive, reply: Review | undefined, zone: string): Card {
   const notes = task.mergeQueued && task.state !== 'done' ? [mergeQueueNote] : [];
   const newest = task.attempts.at(-1);
   switch (task.state) {
@@ -69,7 +78,7 @@ function cardOf(task: TaskLive, zone: string): Card {
       return { headline, reason: null, instruction: 'Follow the agent on the right, and stop it there if it goes wrong.', notes };
     }
     case 'waiting':
-      return waitingCard(task, notes);
+      return waitingCard(task, reply, notes);
     case 'stopped':
       return { headline: task.stoppedBy === null ? `This task stopped during ${stepName(task.step)}.` : `${task.stoppedBy.name} stopped this task at ${clock(task.stoppedBy.at, zone)}.`, reason: null, instruction: stoppedNext(task), notes };
     case 'done': {
@@ -79,10 +88,11 @@ function cardOf(task: TaskLive, zone: string): Card {
   }
 }
 
-type StatusCardProps = { readonly task: TaskLive; readonly zone: string };
+type StatusCardProps = { readonly task: TaskLive; readonly attempts: readonly AttemptTranscript[]; readonly zone: string };
 
-export function StatusCard({ task, zone }: StatusCardProps) {
-  const card = cardOf(task, zone);
+export function StatusCard({ task, attempts, zone }: StatusCardProps) {
+  const newest = task.attempts.at(-1);
+  const card = cardOf(task, newest === undefined ? undefined : lastReply(attempts, newest.id), zone);
   return (
     <section data-status={task.state} aria-label="Status" style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 8, padding: '20px 24px', borderRadius: 12, background: color('surface'), border: `1px solid ${color('rule')}` }}>
       <StatusMarks marks={task.marks} />

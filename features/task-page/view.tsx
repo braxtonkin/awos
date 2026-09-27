@@ -67,7 +67,7 @@ export function TaskPage({ page, actions, tab, zone }: TaskPageProps) {
           <h1 style={{ margin: 0, fontSize: 24, lineHeight: '32px', fontWeight: 600 }}>{header.title}</h1>
           <Facts header={header} runsAs={runsAsOf(task.attempts)} zone={zone} />
         </div>
-        <StatusCard task={task} zone={zone} />
+        <StatusCard task={task} attempts={attempts} zone={zone} />
         <Stepper task={task} steps={steps} />
         <OpenReviews task={header.id} live={task} said={said} onSent={sent} act={actions.review} zone={zone} />
         <Tabs initial={tab} panels={{ evidence: <EvidenceTab evidence={evidence} attempts={task.attempts} zone={zone} />, attempts: <AttemptsTab attempts={task.attempts} /> }} />
