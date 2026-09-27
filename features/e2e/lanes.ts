@@ -183,6 +183,15 @@ export const lanes: readonly Lane[] = [
       "The stand-in's first Implement adds a smoke test that fails in CI, and each rework changes a note but not the test. Pass when Land sends the task back for the red check three times and the task waits at Land because checks on the pull request failed three times.",
     deciders: named({ exactly: ['checks stayed red three times'] }),
   },
+  {
+    ...run,
+    number: 18,
+    slug: 'base-churn',
+    fault: 'base-churn',
+    procedure:
+      'Move the run branch forward under every Implement attempt, so each rework merges a base that has already moved again, as a base branch under constant churn would. Pass when Land sends the task back for a conflict ten times and the task then waits at Land, with a reason that names ten conflicts with its base branch, and counts no failed check.',
+    deciders: named({ exactly: ['conflicts parked the task at their cap'] }),
+  },
 ];
 
 export const allCommands = ['npm run check', 'npm run verify -- guardrails', 'npm run verify -- models', 'npm test'] as const;

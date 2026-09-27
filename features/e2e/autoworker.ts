@@ -224,7 +224,7 @@ export async function runRecord(db: Database, key: string): Promise<readonly Run
 export const describeRecord = (record: RunRecord): string =>
   `attempt ${record.attempt} ${record.step} ${record.verdict ?? 'live'} as ${record.runAs} on ${record.branch ?? 'no branch'} pushed ${record.pushed ?? 'nothing'} owed [${record.owed.join(', ')}] input tokens ${record.inputTokens === null ? 'unknown' : String(record.inputTokens)}`;
 
-export const faultNames = ['engine-restart', 'lost-job', 'base-conflict', 'base-conflicts', ...rehearsalNames] as const;
+export const faultNames = ['engine-restart', 'lost-job', 'base-conflict', 'base-conflicts', 'base-churn', ...rehearsalNames] as const;
 
 export type Fault = (typeof faultNames)[number];
 
@@ -388,7 +388,7 @@ async function attemptsAt(db: Database, ticket: string, steps: readonly string[]
 const promptOf = async (db: Database, attempt: string): Promise<string> =>
   (await db.selectFrom('attempt_command').select('input').where('attempt_id', '=', attempt).where('kind', '=', 'turn.start').executeTakeFirst())?.input ?? '';
 
-const faultCheckNames: Readonly<Record<Fault, string>> = { 'engine-restart': 'attempt continued', 'lost-job': 'lost attempt replaced', 'base-conflict': 'conflict resolved by a merge', 'base-conflicts': 'conflicts resolved by three merges', ...reworkCheckNames };
+const faultCheckNames: Readonly<Record<Fault, string>> = { 'engine-restart': 'attempt continued', 'lost-job': 'lost attempt replaced', 'base-conflict': 'conflict resolved by a merge', 'base-conflicts': 'conflicts resolved by three merges', 'base-churn': 'conflicts parked the task at their cap', ...reworkCheckNames };
 
 async function continuedCheck(db: Database, ticket: string, fault: 'engine-restart' | 'lost-job', hit: Implementing | undefined): Promise<Check> {
   const name = faultCheckNames[fault];
@@ -416,6 +416,12 @@ const sentBackForConflict = (attempt: { readonly step: string; readonly verdict:
   attempt.step === 'land' && attempt.verdict === 'red_check' && JSON.stringify(attempt.output).includes(conflictSentBack);
 
 const baseMoves = 3;
+
+const conflictCap = 10;
+
+const moveLimits: Partial<Readonly<Record<Fault, number>>> = { 'base-conflicts': baseMoves, 'base-churn': 2 * conflictCap };
+
+const parkedForConflicts = 'Retry starts again at Implement, because the pull request conflicted with its base branch ten times';
 
 const movedVersion = (entry: Pick<Entry, 'name'>, move: number): string => (move === 1 ? identity(entry) : identity(entry).replace('return value;', `return value ?? ${String(move)};`));
 
@@ -459,6 +465,21 @@ async function conflictsResolvedCheck(drive: Drive, db: Database, moves: readonl
     },
     { holds: task?.state === 'done', said: `the task is ${task?.state ?? 'missing'} at ${task?.step ?? 'no step'}${task?.waiting_reason == null ? '' : `, and it waits because: ${task.waiting_reason}`}` },
     { holds: held !== undefined && held === ours, said: `${drive.branch} ${held !== undefined && held === ours ? 'holds' : 'does not hold'} the version of ${drive.entry.file} that the last rework pushed` },
+  ]);
+}
+
+async function churnParkedCheck(drive: Drive, db: Database, moves: readonly string[]): Promise<Check> {
+  const name = faultCheckNames['base-churn'];
+  const attempts = await attemptsWithOutput(db, drive.ticket);
+  const lands = attempts.filter(sentBackForConflict);
+  const red = attempts.filter(attempt => attempt.step === 'land' && attempt.verdict === 'red_check' && !sentBackForConflict(attempt));
+  const task = await db.selectFrom('task').select(['state', 'step', 'waiting_on', 'waiting_reason', 'counts']).where('key', '=', drive.ticket).executeTakeFirst();
+  const reason = task?.waiting_reason ?? '';
+  return factsCheck(name, [
+    { holds: lands.length === conflictCap && red.length === 0, said: `Land sent the task back ${String(lands.length)} times, because ${conflictSentBack}, and ${String(red.length)} times for a red check, while ${drive.branch} moved ${String(moves.length)} times` },
+    { holds: task?.state === 'waiting' && task.waiting_on === 'retry' && task.step === 'land', said: `the task is ${task?.state ?? 'missing'} on ${task?.waiting_on ?? 'nothing'} at ${task?.step ?? 'no step'}` },
+    { holds: reason.startsWith(parkedForConflicts), said: `the waiting reason is: ${reason || 'none'}` },
+    { holds: JSON.stringify(task?.counts) === JSON.stringify({ conflicts: conflictCap }), said: `the task counts ${JSON.stringify(task?.counts ?? null)}` },
   ]);
 }
 
@@ -612,16 +633,17 @@ async function driveInNamespace(drive: Drive, core: CoreV1Api, image: string, ad
             drive.check(pass('base moved under the pull request', `${drive.branch} moved to ${movedBase} at the first stored event of Implement attempt ${hit.attempt}, with its own ${drive.entry.file} and ${baseMovedNotes}`));
           }
         }
-        if (hit !== undefined && drive.fault === 'base-conflicts' && moves.length < baseMoves) {
+        const moveLimit = drive.fault === undefined ? undefined : moveLimits[drive.fault];
+        if (hit !== undefined && moveLimit !== undefined && moves.length < moveLimit) {
           const under = (await attemptsAt(store.db, drive.ticket, ['implement']))[moves.length];
           if (under !== undefined) {
             const move = moves.length + 1;
             const files = [
               { path: drive.entry.file, content: movedVersion(drive.entry, move) },
-              { path: movedNotes(move), content: `Move ${String(move)} of the base-conflicts fault moved ${drive.branch} forward once Implement attempt ${under.id} of ${drive.ticket} was claimed.\n` },
+              { path: movedNotes(move), content: `Move ${String(move)} of the ${drive.fault ?? ''} fault moved ${drive.branch} forward once Implement attempt ${under.id} of ${drive.ticket} was claimed.\n` },
             ];
-            moves.push(await drive.github.advanceBranch(drive.branch, files, `Move ${drive.branch} forward under Implement attempt ${under.id} of ${drive.ticket}, move ${String(move)} of the base-conflicts fault`));
-            drive.log(`moved ${drive.branch} to ${moves.at(-1) ?? ''} once Implement attempt ${under.id} was claimed, move ${String(move)} of ${String(baseMoves)}`);
+            moves.push(await drive.github.advanceBranch(drive.branch, files, `Move ${drive.branch} forward under Implement attempt ${under.id} of ${drive.ticket}, move ${String(move)} of the ${drive.fault ?? ''} fault`));
+            drive.log(`moved ${drive.branch} to ${moves.at(-1) ?? ''} once Implement attempt ${under.id} was claimed, move ${String(move)} of at most ${String(moveLimit)}`);
           }
         }
         if (Date.now() - reportedAt >= reportEveryMs) {
@@ -642,6 +664,7 @@ async function driveInNamespace(drive: Drive, core: CoreV1Api, image: string, ad
         'lost-job': () => continuedCheck(store.db, drive.ticket, 'lost-job', hit),
         'base-conflict': () => resolvedCheck(drive, store.db, movedBase),
         'base-conflicts': () => conflictsResolvedCheck(drive, store.db, moves),
+        'base-churn': () => churnParkedCheck(drive, store.db, moves),
         'red-check': rehearsed('red-check'),
         'still-wrong': rehearsed('still-wrong'),
         'ticket-conflict': rehearsed('ticket-conflict'),

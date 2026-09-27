@@ -17,6 +17,7 @@ const faultStepOrders: Readonly<Record<Fault, readonly string[]>> = {
   'lost-job': stepOrder,
   'base-conflict': ['specify', 'implement', 'verify', 'implement', 'verify', 'land'],
   'base-conflicts': ['specify', 'implement', 'verify', 'implement', 'verify', 'implement', 'verify', 'implement', 'verify', 'land'],
+  'base-churn': ['specify', ...Array.from({ length: 10 }, () => ['implement', 'verify']).flat()],
   'red-check': ['specify', 'implement', 'verify', 'implement', 'verify', 'land'],
   'still-wrong': ['specify', 'implement', 'implement', 'verify', 'land'],
   'ticket-conflict': ['specify', 'implement'],
