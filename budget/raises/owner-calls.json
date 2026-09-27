@@ -1,0 +1,7 @@
+{
+  "why": "docs/decisions.md records the owner's two calls from the overnight run of 27 Sep: only a person contests Verify's evidence, and each repository ignores its own scratch files",
+  "raise": {
+    "characters/docs": 1280,
+    "lines/docs": 10
+  }
+}
