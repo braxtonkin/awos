@@ -93,18 +93,25 @@ function pausing(id: string): Pause {
     });
 }
 
-export async function startPostgres(): Promise<Postgres> {
+const keptDatabase = 'autoworker';
+const keptStopMs = 10_000;
+const passwordLabel = 'autoworker.verify.password';
+const labeledVolume = z.object({ Labels: z.record(z.string(), z.string()).nullable() });
+
+type Volume = { readonly name: string; readonly password: string };
+
+const keptContainer = (volume: string): string => `${volume}-postgres`;
+
+export async function startPostgres(kept?: Volume): Promise<Postgres> {
   const self = await verifyContainer();
   await removeOrphans();
   const alias = `postgres-${randomUUID()}`;
-  const container = await new PostgresOnCpus(image)
-    .withCpus(self.cpus)
-    .withPassword(randomUUID())
-    .withNetworkMode(self.network)
-    .withNetworkAliases(alias)
-    .withLabels({ [ownerLabel]: self.id })
-    .withCommand(['postgres', ...settings.flatMap(setting => ['-c', setting])])
-    .start();
+  const placed = new PostgresOnCpus(image).withCpus(self.cpus).withNetworkMode(self.network).withNetworkAliases(alias).withLabels({ [ownerLabel]: self.id });
+  const container = await (
+    kept === undefined
+      ? placed.withPassword(randomUUID()).withCommand(['postgres', ...settings.flatMap(setting => ['-c', setting])])
+      : placed.withName(keptContainer(kept.name)).withPassword(kept.password).withDatabase(keptDatabase).withBindMounts([{ source: kept.name, target: '/var/lib/postgresql' }])
+  ).start();
   try {
     await requireCpus(container.getId(), self.cpus);
   } catch (error) {
@@ -119,14 +126,43 @@ export async function startPostgres(): Promise<Postgres> {
     pause: pausing(container.getId()),
     restart: () => container.restart(),
     stop: async () => {
-      await container.stop();
+      await container.stop(kept === undefined ? {} : { timeout: keptStopMs });
     },
   };
 }
 
-export function dbmate(url: string, command: 'up' | 'rollback', folder = migrationsFolder): void {
+export type Kept = { readonly url: string; readonly made: boolean; readonly applied: number; readonly stop: () => Promise<void> };
+
+async function keptVolume(name: string, fresh: boolean): Promise<Volume & { readonly made: boolean }> {
+  const holder = await docker('GET', `/containers/${keptContainer(name)}/json`);
+  if (holder.status !== 404) throw new Error(`${keptContainer(name)} still serves the database in the volume ${name}, so another run holds it`);
+  const removed = fresh ? await docker('DELETE', `/volumes/${name}`) : undefined;
+  if (removed !== undefined && removed.status !== 204 && removed.status !== 404) throw new Error(`removing the volume ${name} answered ${String(removed.status)}`);
+  const found = await docker('GET', `/volumes/${name}`);
+  const volume = found.status === 404 ? await docker('POST', '/volumes/create', { Name: name, Labels: { [passwordLabel]: randomUUID() } }) : found;
+  const password = labeledVolume.safeParse(volume.body).data?.Labels?.[passwordLabel];
+  if (password === undefined) throw new Error(`the volume ${name} has no ${passwordLabel} label, so its Postgres password is unknown`);
+  return { name, password, made: found.status === 404 };
+}
+
+export async function keptPostgres(name: string, fresh: boolean): Promise<Kept> {
+  await removeOrphans();
+  const volume = await keptVolume(name, fresh);
+  const postgres = await startPostgres(volume);
+  const url = postgres.url(keptDatabase);
+  try {
+    const applied = dbmate(url, 'up').split('\n').filter(line => line.startsWith('Applying: ')).length;
+    return { url, made: volume.made, applied, stop: postgres.stop };
+  } catch (error) {
+    await postgres.stop();
+    throw error;
+  }
+}
+
+export function dbmate(url: string, command: 'up' | 'rollback', folder = migrationsFolder): string {
   const result = spawnSync(resolveBinary(), ['--url', url, '--migrations-dir', folder, '--no-dump-schema', command], { encoding: 'utf8' });
   if (result.status !== 0) throw new Error(`dbmate ${command} failed: ${result.error?.message ?? result.stderr.trim()}`);
+  return result.stdout;
 }
 
 export function migrate(url: string): void {

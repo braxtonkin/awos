@@ -1,10 +1,13 @@
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { once } from 'node:events';
 import { hostname } from 'node:os';
 import { createInterface } from 'node:readline';
+import { setTimeout as wait } from 'node:timers/promises';
 import { parseArgs } from 'node:util';
+import { ApiException, type CoreV1Api } from '@kubernetes/client-node';
 import { sql } from 'kysely';
 import { z } from 'zod';
+import { connectCluster, labels } from '../../shared/cluster.ts';
 import type { Database } from '../../shared/db/client.ts';
 import { github } from '../../shared/repository-settings.ts';
 import { everyMinutes, words } from '../../shared/routine-draft.ts';
@@ -12,8 +15,8 @@ import { fail, info, pass, type Check, type Line, type Scenario } from '../../to
 import { agents, buildDashboard, dashboardAnswers, loginUrl, startDashboard, type Agent } from '../../tools/verify/dashboard.ts';
 import { docker } from '../../tools/verify/docker.ts';
 import { engineHandlesSigtermFrom } from '../../tools/verify/engine.ts';
-import { adminClient, withPostgres } from '../../tools/verify/postgres.ts';
-import { closeStore, driverSettings, inJobNamespace, openStore, setUpAutoWorker, supervise, until, type Plan, type Store, type Supervised } from './autoworker.ts';
+import { adminClient, keptPostgres } from '../../tools/verify/postgres.ts';
+import { closeStore, driverSettings, jobCluster, makeJobNamespace, openStore, setUpAutoWorker, supervise, until, type Plan, type Store, type Supervised } from './autoworker.ts';
 import { openWorld } from './open-world.ts';
 import { seconds } from './report.ts';
 import { sandboxCommands, sandboxSeed } from './sandbox-seed.ts';
@@ -22,8 +25,10 @@ import { worldNames, type WorldName } from './world.ts';
 const engineReadyMs = 60_000;
 const engineStopGraceMs = 150_000;
 const engineStopped = 'The engine stopped.';
+const namespaceGoneMs = 120_000;
+const keySecret = 'credential-key';
 
-type Hold = { readonly world: WorldName; readonly agent: Agent; readonly repository: string; readonly base: string; readonly jql: string; readonly everyMinutes: number; readonly commands: Plan['commands']; readonly port: number };
+type Hold = { readonly world: WorldName; readonly agent: Agent; readonly repository: string; readonly base: string; readonly jql: string; readonly everyMinutes: number; readonly commands: Plan['commands']; readonly port: number; readonly fresh: boolean };
 
 const defaults: Readonly<Record<WorldName, { readonly agent: Agent; readonly repository: string | undefined; readonly commands: Plan['commands'] }>> = {
   sandbox: { agent: 'real', repository: undefined, commands: { fastTest: undefined, setup: undefined } },
@@ -40,6 +45,7 @@ const holdOptions = {
   'fast-test': { type: 'string' },
   setup: { type: 'string' },
   port: { type: 'string', default: '4860' },
+  fresh: { type: 'boolean', default: false },
 } as const;
 
 const refusals = (error: z.ZodError): string => error.issues.map(issue => issue.message).join('; ');
@@ -67,7 +73,15 @@ function holdFrom(args: readonly string[]): Hold | Check {
   const commands = { fastTest: values['fast-test']?.trim() ?? defaults[world].commands.fastTest, setup: values.setup?.trim() ?? defaults[world].commands.setup };
   const port = Number(values.port);
   if (!Number.isInteger(port) || port < 1 || port > 65_535) return fail('port given', '--port takes a whole number from 1 to 65535, the port the dashboard listens on inside this container');
-  return { world, agent, repository: repository.data, base: base.data, jql: jql.data, everyMinutes: every.data, commands, port };
+  return { world, agent, repository: repository.data, base: base.data, jql: jql.data, everyMinutes: every.data, commands, port, fresh: values.fresh };
+}
+
+const nameLimit = 63;
+
+function holdName(hold: Hold): string {
+  const hash = createHash('sha256').update(JSON.stringify([hold.world, hold.agent, hold.repository, hold.base])).digest('hex').slice(0, 6);
+  const readable = `${hold.world}-${hold.repository.split('/').at(-1) ?? ''}`.toLowerCase().replaceAll(/[^a-z0-9]+/g, '-');
+  return `hold-${readable.slice(0, nameLimit - 'hold-'.length - hash.length - 1).replace(/-+$/, '')}-${hash}`;
 }
 
 const out = (line: string): void => {
@@ -240,6 +254,51 @@ async function serve(port: number, store: Store, routine: Routine, settings: Rea
   return engine === undefined ? lines : [...lines, info('engine starts', 'passed', String(engine.starts())), stoppedCheck(engine.said())];
 }
 
+const ignoring =
+  (code: number) =>
+  (error: unknown): undefined => {
+    if (error instanceof ApiException && error.code === code) return undefined;
+    throw error;
+  };
+
+const origin = (made: boolean): string => (made ? 'made now' : 'kept from an earlier hold');
+
+async function keptNamespace(core: CoreV1Api, namespace: string, anew: boolean): Promise<boolean> {
+  if (anew) await core.deleteNamespace({ name: namespace }).catch(ignoring(404));
+  const deadline = Date.now() + namespaceGoneMs;
+  for (;;) {
+    const phase = await core.readNamespace({ name: namespace }).then(found => found.status?.phase ?? 'Active', ignoring(404));
+    if (phase === undefined) {
+      await makeJobNamespace(core, namespace);
+      return true;
+    }
+    if (phase === 'Active') return false;
+    if (Date.now() > deadline) throw new Error(`the namespace ${namespace} was still ${phase} after ${String(namespaceGoneMs / 1000)} s`);
+    await wait(1_000);
+  }
+}
+
+async function credentialKey(core: CoreV1Api, namespace: string): Promise<{ readonly key: string; readonly made: boolean }> {
+  const stored = await core.readNamespacedSecret({ name: keySecret, namespace }).then(secret => Buffer.from(secret.data?.['CREDENTIAL_KEY'] ?? '', 'base64').toString(), ignoring(404));
+  if (stored === undefined) {
+    const key = randomBytes(32).toString('base64');
+    await core.createNamespacedSecret({ namespace, body: { metadata: { name: keySecret }, stringData: { CREDENTIAL_KEY: key } } });
+    return { key, made: true };
+  }
+  const key = z.base64().min(1).safeParse(stored);
+  if (!key.success) throw new Error(`the Secret ${keySecret} in ${namespace} holds no CREDENTIAL_KEY in base64; delete it, and the next start makes a key and seals the logins again`);
+  return { key: key.data, made: false };
+}
+
+async function deleteJobs(namespace: string): Promise<void> {
+  const { batch } = connectCluster(namespace);
+  const deleted = await batch.deleteCollectionNamespacedJob({ namespace, labelSelector: labels.attempt, propagationPolicy: 'Background' }).then(
+    () => `deleted the attempt Jobs in ${namespace} with their Pods and Secrets`,
+    (error: unknown) => `did not delete the attempt Jobs in ${namespace}: ${error instanceof Error ? error.message : String(error)}`,
+  );
+  out(`stop: ${deleted}`);
+}
+
 async function holdAutoWorker(hold: Hold, stop: Stop): Promise<readonly Line[]> {
   const built = await buildDashboard(false, line => {
     out(`next build: ${line}`);
@@ -251,30 +310,36 @@ async function holdAutoWorker(hold: Hold, stop: Stop): Promise<readonly Line[]> 
     out(`world ${world.name}: ${Object.entries(world.engine.settings).map(([setting, value]) => `${setting}=${value}`).join(' ')}`);
     if (hold.world === 'local') await world.github.seedBranch(hold.base, await sandboxSeed(), 'Seed the local sandbox');
     if (stop.told() !== undefined) return [];
-    const namespace = `hold-${randomBytes(4).toString('hex')}`;
-    return await inJobNamespace(world.engine, namespace, out, cluster =>
-      withPostgres(async postgres => {
-        const scratch = await postgres.scratch();
-        const store = await openStore(scratch.url);
-        try {
-          const plan: Plan = {
-            owner: world.jira.email.toLowerCase(),
-            accountId: await world.jira.accountId(),
-            repository: hold.repository,
-            branch: hold.base,
-            commands: hold.commands,
-            routine: { name: `e2e-hold for ${hold.repository}`, goal: `Take each ticket the search finds to a pull request merged into ${hold.base}.`, jql: hold.jql, everyMinutes: hold.everyMinutes, runAs: 'owner' },
-          };
-          out(`setup: ${await setUpAutoWorker(store, world.engine, plan)}`);
-          const routine = await readRoutine(store.db);
-          out(described(routine));
-          return stop.told() === undefined ? await serve(hold.port, store, routine, driverSettings(world.engine.settings, cluster.image, namespace, cluster.address), namespace, stop) : [];
-        } finally {
-          await closeStore(store);
-          await scratch.drop();
-        }
-      }),
-    );
+    const name = holdName(hold);
+    const cluster = await jobCluster(world.engine, out);
+    const postgres = await keptPostgres(name, hold.fresh);
+    try {
+      out(`database: the volume ${name}, ${origin(postgres.made)}, where dbmate applied ${String(postgres.applied)} migrations`);
+      out(`namespace: ${name}, ${origin(await keptNamespace(cluster.core, name, postgres.made))}`);
+      const credential = await credentialKey(cluster.core, name);
+      out(`credential key: the Secret ${keySecret} in ${name}, ${origin(credential.made)}`);
+      const store = await openStore(postgres.url, credential.key);
+      try {
+        const plan: Plan = {
+          owner: world.jira.email.toLowerCase(),
+          accountId: await world.jira.accountId(),
+          repository: hold.repository,
+          branch: hold.base,
+          commands: hold.commands,
+          routine: { name: `e2e-hold for ${hold.repository}`, goal: `Take each ticket the search finds to a pull request merged into ${hold.base}.`, jql: hold.jql, everyMinutes: hold.everyMinutes, runAs: 'owner' },
+        };
+        out(`setup: ${await setUpAutoWorker(store, world.engine, plan)}`);
+        const routine = await readRoutine(store.db);
+        out(described(routine));
+        return stop.told() === undefined ? await serve(hold.port, store, routine, driverSettings(world.engine.settings, cluster.image, name, cluster.address), name, stop) : [];
+      } finally {
+        await deleteJobs(name);
+        await closeStore(store);
+      }
+    } finally {
+      await postgres.stop();
+      out(`stop: Postgres stopped, and the volume and the namespace named ${name} stay for the next hold`);
+    }
   } finally {
     await world.stop();
   }
@@ -287,7 +352,9 @@ export const holdScenario: Scenario = {
     "with the engine's Jobs on kind and the dashboard on --port, default 4860, at this container's compose-network address, which -p 127.0.0.1:4860:4860 on docker compose run publishes to the host,",
     "and one routine that runs as the Jira login's owner and searches Jira with --jql every --every minutes, default 1;",
     "--fast-test and --setup set the repository's commands, --world sandbox, the default, needs --repository and runs real Codex,",
-    'and --world local runs offline against fakes, with the sandbox seeded on --base and the Codex stand-in unless --agent real',
+    'and --world local runs offline against fakes, with the sandbox seeded on --base and the Codex stand-in unless --agent real;',
+    'it keeps its database in a Docker volume and its credential key in a Secret in its namespace, both named for its world, agent, repository, and base,',
+    'so the next hold with those four finds every task again, and --fresh deletes both first',
   ].join(' '),
   run: async args => {
     const hold = holdFrom(args);
