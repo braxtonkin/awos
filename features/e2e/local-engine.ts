@@ -53,7 +53,7 @@ const routines = {
 
 type RoutineName = keyof typeof routines;
 
-export const seedNames = ['running', 'steer-acted', 'question', 'waiting-gate', 'failed-behavior', 'failed-environment', 'stopped', 'done', 'expired', 'failed-after-conflict', 'nobody-to-run-as', 'login-expired', 'no-tasks', 'no-routines'] as const;
+export const seedNames = ['running', 'steer-acted', 'question', 'waiting-gate', 'failed-behavior', 'failed-environment', 'stopped', 'done', 'expired', 'failed-after-conflict', 'failed-after-red-check', 'nobody-to-run-as', 'login-expired', 'no-tasks', 'no-routines'] as const;
 
 export type SeedName = (typeof seedNames)[number];
 
@@ -105,6 +105,7 @@ export const seeds: Readonly<Record<SeedName, Seed>> = {
   done: { plant: { kind: 'past' }, expect: { kind: 'task', state: 'done', step: 'land', ...quiet } },
   expired: { plant: { kind: 'past' }, expect: { kind: 'task', state: 'done', step: 'land', ...quiet, aged: true } },
   'failed-after-conflict': { plant: { kind: 'past' }, expect: waitsForRetry('implement', 'The Implement step failed 3 times in a row.') },
+  'failed-after-red-check': { plant: { kind: 'past' }, expect: waitsForRetry('implement', 'The Implement step failed 3 times in a row.') },
   'nobody-to-run-as': { plant: { kind: 'ticket', routine: 'unassigned', work: 'longStream', assigned: false }, expect: waitsForRetry('specify', 'Nobody can run this task yet.') },
   'login-expired': { plant: { kind: 'login' }, expect: { kind: 'login', state: 'invalid' } },
   'no-tasks': { plant: { kind: 'empty', routines: true }, expect: { kind: 'world', routines: true, tasks: 0 } },
@@ -384,12 +385,10 @@ async function plantAll(store: Store, local: LocalWorld, wanted: readonly Wanted
       update.where('credential.id', 'not in', store.db.selectFrom('credential').innerJoin('person', 'person.id', 'credential.person_id').select('credential.id').where('person.email', '=', actingPerson.email).where('credential.connector', '=', 'github')),
     )
     .execute();
-  let pasts = 0;
   for (const each of wanted) {
     const { plant } = seeds[each.name];
     if (plant.kind === 'past') {
-      pasts += 1;
-      const key = `PAST-${String(pasts)}`;
+      const key = await local.jira.fileTicket({ project, summary: `Past task ${each.name}`, description: 'local-engine planted this task as past work, so Retry runs it again.', label: routines.past.label, assignee: null });
       out(`seed ${labelOf(each)}: ${await pastSeed(store, each.name, key)}`);
       planted.push({ ...each, key, done: false, observed: await taskFacts(store.db, key) });
     }
