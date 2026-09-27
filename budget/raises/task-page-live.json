@@ -1,11 +1,11 @@
 {
-  "why": "The task page's live state: SBX-60's record as a past seed, a fake Jira ticket for each past seed so Retry can run it, two u8 lanes that hold the page open while attempts end, and the docs that say the page keeps one live state.",
+  "why": "The task page's live state and its card for a no-change failure: SBX-60's record as a past seed, a fake Jira ticket for each past seed so Retry can run it, two u8 lanes that hold the page open while attempts end, the docs for one live state per page, and a card that quotes the agent when it found nothing to change.",
   "raise": {
-    "characters/docs": 1226,
+    "characters/docs": 1515,
     "characters/e2e-harness": 281,
     "characters/feature-verification": 77,
-    "characters/product": 10394,
+    "characters/product": 11972,
     "lines/feature-verification": 1,
-    "lines/product": 162
+    "lines/product": 174
   }
 }
