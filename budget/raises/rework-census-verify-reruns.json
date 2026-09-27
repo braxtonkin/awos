@@ -1,0 +1,6 @@
+{
+  "why": "The frontier waits through any Verify evidence that is not a pass, because a Verify whose environment failed runs again, as lane 12 found on main.",
+  "raise": {
+    "characters/e2e-harness": 64
+  }
+}
