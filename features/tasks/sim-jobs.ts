@@ -30,7 +30,7 @@ export const commitOf = (label: string): string => createHash('sha1').update(lab
 
 const simulatedLog = 'FAIL test/simulated.test.ts: the simulated check failed.';
 
-const simReads: Reads = {
+export const simReads: Reads = {
   branchHead: (_actsAs, github, branch) => Promise.resolve({ head: repositoryHead(github, branch) }),
   failedChecks: (_actsAs, _github, _head, [first, ...rest]) => {
     const logged = (name: string) => ({ name, kind: 'logged', conclusion: 'failure', step: 'Run npm test', log: simulatedLog }) as const;
@@ -38,10 +38,10 @@ const simReads: Reads = {
   },
 };
 
-const startsNowhere = (): Promise<Continuation> => Promise.resolve({ from: 'nowhere' });
+export const startsNowhere = (): Promise<Continuation> => Promise.resolve({ from: 'nowhere' });
 
-export async function beginFromNowhere(db: Database, workflows: Workflows, agents: ReadonlyMap<string, Pick<AgentSteps, 'sentBack'>>, task: string, runAs: string | null): Promise<Begun> {
-  const found = await begin(db, { reads: simReads, runner: { workflows, agents }, continuation: startsNowhere }, task, runAs);
+export async function beginFromNowhere(db: Database, workflows: Workflows, task: string, runAs: string | null): Promise<Begun> {
+  const found = await begin(db, { reads: simReads, runner: { workflows, agents: new Map() }, continuation: startsNowhere }, task, runAs);
   if ('refused' in found) throw new Error(`the simulated reads refused task ${task}: ${found.refused}`);
   return found;
 }

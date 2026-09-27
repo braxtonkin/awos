@@ -1,12 +1,15 @@
+import type { AgentSteps } from '../../shared/agent-step.ts';
 import type { Database } from '../../shared/db/client.ts';
 import type { TaskState, WaitingOn } from '../../shared/db/types.ts';
 import type { Reproduction } from '../../shared/reproduction.ts';
 import type { Review } from '../../shared/review.ts';
+import type { FailedCheck, SendBack } from '../../shared/rework.ts';
 import type { Instruction, StepKind, Unasked, Workflow } from '../../shared/workflow.ts';
 import { advance, handOff, type Then } from './advance.ts';
+import { begin, type Reads } from './begin.ts';
 import { claim } from './claim.ts';
 import { coreRunAs } from './run-as.ts';
-import { beginFromNowhere } from './sim-jobs.ts';
+import { simReads, startsNowhere } from './sim-jobs.ts';
 import { workflowsByName } from './start.ts';
 import { workflows } from './simulate.ts';
 
@@ -18,7 +21,7 @@ type Turn = { readonly output: (kind: StepKind) => unknown; readonly observed: U
 
 type Ends = { readonly state: 'done' } | { readonly state: 'waiting'; readonly waitingOn: WaitingOn; readonly reason: Instruction };
 
-type Story = { readonly title: string; readonly endedMsAgo: number; readonly turns: readonly Turn[]; readonly ends: Ends };
+type Story = { readonly title: string; readonly endedMsAgo: number; readonly sendBack?: SendBack; readonly turns: readonly Turn[]; readonly ends: Ends };
 
 function passingOutput(kind: StepKind): unknown {
   const base = { outcome: 'done', summary: `Finished ${kind.name}.`, blocks: [{ kind: 'text', title: null, body: `The seeded ${kind.name} attempt did what the ticket asks.` }] };
@@ -75,6 +78,7 @@ export const pastSeeds = {
   'failed-after-conflict': {
     title: 'Round each price half up to the cent',
     endedMsAgo: hourMs,
+    sendBack: { kind: 'conflict' },
     turns: [
       answered(said('Round each price half up to the cent in src/prices.ts.', 'Change roundPrice in src/prices.ts to round half up, then add a test that 2.675 rounds to 2.68.')),
       answered(said('Changed src/prices.ts to round each price half up.', 'roundPrice now rounds half up to the cent, and test/prices.test.ts checks 2.675.')),
@@ -90,6 +94,7 @@ export const pastSeeds = {
   'failed-after-red-check': {
     title: 'Wire the smoke test into the sandbox checks',
     endedMsAgo: hourMs,
+    sendBack: { kind: 'check', head: changeCommit, names: ['check'] },
     turns: [
       answered(said('Add an npm run smoke script and run it from npm run check.', 'Add test/smoke.test.ts, which starts the sandbox and calls it once, add npm run smoke, and run it from npm run check.')),
       answered(said('Added the smoke test and ran it from npm run check.', 'test/smoke.test.ts starts the sandbox and calls it once, and npm run check runs it after the unit tests.')),
@@ -120,7 +125,16 @@ const leaseMs = 60_000;
 
 const byName = workflowsByName(workflows);
 
-const sentBackForConflicts = new Map([...byName.keys()].map(name => [name, { sentBack: () => ({ kind: 'conflict' }) as const }]));
+const described = (name: string): FailedCheck => ({ name, kind: 'described', conclusion: 'failure', description: null, url: null });
+
+const pastReads: Reads = { ...simReads, failedChecks: (_actsAs, _github, _head, [first, ...rest]) => Promise.resolve([described(first), ...rest.map(described)]) };
+
+const readerOf = (seed: PastSeed, sendBack: SendBack | undefined): Pick<AgentSteps, 'sentBack'> => ({
+  sentBack: () => {
+    if (sendBack === undefined) throw new Error(`${seed} sends its task back, so its story must say what the send-back asks for.`);
+    return sendBack;
+  },
+});
 
 const recording = (attempt: string, evidence: Reproduction | null, at: Date): Then => async (tx, standing) => {
   if (evidence !== null) await tx.insertInto('evidence').values({ attempt_id: attempt, task_id: standing.task, body: JSON.stringify(evidence), recorded_at: at }).execute();
@@ -155,7 +169,8 @@ export async function seedPast(db: Database, seed: PastSeed, routineName: string
   if (version === undefined) throw new Error(`No routine is named ${routineName}.`);
   const workflow = byName.get(version.workflow);
   if (workflow === undefined) throw new Error(`The routine ${routineName} runs ${version.workflow}, which the seed does not know.`);
-  const { title, endedMsAgo, turns }: Story = pastSeeds[seed];
+  const { title, endedMsAgo, sendBack, turns }: Story = pastSeeds[seed];
+  const beginning = { reads: pastReads, runner: { workflows: byName, agents: new Map([[workflow.name, readerOf(seed, sendBack)]]) }, continuation: startsNowhere };
   const finishedAt = new Date(now.getTime() - endedMsAgo);
   const foundAt = new Date(finishedAt.getTime() - turns.length * turnMs - turnMs);
   const task = await db
@@ -177,7 +192,9 @@ export async function seedPast(db: Database, seed: PastSeed, routineName: string
   for (const [index, turn] of turns.entries()) {
     const startedAt = new Date(foundAt.getTime() + (index + 1) * turnMs - turnMs / 2);
     const endedAt = index === turns.length - 1 ? finishedAt : new Date(startedAt.getTime() + turnMs / 2);
-    const claimed = await claim(db, task.id, startedAt, leaseMs, runAs, await beginFromNowhere(db, byName, sentBackForConflicts, task.id, runAs));
+    const begun = await begin(db, beginning, task.id, runAs);
+    if ('refused' in begun) throw new Error(`The seed could not begin turn ${String(index + 1)} of ${key}: ${begun.refused}`);
+    const claimed = await claim(db, task.id, startedAt, leaseMs, runAs, begun);
     if (!('attempt' in claimed)) throw new Error(`The seed could not claim turn ${String(index + 1)} of ${key}: ${claimed.refused}.`);
     await play(db, workflow, claimed.attempt, turn, endedAt);
   }

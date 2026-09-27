@@ -1008,7 +1008,7 @@ async function sigtermChecks(postgres: TestPostgres): Promise<readonly Check[]> 
     const attempts: string[] = [];
     for (const [index, task] of tasks.entries()) {
       const runAs = await coreRunAs(null)(db, task.id);
-      const claimed = await claim(db, task.id, claimedAt, index < 8 ? 1_000 : 3_600_000, runAs, await beginFromNowhere(db, workflowsByName(workflows), new Map(), task.id, runAs));
+      const claimed = await claim(db, task.id, claimedAt, index < 8 ? 1_000 : 3_600_000, runAs, await beginFromNowhere(db, workflowsByName(workflows), task.id, runAs));
       if (!('attempt' in claimed)) throw new Error(`the lane could not claim task ${task.id}: ${claimed.refused}`);
       attempts.push(claimed.attempt);
     }
@@ -1166,7 +1166,7 @@ export const scenarios: readonly Scenario[] = [
   },
   {
     name: 'tasks-seed',
-    summary: "writes a past seed's story, done, expired, failed-after-conflict, or failed-after-red-check, as task --key of the routine --routine in the database at --database, through the tasks feature's claim, advance, and handOff with earlier times, and checks it ends in the state the seed declares",
+    summary: "writes a past seed's story, done, expired, failed-after-conflict, or failed-after-red-check, as task --key of the routine --routine in the database at --database, through the tasks feature's begin, claim, advance, and handOff with earlier times, and checks it ends in the state the seed declares",
     run: seedChecks,
   },
   {
