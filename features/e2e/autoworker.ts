@@ -669,7 +669,7 @@ async function driveInNamespace(drive: Drive, core: CoreV1Api, image: string, ad
         await wait(watchEveryMs, undefined, { signal: drive.signal }).catch(() => undefined);
       }
       if (park !== undefined) drive.check(fail('task never parked after the fault', parkedText(drive.ticket, park)));
-      const rehearsed = (name: RehearsalName) => () => reworkChecks[name]({ db: store.db, ticket: drive.ticket, github: drive.github, branch: drive.branch, entryFile: drive.entry.file, movedBase });
+      const rehearsed = (name: RehearsalName) => () => reworkChecks[name]({ db: store.db, ticket: drive.ticket, github: drive.github, branch: drive.branch, movedBase });
       const endChecks: Readonly<Record<Fault, () => Promise<Check>>> = {
         'engine-restart': () => continuedCheck(store.db, drive.ticket, 'engine-restart', hit),
         'lost-job': () => continuedCheck(store.db, drive.ticket, 'lost-job', hit),
