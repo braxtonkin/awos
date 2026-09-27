@@ -27,8 +27,8 @@
       "files": [
         "features/e2e/**"
       ],
-      "lines": 6881,
-      "characters": 350921,
+      "lines": 6970,
+      "characters": 356181,
       "longest-line": 471
     },
     {
@@ -51,8 +51,8 @@
         "{features,services,shared}/**/*-model.ts",
         "{features,services,shared}/**/*.test.ts"
       ],
-      "lines": 20410,
-      "characters": 992049,
+      "lines": 20442,
+      "characters": 994111,
       "longest-line": 504
     },
     {
@@ -61,8 +61,8 @@
       "files": [
         "db/migrations/**"
       ],
-      "lines": 1510,
-      "characters": 65469,
+      "lines": 1540,
+      "characters": 66858,
       "longest-line": 220
     },
     {
@@ -83,8 +83,8 @@
         "docs/**",
         "*.md"
       ],
-      "lines": 752,
-      "characters": 219769
+      "lines": 768,
+      "characters": 223613
     },
     {
       "name": "product",
@@ -94,8 +94,8 @@
         "services/**",
         "shared/**"
       ],
-      "lines": 14229,
-      "characters": 671484,
+      "lines": 14239,
+      "characters": 672145,
       "longest-line": 374
     }
   ],
@@ -110,7 +110,7 @@
     },
     "migrations": {
       "why": "Every migration runs forward and back in the migrations scenario and in every simulation's database.",
-      "ceiling": 45
+      "ceiling": 46
     },
     "tables": {
       "why": "Each table is state that every later migration, query, and simulator predicate must keep consistent.",

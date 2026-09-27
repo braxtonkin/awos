@@ -56,9 +56,11 @@ const shownLimit = 4000;
 
 const tokenShapes = /\b(?:gh[pousr]_\w+|github_pat_\w+|ATATT[\w=-]+|eyJ[\w-]+\.[\w.-]+)/g;
 
+const redacted = (text: string): string => text.trim().replace(tokenShapes, '[redacted]');
+
 const shown = (text: string): string => {
-  const redacted = text.trim().replace(tokenShapes, '[redacted]');
-  return redacted.length <= shownLimit ? redacted : `${redacted.slice(0, shownLimit)}\n[cut after ${String(shownLimit)} characters]`;
+  const whole = redacted(text);
+  return whole.length <= shownLimit ? whole : `${whole.slice(0, shownLimit)}\n[cut after ${String(shownLimit)} characters]`;
 };
 
 const exited = (ran: RanScript): string => (ran.timedOut ? 'ran out of time' : ran.exitCode === null ? 'ended without a code' : `exited ${String(ran.exitCode)}`);
@@ -79,5 +81,5 @@ export const evidenceText = (evidence: unknown): string | null => {
   if (parsed.data.state === 'no_script') return `AutoWorker ran no reproduction, because ${parsed.data.reason}.`;
   const stopped = unrunnable(parsed.data.base.run);
   const why = stopped === null ? [] : [`AutoWorker could not check the behavior, because the script could not run on the base commit, where ${shown(stopped)}.`];
-  return [...why, `Reproduction script:\n\n\`\`\`sh\n${shown(parsed.data.script)}\n\`\`\``, sideText('On the base commit', parsed.data.base), sideText('On the change', parsed.data.change)].join('\n\n');
+  return [...why, `Reproduction script:\n\n\`\`\`sh\n${redacted(parsed.data.script)}\n\`\`\``, sideText('On the base commit', parsed.data.base), sideText('On the change', parsed.data.change)].join('\n\n');
 };

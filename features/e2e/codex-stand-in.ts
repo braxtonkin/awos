@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { setTimeout as wait } from 'node:timers/promises';
@@ -15,11 +15,13 @@ import {
   favicon,
   forbidden,
   identity,
+  modulesList,
   rehearsalOf,
   reproductionScript,
   smokeTest,
   solutions,
   stillWrongSign,
+  unlisted,
   untouchable,
   type RehearsalName,
   type Solution,
@@ -172,8 +174,23 @@ const conflictQuestion = (entry: Entry): Review => ({
   ],
 });
 
-function rework(work: Implementing, rehearsal: RehearsalName, prompt: string): Rework {
+async function listModules(): Promise<Rework> {
+  const tested = await run('npm test');
+  const missing = [...new Set([...tested.output.matchAll(unlisted)].flatMap(([, file]) => (file === undefined ? [] : [file])))];
+  if (missing.length === 0) return unchangedRework;
+  const path = join(process.cwd(), modulesList);
+  const listing = `${await readFile(path, 'utf8')}${missing.map(file => `- ${file}\n`).join('')}`;
+  const named = missing.map(file => `\`${file}\``).join(', ');
+  return {
+    writes: [() => write(path, listing)],
+    reply: review(`The stand-in listed ${missing.join(', ')} in ${modulesList}.`, `\`npm test\` failed, because \`${modulesList}\` did not list ${named}, so the stand-in listed them.`),
+  };
+}
+
+async function rework(work: Implementing, rehearsal: RehearsalName, prompt: string): Promise<Rework> {
   switch (rehearsal) {
+    case 'base-breaks':
+      return listModules();
     case 'red-check':
       return prompt.includes('favicon.ico') ? { writes: [writing(favicon, 'icon\n')], reply: review(`The stand-in added ${favicon}.`, `Added \`${favicon}\`, which the smoke test's log said the page could not load.`) } : unchangedRework;
     case 'still-wrong':
@@ -192,7 +209,7 @@ function rework(work: Implementing, rehearsal: RehearsalName, prompt: string): R
 
 async function implement(work: Implementing, prompt: string): Promise<Review | undefined> {
   const rehearsal = rehearsalOf(prompt);
-  const again = rehearsal !== undefined && existsSync(join(process.cwd(), work.entry.file)) ? rework(work, rehearsal, prompt) : undefined;
+  const again = rehearsal !== undefined && existsSync(join(process.cwd(), work.entry.file)) ? await rework(work, rehearsal, prompt) : undefined;
   const writes = again?.writes ?? firstWrites(work, rehearsal);
   const actions: ReadonlyMap<number, Action> = new Map<number, Action>([
     [2, () => run('ls src test')],

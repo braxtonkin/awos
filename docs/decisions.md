@@ -790,6 +790,35 @@ Rejected options:
 - **One count with a higher cap.** A task whose checks keep failing would run more rounds before a person sees it.
 - **A per-repository setting.** See above.
 
+### A check rework starts from the tree CI tested
+
+Decided 27 Sep 2026 after SBX-93 on braxtonkin/awos-game. Three tests in `test/catch-up.test.ts` failed in CI and passed in the agent's workspace and in a fresh checkout of the branch head. GitHub runs a pull request's checks on the pull request merged into its base branch, and main had gained machines, perks, and achievements from sibling tickets after the branch saved its fixtures. The check rework started from the branch head, found everything passing, pushed nothing, and the task waited for a person.
+
+Now the obligation for a failed check records the base branch's head that `begin` reads at claim time, as a conflict's does, and the Job starts merging it before the turn on the same path a conflict rework uses, with `pushStep`'s rules about when a merge commit may be pushed. When the start commit already holds that head, there is nothing to merge. Implement's input says that CI tested the merge and that the merge is left uncommitted. A migration records the failed head as the base of each earlier check obligation, which merges nothing, and the constraint `obligation_names_its_kind` now requires the base. `Tasks.tla` needed no change: the merge is a step inside the Job, not a task transition, and a rework that pushes a merge commit has pushed something, as a conflict rework's merge already had. Lane 19 of `p7-lane` replays SBX-93 on the Codex stand-in, and the local world's fake GitHub now runs CI on the merge as GitHub does.
+
+Rejected options:
+
+- **Let the agent fetch the base.** Only the bridge holds the token, and a push stays the bridge's alone.
+- **Merge only when Land's check log names a file the base changed.** A log cannot say which base change broke the merge, and SBX-93's did not.
+
+### Only a person contests Verify's evidence
+
+Decided 27 Sep 2026 by the owner, after SBX-73 and SBX-93 on braxtonkin/awos-game. Verify's evidence was wrong both times. SBX-73's script failed on a file the agent's own run had left in `/tmp`, and SBX-93's scripts timed the wrong reference. A rework that finds Verify wrong ends without a change, and the task waits for a person, who corrects the ticket or sends a note. AutoWorker adds no route for a rework to contest Verify and no action that reruns Verify alone.
+
+Rejected options:
+
+- **A Verify again action, and a rework outcome that says the evidence is wrong.** It spares a person on a wrong verdict, at the cost of a new person action and a new Implement outcome in the task model. The owner judged that a person stepping in is fine.
+- **Only the Verify again action.** The same kind of cost for a smaller part of the case.
+
+### Each repository ignores its own scratch files
+
+Decided 27 Sep 2026 by the owner, after SBX-73's rework committed its simulator output, `.sbx-73-sim.out`, which then merged into braxtonkin/awos-game. The Job commits what the workspace holds, and a repository keeps its scratch patterns in its own `.gitignore`, as SBX-86 did for `*.out`.
+
+Rejected options:
+
+- **Commit only the files the agent names.** It makes a stray file impossible, at the cost of a new required field in Implement's review and a failed check whenever the agent forgets a file.
+- **Commit everything, and show new files to Verify and on the task page.** It shows the problem without preventing it.
+
 ## Open
 
 Each open question names the current lean or default. A lean is not a decision.
