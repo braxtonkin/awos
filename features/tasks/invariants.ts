@@ -144,7 +144,7 @@ const reworkOwing = (obligation: string | null) => sql`insert into attempt (task
 
 const behaviorOwed = '{"kind": "behavior", "evidence": "Planted.", "notes": []}';
 
-const checkOwed = `{"kind": "check", "head": "${'a'.repeat(40)}", "checks": [{"name": "planted", "kind": "unread", "why": "Planted."}], "notes": []}`;
+const checkOwed = `{"kind": "check", "head": "${'a'.repeat(40)}", "branch": "main", "base": "${'b'.repeat(40)}", "checks": [{"name": "planted", "kind": "unread", "why": "Planted."}], "notes": []}`;
 
 const record = sql`s.step, s.state, s.waiting_on, s.retries, s.lost, s.input_waits, s.counts, s.approved, s.outputs`;
 

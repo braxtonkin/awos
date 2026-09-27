@@ -84,7 +84,7 @@ export const pastSeeds = {
       answered(said('Changed src/prices.ts to round each price half up.', 'roundPrice now rounds half up to the cent, and test/prices.test.ts checks 2.675.')),
       reproducing(said('Wrote a script that checks roundPrice(2.675) returns 2.68.', 'The script runs the price tests, so it fails while roundPrice rounds half down and passes once it rounds half up.'), reproduced),
       engineSaid('handed_off', said('Land owed pr.mark-ready.', `GitHub reported green-draft at ${changeCommit}, so Land owed pr.mark-ready.`)),
-      engineSaid('red_check', said('Land sent the task back to Implement.', 'Land sent the task back, because the pull request conflicts with its base branch.')),
+      engineSaid('conflict', said('Land sent the task back to Implement.', 'Land sent the task back, because the pull request conflicts with its base branch.')),
       changedNothing(stillRounded),
       changedNothing(stillRounded),
       changedNothing(stillRounded),

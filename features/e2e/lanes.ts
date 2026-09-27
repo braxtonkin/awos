@@ -1,5 +1,5 @@
 import { asInfo, fail, isCheck, pass, type Check, type Line } from '../../tools/verify/check.ts';
-import { teamAccount, type Fault, type RunAs } from './autoworker.ts';
+import { baseBroke, teamAccount, type Fault, type RunAs } from './autoworker.ts';
 import type { Inspect } from './harness.ts';
 import { threadStartModels } from './record-checks.ts';
 import { attemptsInOrder, taskFor } from './record.ts';
@@ -191,6 +191,18 @@ export const lanes: readonly Lane[] = [
     procedure:
       'Move the run branch forward under every Implement attempt, so each rework merges a base that has already moved again, as a base branch under constant churn would. Pass when Land sends the task back for a conflict ten times and the task then waits at Land, with a reason that names ten conflicts with its base branch, and counts no failed check.',
     deciders: named({ exactly: ['conflicts parked the task at their cap'] }),
+  },
+  {
+    ...run,
+    number: 19,
+    slug: 'base-breaks',
+    fault: 'base-breaks',
+    procedure: [
+      "At the first stored Implement event, move the run branch forward with a test that every module in src is listed in MODULES.md, and a list that lacks the change's module,",
+      "so the change passes its own tests and CI fails on the pull request merged into its base, as SBX-93's did. The stand-in's rework runs npm test and lists each module it names.",
+      'Pass when Land sends the task back for the red check, the rework pushes a merge of the new base with the fix, and the run reaches clean.',
+    ].join(' '),
+    deciders: named({ exactly: [baseBroke, 'check rework fixed from the merge', 'clean'] }),
   },
 ];
 

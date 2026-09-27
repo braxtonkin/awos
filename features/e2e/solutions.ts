@@ -52,7 +52,7 @@ export const solutions: Readonly<Record<string, Solution>> = {
 
 export const identity = (entry: Pick<Entry, 'name'>): string => `export function ${entry.name}(value: unknown): unknown {\n  return value;\n}\n`;
 
-export const rehearsalNames = ['red-check', 'still-wrong', 'ticket-conflict', 'pushes-nothing', 'stays-red'] as const;
+export const rehearsalNames = ['red-check', 'still-wrong', 'ticket-conflict', 'pushes-nothing', 'stays-red', 'base-breaks'] as const;
 
 export type RehearsalName = (typeof rehearsalNames)[number];
 
@@ -81,9 +81,29 @@ export const smokeTest = {
   ].join('\n'),
 } as const;
 
+export const modulesList = 'MODULES.md';
+
+export const unlisted = /MODULES\.md does not list (src\/[\w./-]+\.ts)/g;
+
+export const modulesTest = {
+  path: 'test/modules.test.ts',
+  source: [
+    "import { readdirSync, readFileSync } from 'node:fs';",
+    "import { expect, test } from 'vitest';",
+    '',
+    `test('${modulesList} lists every module in src', () => {`,
+    `  const listed = readFileSync('${modulesList}', 'utf8');`,
+    "  for (const file of readdirSync('src')) expect(listed, `MODULES.md does not list src/${file}`).toContain(`- src/${file}\\n`);",
+    '});',
+    '',
+  ].join('\n'),
+} as const;
+
+export const modulesListing = (files: readonly string[]): string => ['# Modules', '', ...files.map(file => `- ${file}`), ''].join('\n');
+
 export const checksPass = 'All mandated checks pass: typecheck, test, and build. The smoke test needs a browser, which this Job lacks.';
 
-export const stillWrongSign = 'Expected values to be strictly equal';
+export const stillWrongSign = 'Expected values to be strictly';
 
 export const coverageScript = (entry: Pick<Entry, 'name'>): string =>
   `grep -q ${entry.name} ${untouchable} || { echo "${untouchable} does not test ${entry.name}, and every export needs a test there"; exit 1; }\n`;

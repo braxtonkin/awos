@@ -161,11 +161,18 @@ export async function startFakeGitHub(settings: FakeGitHubSettings): Promise<Fak
 
   const runLink = (run: CheckRun): string => `${holder.web}/actions/runs/${String(run.id)}`;
 
+  const testedTree = async (commit: string): Promise<string> => {
+    const open = await Promise.all(state.pulls.filter(pull => pull.merged === null).map(async pull => ({ pull, head: await headOf(pull.head) })));
+    const pull = open.find(entry => entry.head === commit)?.pull;
+    const base = pull === undefined ? undefined : await headOf(pull.base);
+    return (base === undefined ? undefined : await mergedTree(base, commit)) ?? commit;
+  };
+
   async function test(run: CheckRun): Promise<void> {
     const folder = await mkdtemp(join(scratch, 'ci-'));
     const archive = join(scratch, `ci-${String(run.id)}.tar`);
     try {
-      await gitOut(['archive', '--format=tar', `--output=${archive}`, run.sha]);
+      await gitOut(['archive', '--format=tar', `--output=${archive}`, await testedTree(run.sha)]);
       const env = { PATH: process.env['PATH'] ?? '/usr/bin:/bin', HOME: npmHome, CI: 'true', LANG: 'C.UTF-8' };
       const untar = await runProcess('tar', ['-xf', archive, '-C', folder], { cwd: scratch, env, timeoutMs: gitWaitMs, signal: stopping.signal });
       const installed = untar.code === 0 ? await runProcess('sh', ['-c', 'npm ci --no-audit --no-fund'], { cwd: folder, env, timeoutMs: ciWaitMs, signal: stopping.signal }) : untar;

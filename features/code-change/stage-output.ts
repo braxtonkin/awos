@@ -67,7 +67,11 @@ function sentBackFor(obligation: ReworkObligation): string | null {
         `AutoWorker started merging \`${obligation.head}\`, the head of \`${obligation.branch}\` when this attempt started, into this branch before your turn, and left the merge uncommitted. Finish that merge first, as your instructions say.`,
       ].join('\n\n');
     case 'check':
-      return [`Land sent the task back, because checks failed on \`${obligation.head}\`, the head of the pull request. Fix what made each one fail.`, ...obligation.checks.map(checkLine)].join('\n\n');
+      return [
+        `Land sent the task back, because checks failed on \`${obligation.head}\`, the head of the pull request. CI ran them on the pull request merged into \`${obligation.branch}\`, so fix what made each one fail on that merge.`,
+        `AutoWorker started merging \`${obligation.base}\`, the head of \`${obligation.branch}\` when this attempt started, into this branch before your turn, and left the merge uncommitted. Finish that merge first, as your instructions say, then run the checks on the merged tree. When \`git status\` shows no merge in progress, this branch already held that commit.`,
+        ...obligation.checks.map(checkLine),
+      ].join('\n\n');
     case 'behavior':
       return ["Verify sent the task back, because it found the behavior still wrong. Fix what its evidence shows.", obligation.evidence].join('\n\n');
     case 'review':

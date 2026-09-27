@@ -22,7 +22,7 @@ export type FailedCheck = z.infer<typeof failedCheck>;
 
 export const reworkObligation = z.discriminatedUnion('kind', [
   z.strictObject({ kind: z.literal('conflict'), branch: z.string().min(1), head: commit, notes }),
-  z.strictObject({ kind: z.literal('check'), head: commit, checks: z.tuple([failedCheck], failedCheck), notes }),
+  z.strictObject({ kind: z.literal('check'), head: commit, branch: z.string().min(1), base: commit, checks: z.tuple([failedCheck], failedCheck), notes }),
   z.strictObject({ kind: z.literal('behavior'), evidence: z.string().min(1), notes }),
   z.strictObject({ kind: z.literal('review'), review: z.string().min(1), notes }),
   z.strictObject({ kind: z.literal('note'), notes: z.tuple([personNote], personNote) }),

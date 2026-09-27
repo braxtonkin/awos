@@ -45,7 +45,10 @@ const noRepository: Instruction = 'This task has no repository, and its step run
 
 const reason = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
-const baseToMerge = ({ obligation, start }: Step): string | null => (obligation?.kind === 'conflict' && obligation.head !== start ? obligation.head : null);
+function baseToMerge({ obligation, start }: Step): string | null {
+  const base = obligation?.kind === 'conflict' ? obligation.head : obligation?.kind === 'check' ? obligation.base : null;
+  return base === start ? null : base;
+}
 
 const turnStarted = async (db: Database, attempt: string): Promise<boolean> =>
   (await db.selectFrom('attempt_command').select('attempt_command.seq').where('attempt_command.attempt_id', '=', attempt).where('attempt_command.kind', '=', 'turn.start').executeTakeFirst()) !== undefined;
