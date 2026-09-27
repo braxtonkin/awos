@@ -1,8 +1,9 @@
-import { parseArgs } from 'node:util';
+import { isDeepStrictEqual, parseArgs } from 'node:util';
 import { z } from 'zod';
 import { fail, pass, type Check, type Scenario } from '../../tools/verify/check.ts';
 import { withPostgres } from '../../tools/verify/postgres.ts';
 import { schemaChecks } from './catalog.ts';
+import { failedChecksReader } from './checks.ts';
 import { githubClient } from './client.ts';
 import { liveScenario } from './live.ts';
 import { mutantName, mutants, simulate, type MutantName, type Run } from './simulate.ts';
@@ -82,14 +83,62 @@ async function parseCheck(): Promise<Check> {
   return !('ok' in opened) && opened.message.includes('number') ? pass(name, opened.message.replace(/\s+/g, ' ')) : fail(name, JSON.stringify(opened));
 }
 
+const failedAt = 'f'.repeat(40);
+
+const escape = String.fromCharCode(27);
+
+const jobLog = Array.from({ length: 200 }, (_, index) => `2026-09-27T08:00:${String(index % 60).padStart(2, '0')}.1234567Z ${escape}[31mline ${String(index + 1)}${escape}[0m`).join('\r\n');
+
+const answering =
+  (routes: Readonly<Record<string, unknown>>): typeof fetch =>
+  input => {
+    const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url);
+    const found = routes[`${url.pathname}${url.searchParams.has('check_name') ? `?${url.searchParams.get('check_name') ?? ''}` : ''}`];
+    if (found === undefined) return Promise.resolve(new Response(JSON.stringify({ message: 'Not Found' }), { status: 404, headers: { 'content-type': 'application/json' } }));
+    return Promise.resolve(
+      typeof found === 'string' ? new Response(found, { status: 200, headers: { 'content-type': 'text/plain' } }) : new Response(JSON.stringify(found), { status: 200, headers: { 'content-type': 'application/json' } }),
+    );
+  };
+
+const actionsRun = { id: 11, status: 'completed', conclusion: 'failure', details_url: 'https://github.com/sim/repo/actions/runs/7/job/11', app: { slug: 'github-actions' }, output: { title: null, summary: null } };
+
+const checkRoutes: Readonly<Record<string, unknown>> = {
+  [`/repos/sim/repo/commits/${failedAt}/check-runs?build`]: { total_count: 1, check_runs: [actionsRun] },
+  '/repos/sim/repo/actions/jobs/11': { id: 11, steps: [{ name: 'Set up job', conclusion: 'success' }, { name: 'Run npm test', conclusion: 'failure' }, { name: 'Post job', conclusion: 'skipped' }] },
+  '/repos/sim/repo/actions/jobs/11/logs': jobLog,
+  [`/repos/sim/repo/commits/${failedAt}/check-runs?legacy`]: { total_count: 0, check_runs: [] },
+  [`/repos/sim/repo/commits/${failedAt}/check-runs?missing`]: { total_count: 0, check_runs: [] },
+  [`/repos/sim/repo/commits/${failedAt}/check-runs?planted`]: { total_count: 1, check_runs: [{ ...actionsRun, id: undefined }] },
+  [`/repos/sim/repo/commits/${failedAt}/status`]: { statuses: [{ context: 'legacy', state: 'failure', description: 'Build failed', target_url: 'https://ci.example/1' }] },
+};
+
+const tailExpected = Array.from({ length: 60 }, (_, index) => `line ${String(index + 141)}`).join('\n');
+
+async function failedChecksCheck(): Promise<readonly Check[]> {
+  const client = githubClient({ token: 'planted', baseUrl: 'https://github.invalid', pageSize: 100, fetch: answering(checkRoutes) });
+  const read = failedChecksReader(() => Promise.resolve(client), 10_000);
+  const [build, legacy, missing, planted] = await read('ada', 'sim/repo', failedAt, ['build', 'legacy', 'missing', 'planted']);
+  const expected: readonly (readonly [string, unknown, unknown])[] = [
+    ["an Actions check reads as its failing step and the last 60 lines of its job's log, with no ANSI codes or timestamps", build, { name: 'build', kind: 'logged', conclusion: 'failure', step: 'Run npm test', log: tailExpected }],
+    ['a commit status with no log reads as its description and target URL', legacy, { name: 'legacy', kind: 'described', conclusion: 'failure', description: 'Build failed', url: 'https://ci.example/1' }],
+    ['a check GitHub does not report reads as unread, with the reason', missing, { name: 'missing', kind: 'unread', why: `GitHub reports no check run or status named missing on ${failedAt}` }],
+  ];
+  const plantedName = 'the reader refuses a planted check run without its id by the field, and records the check as unread';
+  const plantedWhy = planted?.kind === 'unread' ? planted.why : JSON.stringify(planted);
+  return [
+    ...expected.map(([what, got, wanted]) => (isDeepStrictEqual(got, wanted) ? pass(`the failed-check reader: ${what}`, JSON.stringify(got).slice(0, 200)) : fail(`the failed-check reader: ${what}`, `${JSON.stringify(got)}, not ${JSON.stringify(wanted)}`))),
+    planted?.kind === 'unread' && plantedWhy.includes('check_runs') && plantedWhy.includes('id') ? pass(plantedName, plantedWhy.replace(/\s+/g, ' ')) : fail(plantedName, plantedWhy),
+  ];
+}
+
 async function simulationChecks(options: SimulationOptions): Promise<readonly Check[]> {
   if (options.mutant === 'all') {
-    const checks: Check[] = [await parseCheck(), ...(await withPostgres(schemaChecks))];
+    const checks: Check[] = [await parseCheck(), ...(await failedChecksCheck()), ...(await withPostgres(schemaChecks))];
     for (const mutant of mutantName.options) checks.push(await mutantCheck(mutant, options));
     return checks;
   }
   if (options.mutant !== undefined) return [await mutantCheck(options.mutant, options)];
-  return [...(await cleanSeeds(options)), await parseCheck()];
+  return [...(await cleanSeeds(options)), await parseCheck(), ...(await failedChecksCheck())];
 }
 
 export const scenarios: readonly Scenario[] = [

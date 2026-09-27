@@ -178,6 +178,29 @@ const enqueueMutation = `mutation Enqueue($id: ID!, $head: GitObjectID!) {
 
 const enqueueData = z.object({ enqueuePullRequest: z.object({ mergeQueueEntry: z.object({ headCommit: z.object({ oid: commit }).nullable() }).nullable() }) });
 
+const checkRunList = z.object({
+  check_runs: z.array(
+    z.object({
+      id: z.int().positive(),
+      status: z.string(),
+      conclusion: z.string().nullable(),
+      details_url: z.string().nullable(),
+      app: z.object({ slug: z.string() }).nullable(),
+      output: z.object({ title: z.string().nullable(), summary: z.string().nullable() }),
+    }),
+  ),
+});
+
+export type NamedCheckRun = z.infer<typeof checkRunList>['check_runs'][number];
+
+const actionsJob = z.object({ steps: z.array(z.object({ name: z.string(), conclusion: z.string().nullable() })).optional() });
+
+export type ActionsJob = z.infer<typeof actionsJob>;
+
+const combinedStatus = z.object({ statuses: z.array(z.object({ context: z.string(), state: z.string(), description: z.string().nullable(), target_url: z.string().nullable() })) });
+
+export type CommitStatus = z.infer<typeof combinedStatus>['statuses'][number];
+
 const ref = z.object({ object: z.object({ sha: commit }) });
 
 const parents = z.object({ parents: z.array(z.object({ sha: commit })) });
@@ -245,6 +268,8 @@ export function githubClient(settings: GithubSettings) {
     const [owner = '', name = ''] = repository.split('/');
     return { owner, name };
   };
+
+  const repo = (repository: string): { readonly owner: string; readonly repo: string } => ({ owner: split(repository).owner, repo: split(repository).name });
 
   async function allContexts(repository: string, oid: string, page: z.infer<typeof contexts>, signal: AbortSignal): Promise<Reply<readonly Ran[]>> {
     const found = page.nodes.map(ranOf);
@@ -348,6 +373,16 @@ export function githubClient(settings: GithubSettings) {
     },
     updateBranch: (repository: string, number: number, expectedHead: string, signal: AbortSignal): Promise<Reply<unknown>> =>
       rest(z.unknown(), 'PUT /repos/{owner}/{repo}/pulls/{pull_number}/update-branch', { owner: split(repository).owner, repo: split(repository).name, pull_number: number, expected_head_sha: expectedHead }, signal),
+    checkRunsNamed: async (repository: string, sha: string, name: string, signal: AbortSignal): Promise<Reply<readonly NamedCheckRun[]>> => {
+      const answer = await rest(checkRunList, 'GET /repos/{owner}/{repo}/commits/{ref}/check-runs', { ...repo(repository), ref: sha, check_name: name, filter: 'latest', per_page: first }, signal);
+      return 'ok' in answer ? { ok: answer.ok.check_runs } : answer;
+    },
+    actionsJob: (repository: string, job: number, signal: AbortSignal): Promise<Reply<ActionsJob>> => rest(actionsJob, 'GET /repos/{owner}/{repo}/actions/jobs/{job_id}', { ...repo(repository), job_id: job }, signal),
+    jobLog: (repository: string, job: number, signal: AbortSignal): Promise<Reply<string>> => rest(z.string(), 'GET /repos/{owner}/{repo}/actions/jobs/{job_id}/logs', { ...repo(repository), job_id: job }, signal),
+    commitStatuses: async (repository: string, sha: string, signal: AbortSignal): Promise<Reply<readonly CommitStatus[]>> => {
+      const answer = await rest(combinedStatus, 'GET /repos/{owner}/{repo}/commits/{ref}/status', { ...repo(repository), ref: sha, per_page: 100 }, signal);
+      return 'ok' in answer ? { ok: answer.ok.statuses } : answer;
+    },
     parentsOf: async (repository: string, sha: string, signal: AbortSignal): Promise<Reply<readonly string[]>> => {
       const answer = await rest(parents, 'GET /repos/{owner}/{repo}/commits/{ref}', { owner: split(repository).owner, repo: split(repository).name, ref: sha }, signal);
       return 'ok' in answer ? { ok: answer.ok.parents.map(parent => parent.sha) } : answer;

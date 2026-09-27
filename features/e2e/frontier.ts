@@ -68,7 +68,7 @@ export function readEvidence(body: string): { readonly script: string; readonly 
 }
 
 async function commentStep(run: Run, heading: string, judge: (comment: Comment) => Outcome): Promise<Outcome> {
-  const found = (await run.jira.comments(run.ticket)).find(startsWith(heading));
+  const found = (await run.jira.comments(run.ticket)).findLast(startsWith(heading));
   return found === undefined ? pending(`no comment starts with ${heading}`) : judge(found);
 }
 
@@ -139,9 +139,9 @@ export const steps = [
     probe: run =>
       commentStep(run, evidenceHeading, comment => {
         const evidence = readEvidence(comment.body);
-        if (evidence === undefined) return failed(`comment ${comment.id} lacks the reproduction script or one of its two runs`);
-        if (evidence.before === 0) return failed('the reproduction script passed before the change, so it shows no bug');
-        if (evidence.after !== 0) return failed(`the reproduction script still fails after the change, exit ${String(evidence.after)}`);
+        if (evidence === undefined) return pending(`comment ${comment.id}, the latest evidence, lacks the reproduction script or one of its two runs, so Verify runs again`);
+        if (evidence.before === 0) return pending('the latest reproduction script passed before the change, so it shows no bug, and Verify runs again');
+        if (evidence.after !== 0) return pending(`the latest reproduction script still fails after the change, exit ${String(evidence.after)}, so Verify sends the task back to Implement`);
         return reached(`script failed before the change with exit ${String(evidence.before)} and passed after it`, [{ label: 'evidence', url: run.jira.commentLink(run.ticket, comment) }]);
       }),
   },

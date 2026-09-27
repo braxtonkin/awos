@@ -17,6 +17,7 @@ CONSTANTS
     ReadyBeforeGreen,
     Reassignable,
     MaxRounds,
+    MaxConflicts,
     MaxEnvReruns,
     MaxLost,
     MaxStageRetries,
@@ -30,6 +31,8 @@ CONSTANTS
     NoOneParksTask,
     LateResultIsRefused,
     RoundsAreCapped,
+    ConflictsAreCapped,
+    ConflictsCountApart,
     EnvRerunsAreCapped,
     LostAttemptsAreCapped,
     StageRetriesAreCapped,
@@ -64,7 +67,8 @@ CONSTANTS
     RefusedLaunchIsNotLost,
     FailedLaunchRelaunches,
     RetryWaitsAtGate,
-    RetryReturnsWhenRoundsRunOut
+    RetryReturnsWhenRoundsRunOut,
+    UnmetReworkEndsTheStep
 
 CodeChangeSteps == <<"specify", "implement", "verify", "land">>
 
@@ -100,6 +104,7 @@ ASSUME
 
 ASSUME
     /\ MaxRounds \in Nat \ {0}
+    /\ MaxConflicts \in Nat \ {0}
     /\ MaxEnvReruns \in Nat
     /\ MaxLost \in Nat \ {0}
     /\ MaxStageRetries \in Nat
@@ -124,11 +129,7 @@ Settled == {"stopped", "done"} \cup Waiting
 
 NoRounds == [r \in Returning |-> 0]
 
-Outcomes(s) ==
-    {"pass"}
-      \cup (IF s \in Checks THEN {"behaviorFail", "environmentFail"} ELSE {"fail"})
-      \cup (IF s \in Asking THEN {"needsInput"} ELSE {})
-      \cup (IF s \in Merges THEN {"red", "changesRequested", "reviewRequired"} ELSE {})
+NoConflicts == [m \in Merges |-> 0]
 
 Min(a, b) == IF a < b THEN a ELSE b
 
@@ -147,6 +148,7 @@ TypeOK ==
                            missing : SUBSET DOMAIN After,
                            reviews : 0..(MaxReviewReturns + 1),
                            rounds : [Returning -> 0..(MaxRounds + 1)],
+                           conflicts : [Merges -> 0..(MaxConflicts + 1)],
                            reruns : 0..(MaxEnvReruns + 1),
                            lost : 0..(MaxLost + 1),
                            retries : 0..(MaxStageRetries + 1),
@@ -163,10 +165,21 @@ TypeOK ==
     /\ reassignments \in 0..MaxReassignments
     /\ launchFaults \in 0..MaxLaunchFaults
 
+Reworking(current) == current.step = ReturnsTo /\ ReturnsTo \in current.outputs
+
+Outcomes(current) ==
+    LET s == current.step
+    IN {"pass"}
+         \cup (IF s \in Checks THEN {"behaviorFail", "environmentFail"} ELSE {"fail"})
+         \cup (IF s \in Asking THEN {"needsInput"} ELSE {})
+         \cup (IF s \in Merges THEN {"red", "conflict", "changesRequested", "reviewRequired"} ELSE {})
+         \cup (IF Reworking(current) THEN {"unmet"} ELSE {})
+
 Init ==
     /\ \E ends \in [Tasks -> EndSteps] :
          /\ \A t \in Tasks : ends[t] \in EndsFor(t)
-         /\ task = [t \in Tasks |-> [step |-> First, state |-> "ready", end |-> ends[t], approved |-> {}, missing |-> {}, reviews |-> 0, rounds |-> NoRounds, reruns |-> 0, lost |-> 0, retries |-> 0, inputWaits |-> 0, outputs |-> {}, passed |-> FALSE]]
+         /\ task = [t \in Tasks |-> [step |-> First, state |-> "ready", end |-> ends[t], approved |-> {}, missing |-> {}, reviews |-> 0, rounds |-> NoRounds,
+                                     conflicts |-> NoConflicts, reruns |-> 0, lost |-> 0, retries |-> 0, inputWaits |-> 0, outputs |-> {}, passed |-> FALSE]]
     /\ attempt = [w \in Workers |-> NoTask]
     /\ worker = [w \in Workers |-> "idle"]
     /\ lateResults = {}
@@ -180,6 +193,7 @@ Init ==
 Passed(t, current, s) ==
     LET kept == [current EXCEPT !.outputs = @ \cup {s},
                                 !.rounds = [r \in Returning |-> IF r = s \/ (s \in Checks /\ ~VerifyPassKeepsLandRounds) THEN 0 ELSE @[r]],
+                                !.conflicts = [m \in Merges |-> IF m = s \/ (s \in Checks /\ ~VerifyPassKeepsLandRounds) THEN 0 ELSE @[m]],
                                 !.reruns = 0,
                                 !.inputWaits = 0,
                                 !.retries = IF PassResetsStageRetries THEN 0 ELSE @]
@@ -212,6 +226,14 @@ RoundFailed(current, target) ==
        THEN [current EXCEPT !.state = "waiting", !.rounds[s] = @ + 1]
        ELSE [SentBack(current, target) EXCEPT !.rounds[s] = Min(@ + 1, MaxRounds + 1)]
 
+ConflictFailed(current) ==
+    LET s == current.step
+    IN IF ConflictsAreCapped /\ current.conflicts[s] + 1 >= MaxConflicts
+       THEN [current EXCEPT !.state = "waiting", !.conflicts[s] = @ + 1]
+       ELSE [SentBack(current, ReturnsTo) EXCEPT !.conflicts[s] = Min(@ + 1, MaxConflicts + 1)]
+
+Conflicted(current) == IF ConflictsCountApart THEN ConflictFailed(current) ELSE RoundFailed(current, ReturnsTo)
+
 BehaviorFailed(current) ==
     RoundFailed(current, CASE ~BehaviorFailureLeavesVerify -> current.step
                            [] BehaviorFailureReturnsToImplement -> ReturnsTo
@@ -223,7 +245,7 @@ EnvironmentFailed(t, current) ==
       [] OTHER -> [current EXCEPT !.reruns = Min(@ + 1, MaxEnvReruns + 1)]
 
 ReviewReturned(current) ==
-    [SentBack(current, ReturnsTo) EXCEPT !.reviews = Min(@ + 1, MaxReviewReturns + 1), !.rounds[current.step] = 0]
+    [SentBack(current, ReturnsTo) EXCEPT !.reviews = Min(@ + 1, MaxReviewReturns + 1), !.rounds[current.step] = 0, !.conflicts[current.step] = 0]
 
 AwaitingApproval(current) == [current EXCEPT !.state = "awaitingApproval"]
 
@@ -250,8 +272,10 @@ Judged(t, current, v) ==
       [] v = "behaviorFail" -> BehaviorFailed(current)
       [] v = "environmentFail" -> EnvironmentFailed(t, current)
       [] v = "red" -> RedChecked(t, current)
+      [] v = "conflict" -> Conflicted(current)
       [] v = "changesRequested" -> ChangesRequested(t, current)
       [] v = "reviewRequired" -> AwaitingApproval(current)
+      [] v = "unmet" -> IF UnmetReworkEndsTheStep THEN [current EXCEPT !.state = "waiting"] ELSE Failed(current)
 
 LostOnce(current) ==
     IF LostAttemptsAreCapped /\ current.lost + 1 >= MaxLost
@@ -345,14 +369,14 @@ Finishes(w, v) ==
     /\ runAs' = [runAs EXCEPT ![w] = FALSE]
     /\ UNCHANGED <<lateResults, humanActions, runnable, reassignments, launchFaults>>
 
-Finish(w) == worker[w] = "busy" /\ \E v \in Outcomes(task[attempt[w]].step) : Finishes(w, v)
+Finish(w) == worker[w] = "busy" /\ \E v \in Outcomes(task[attempt[w]]) : Finishes(w, v)
 
 LateResult(t) ==
     /\ t \in lateResults
     /\ lateResults' = lateResults \ {t}
     /\ IF LateResultIsRefused
        THEN UNCHANGED task
-       ELSE \E v \in Outcomes(task[t].step) : task' = [task EXCEPT ![t] = [Judged(t, @, v) EXCEPT !.passed = (v = "pass")]]
+       ELSE \E v \in Outcomes(task[t]) : task' = [task EXCEPT ![t] = [Judged(t, @, v) EXCEPT !.passed = (v = "pass")]]
     /\ UNCHANGED <<attempt, worker, humanActions, claimEpoch, runnable, runAs, reassignments, launchFaults>>
 
 Stop(t) ==
@@ -363,7 +387,9 @@ Stop(t) ==
     /\ humanActions' = [humanActions EXCEPT ![t] = @ + 1]
     /\ UNCHANGED <<runnable, reassignments, launchFaults>>
 
-RoundsRanOut(current) == current.step \in Returning /\ current.rounds[current.step] >= MaxRounds
+RoundsRanOut(current) ==
+    \/ current.step \in Returning /\ current.rounds[current.step] >= MaxRounds
+    \/ current.step \in Merges /\ current.conflicts[current.step] >= MaxConflicts
 
 RetryStart(current) == IF RoundsRanOut(current) THEN ReturnsTo ELSE current.step
 
@@ -377,6 +403,7 @@ Restarted(current) ==
 Retried(current) ==
     [Restarted(current) EXCEPT !.state = "ready",
                                !.rounds = NoRounds,
+                               !.conflicts = NoConflicts,
                                !.reruns = 0,
                                !.lost = 0,
                                !.inputWaits = 0,
@@ -471,7 +498,7 @@ AttemptRunsAsAPerson == \A w \in Workers : attempt[w] # NoTask => runAs[w]
 
 OutputsSurvive == \A t \in Tasks : \A s \in StepSet : Rank[s] < Rank[task[t].step] => s \in task[t].outputs
 
-RoundsCapped == \A t \in Tasks : \A r \in Returning : task[t].rounds[r] <= MaxRounds
+RoundsCapped == \A t \in Tasks : (\A r \in Returning : task[t].rounds[r] <= MaxRounds) /\ \A m \in Merges : task[t].conflicts[m] <= MaxConflicts
 
 EnvRerunsCapped == \A t \in Tasks : task[t].reruns <= MaxEnvReruns
 
@@ -511,8 +538,11 @@ TaskChangesOnlyWithItsAttempt ==
 AttemptEndsOnlyWithItsTask == [][\A t \in Tasks : AttemptEndsOn(t) => task'[t] # task[t] \/ PersonActsOn(t)]_vars
 
 FailedRoundReturnsToImplement ==
-    [][\A t \in Tasks : \A r \in Returning : task'[t].rounds[r] > task[t].rounds[r] =>
+    [][\A t \in Tasks : \A r \in Returning : task'[t].rounds[r] > task[t].rounds[r] \/ (r \in Merges /\ task'[t].conflicts[r] > task[t].conflicts[r]) =>
           task'[t].step = ReturnsTo \/ task'[t].state = "waiting"]_vars
+
+ConflictSparesCheckRounds ==
+    [][\A w \in Workers : \A t \in Tasks : attempt[w] = t /\ task[t].step \in Merges /\ Finishes(w, "conflict") => task'[t].rounds = task[t].rounds]_vars
 
 LateWriteChangesNothing == [][lateResults' \subseteq lateResults /\ lateResults' # lateResults => UNCHANGED <<task, attempt, worker>>]_vars
 
@@ -549,6 +579,9 @@ LaterReviewWaitsForAPerson ==
     [][\A w \in Workers : \A t \in Tasks :
           attempt[w] = t /\ task[t].step \in Merges /\ task[t].reviews >= MaxReviewReturns /\ Finishes(w, "changesRequested") =>
               (task'[t].state = "waiting" <=> t \notin IgnoreLaterReviews)]_vars
+
+UnmetReworkWaitsForAPerson ==
+    [][\A w \in Workers : \A t \in Tasks : attempt[w] = t /\ Reworking(task[t]) /\ Finishes(w, "unmet") => task'[t].state = "waiting"]_vars
 
 EndStagePassIsDone ==
     [][\A w \in Workers : \A t \in Tasks :

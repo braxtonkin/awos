@@ -1,7 +1,9 @@
 import { isDeepStrictEqual } from 'node:util';
+import { z } from 'zod';
 import { actionKinds, owe, ticket, type ActionSpec, type Owe, type Stands } from '../../shared/actions.ts';
 import { mergeState, type Answered, type MergeState, type ReadMergeState } from '../../shared/merge-state.ts';
-import type { Review } from '../../shared/review.ts';
+import { review, type Review } from '../../shared/review.ts';
+import type { SendBack } from '../../shared/rework.ts';
 import type { Instruction, Unasked } from '../../shared/workflow.ts';
 import type { workflow } from './workflow.ts';
 
@@ -71,7 +73,7 @@ export type Owing = 'mark-ready' | 'update-branch' | 'merge';
 export type Decision =
   | { readonly kind: 'merged' }
   | { readonly kind: 'fail'; readonly why: string; readonly answers: Answer | null }
-  | { readonly kind: 'send-back'; readonly why: string }
+  | { readonly kind: 'send-back'; readonly verdict: Extract<Unasked, 'conflict' | 'red_check'>; readonly why: string; readonly failing: readonly [string, ...string[]] | null }
   | { readonly kind: 'owe'; readonly action: Owing }
   | { readonly kind: 'wait'; readonly why: string }
   | { readonly kind: 'answer-review'; readonly review: Extract<MergeState['value'], { readonly kind: 'changes-requested' }>['review'] }
@@ -113,10 +115,12 @@ const unansweredRefusal = (seen: Seen): Answer | null => {
 
 const atOnce = (seen: Seen): boolean => seen.reading.draft === 'at-once';
 
-const failingChecks = (seen: Seen): string => {
+const failingChecks = (seen: Seen): readonly [string, ...string[]] | null => {
   const value = valueOf(seen);
-  return value.kind === 'red' ? value.failing.join(', ') : '';
+  return value.kind === 'red' ? value.failing : null;
 };
+
+const checksFailed = (failing: readonly string[] | null): string => `a check failed: ${(failing ?? []).join(', ')}`;
 
 const wait = (why: string) => (): Decision => ({ kind: 'wait', why });
 
@@ -133,15 +137,15 @@ export const rules: readonly Rule[] = [
       return { kind: 'fail', why: `the merge queue ejected the pull request${value.kind === 'ejected' ? `: ${value.reason}` : ''}`, answers: unansweredEjection(seen) };
     },
   },
-  { name: 'conflicting', when: seen => seen.guards.ConflictSendsBack && is('conflicting')(seen), then: () => ({ kind: 'send-back', why: conflictWhy }) },
+  { name: 'conflicting', when: seen => seen.guards.ConflictSendsBack && is('conflicting')(seen), then: () => ({ kind: 'send-back', verdict: 'conflict', why: conflictWhy, failing: null }) },
   { name: 'ready at once', when: seen => atOnce(seen) && !seen.record.markedReady, then: oweAction('mark-ready') },
   {
     name: 'still a draft',
     when: seen => is('green-draft')(seen) && seen.record.markedReady,
     then: () => ({ kind: 'fail', why: 'the pull request is still a draft after AutoWorker marked it ready', answers: null }),
   },
-  { name: 'red at once', when: seen => atOnce(seen) && is('red')(seen), then: seen => ({ kind: 'fail', why: `a check failed: ${failingChecks(seen)}`, answers: null }) },
-  { name: 'red', when: seen => seen.guards.RedCheckSendsBack && is('red')(seen), then: seen => ({ kind: 'send-back', why: `a check failed: ${failingChecks(seen)}` }) },
+  { name: 'red at once', when: seen => atOnce(seen) && is('red')(seen), then: seen => ({ kind: 'fail', why: checksFailed(failingChecks(seen)), answers: null }) },
+  { name: 'red', when: seen => seen.guards.RedCheckSendsBack && is('red')(seen), then: seen => ({ kind: 'send-back', verdict: 'red_check', why: checksFailed(failingChecks(seen)), failing: failingChecks(seen) }) },
   {
     name: 'ready when green',
     when: seen => is('green-draft')(seen) || (!seen.guards.ReadyWaitsForGreen && is('waiting-for-checks')(seen) && !seen.record.markedReady),
@@ -183,7 +187,9 @@ export const resumes = (reading: Reading, record: LandRecord, guards: Guards): b
   return value.kind !== 'review-required';
 };
 
-export type LandOutput = Review & { readonly answers?: Answer };
+export type Failed = { readonly head: string; readonly checks: readonly [string, ...string[]] };
+
+export type LandOutput = Review & { readonly answers?: Answer; readonly failed?: Failed };
 
 const said = (summary: string, body: string, answers: Answer | null = null): LandOutput => ({
   outcome: 'done',
@@ -192,9 +198,25 @@ const said = (summary: string, body: string, answers: Answer | null = null): Lan
   ...(answers === null ? {} : { answers }),
 });
 
-export const sentBack = (why: string): LandOutput => said('Land sent the task back to Implement.', `Land sent the task back, because ${why}.`);
+export const sentBack = (why: string, failed: Failed | null = null): LandOutput => ({
+  ...said('Land sent the task back to Implement.', `Land sent the task back, because ${why}.`),
+  ...(failed === null ? {} : { failed }),
+});
 
-export const isConflictSendBack = (output: unknown): boolean => isDeepStrictEqual(output, sentBack(conflictWhy));
+const failedOutput = z.object({ failed: z.object({ head: z.string().regex(/^[0-9a-f]{40}$/), checks: z.tuple([z.string().min(1)], z.string().min(1)) }) });
+
+const checksIn = /^Land sent the task back, because a check failed: (.+)\.$/;
+
+const conflictAsRedCheck = sentBack(conflictWhy);
+
+export function redCheckSentBack(output: unknown): SendBack {
+  if (isDeepStrictEqual(output, conflictAsRedCheck)) return { kind: 'conflict' };
+  const recorded = failedOutput.safeParse(output);
+  if (recorded.success) return { kind: 'check', head: recorded.data.failed.head, names: recorded.data.failed.checks };
+  const told = review.safeParse(output).data?.blocks.flatMap(block => (block.kind === 'text' ? [checksIn.exec(block.body)?.[1]] : [])).find(found => found !== undefined);
+  const [first = 'the failing check', ...rest] = told?.split(', ') ?? [];
+  return { kind: 'check', head: null, names: [first, ...rest] };
+}
 
 export type TicketStatuses = { readonly start: string | null; readonly end: string | null };
 
@@ -264,7 +286,10 @@ async function act(land: Land, task: AtLand, attempt: string, reading: Reading, 
     case 'fail':
       return done(await store.finish(attempt, 'fail', said('Land failed this attempt.', `Land failed the attempt, because ${decision.why}.`, decision.answers), nothingFollows), `failed the attempt, because ${decision.why}`);
     case 'send-back':
-      return done(await store.finish(attempt, 'red_check', sentBack(decision.why), nothingFollows), `sent the task back, because ${decision.why}`);
+      return done(
+        await store.finish(attempt, decision.verdict, sentBack(decision.why, decision.failing === null ? null : { head: reading.state.head, checks: decision.failing }), nothingFollows),
+        `sent the task back, because ${decision.why}`,
+      );
     case 'answer-review': {
       const { review } = decision;
       const body = [`${review.reviewer} asked for changes.`, review.body, ...review.comments.map(comment => `${comment.path ?? 'the pull request'}${comment.line === null ? '' : `:${String(comment.line)}`}: ${comment.body}`)].join('\n');

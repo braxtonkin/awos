@@ -197,6 +197,14 @@ const violations: readonly Violation[] = [
     expect: ['TS2322'],
   },
   {
+    name: 'tsc rejects a claim whose start and rework obligation did not come from begin, so no claim can leave out what a send-back owes',
+    file: 'features/tasks/planted.ts',
+    source:
+      "import type { Database } from '../../shared/db/client.ts';\nimport { claim } from './claim.ts';\n\nexport const unowed = (db: Database) => claim(db, '1', new Date(), 1000, '1', { start: null, obligation: null, seen: { epoch: 0, latest: null } });\n",
+    tool: 'tsc',
+    expect: ['TS2345'],
+  },
+  {
     name: 'tsc rejects a GitHub performer map without pr.merge',
     file: 'features/github/planted.ts',
     source:

@@ -12,5 +12,5 @@ export default async function Page({ params, searchParams }: PageProps) {
   const { tab } = await searchParams;
   const page = await readTask(database(), key);
   if (page === undefined) notFound();
-  return <TaskPage page={page} actions={{ stop: stopTask, steer: steerTask, retry: retryTask, review: reviewTask }} tab={tabOf(tab)} zone={Intl.DateTimeFormat().resolvedOptions().timeZone} />;
+  return <TaskPage key={page.header.key} page={page} actions={{ stop: stopTask, steer: steerTask, retry: retryTask, review: reviewTask }} tab={tabOf(tab)} zone={Intl.DateTimeFormat().resolvedOptions().timeZone} />;
 }

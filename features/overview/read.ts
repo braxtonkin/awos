@@ -2,12 +2,9 @@ import { sql } from 'kysely';
 import { jsonArrayFrom, jsonObjectFrom } from 'kysely/helpers/postgres';
 import { z } from 'zod';
 import type { Database } from '../../shared/db/client.ts';
-import type { Verdict } from '../../shared/db/types.ts';
 import { slotOrigin } from '../../shared/slots.ts';
-import { marks, marksOf, type Mark } from '../../shared/task-status.ts';
+import { marks, marksOf, verdict, type Mark } from '../../shared/task-status.ts';
 import { connectors, taskStates, waitingOns, type Login, type NeedsYou, type TaskRow, type World } from './protocol.ts';
-
-const verdicts = ['behavior_fail', 'changes_requested', 'environment_fail', 'fail', 'handed_off', 'lost', 'needs_input', 'not_launched', 'pass', 'red_check', 'review_required', 'stopped'] as const satisfies readonly Verdict[];
 
 const moment = z.union([z.date(), z.string()]).transform(value => new Date(value).toISOString());
 
@@ -28,7 +25,7 @@ const taskRow = z.object({
   person_id: id,
   started_at: moment.nullable(),
   finished_at: moment.nullable(),
-  verdict: z.enum(verdicts).nullable(),
+  verdict: verdict.nullable(),
 });
 
 type Row = z.infer<typeof taskRow>;

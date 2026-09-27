@@ -1,4 +1,5 @@
 import type { Verdict } from '../../shared/db/types.ts';
+import type { Review } from '../../shared/review.ts';
 import type { AttemptSummary } from './protocol.ts';
 import { stepName } from './time.ts';
 
@@ -17,6 +18,7 @@ const told: Readonly<Record<Verdict, Told | null>> = {
   stopped: { word: 'Stopped by a person', failed: null },
   fail: null,
   red_check: null,
+  conflict: null,
 };
 
 type Ended = Pick<AttemptSummary, 'step' | 'verdict' | 'outcome' | 'summary' | 'body'>;
@@ -30,6 +32,10 @@ const phraseOf = (attempt: Ended): string | null => toldOf(attempt)?.failed?.(st
 export const resultOf = (attempt: Ended): string => (attempt.verdict === null ? 'Still running' : (toldOf(attempt)?.word ?? ownWords(attempt) ?? 'Failed'));
 
 export const whyOf = (attempt: Ended): string | null => phraseOf(attempt) ?? ownWords(attempt);
+
+const madeNoChange = 'The agent made no change.';
+
+export const foundNothing = (attempt: Ended, reply: Review | undefined): reply is Review => attempt.verdict === 'fail' && attempt.summary === madeNoChange && reply?.outcome === 'done';
 
 export const failureOf = (attempt: Ended): { readonly headline: string; readonly reason: string | null } => {
   const phrase = phraseOf(attempt);

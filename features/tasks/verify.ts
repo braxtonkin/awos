@@ -21,7 +21,8 @@ import { claim, lostTooOften } from './claim.ts';
 import { coreRunAs } from './run-as.ts';
 import { pastSeedNames, pastSeeds, seedPast } from './seed.ts';
 import { provePlants, type PlantProof } from './invariants.ts';
-import { stepMutantName, type StepMutantName } from './sim-jobs.ts';
+import { beginFromNowhere, stepMutantName, type StepMutantName } from './sim-jobs.ts';
+import { workflowsByName } from './start.ts';
 import {
   badEnd,
   engineMutantName,
@@ -169,6 +170,8 @@ const guards = [
   'NoOneParksTask',
   'LateResultIsRefused',
   'RoundsAreCapped',
+  'ConflictsAreCapped',
+  'ConflictsCountApart',
   'EnvRerunsAreCapped',
   'LostAttemptsAreCapped',
   'StageRetriesAreCapped',
@@ -204,6 +207,7 @@ const guards = [
   'FailedLaunchRelaunches',
   'RetryWaitsAtGate',
   'RetryReturnsWhenRoundsRunOut',
+  'UnmetReworkEndsTheStep',
 ] as const;
 
 const renewsLapsedLeaseForever: Shape = {
@@ -241,6 +245,7 @@ const properties = {
   TaskChangesOnlyWithItsAttempt: 'PROPERTIES',
   AttemptEndsOnlyWithItsTask: 'PROPERTIES',
   FailedRoundReturnsToImplement: 'PROPERTIES',
+  ConflictSparesCheckRounds: 'PROPERTIES',
   OutputsOnlyGrow: 'PROPERTIES',
   StageAdvancesOnlyOnPass: 'PROPERTIES',
   DoneIsFinal: 'PROPERTIES',
@@ -252,6 +257,7 @@ const properties = {
   MergeNeedsEveryGate: 'PROPERTIES',
   ReviewsOnlyGrow: 'PROPERTIES',
   LaterReviewWaitsForAPerson: 'PROPERTIES',
+  UnmetReworkWaitsForAPerson: 'PROPERTIES',
   EndStagePassIsDone: 'PROPERTIES',
   ReleasedOnlyAfterItsLease: 'PROPERTIES',
   LapsedLeaseNeverRenews: 'PROPERTIES',
@@ -279,11 +285,11 @@ const tasksModel = defineModel({
   configs: {
     pr: {
       file: 'Tasks.cfg',
-      floors: { Tasks: 2, Workers: 2, MaxRounds: 2, MaxEnvReruns: 2, MaxLost: 2, MaxStageRetries: 1, MaxInputWaits: 1, MaxHumanActions: 2, MaxReassignments: 1, MaxLaunchFaults: 1 },
+      floors: { Tasks: 2, Workers: 2, MaxRounds: 2, MaxConflicts: 2, MaxEnvReruns: 2, MaxLost: 2, MaxStageRetries: 1, MaxInputWaits: 1, MaxHumanActions: 2, MaxReassignments: 1, MaxLaunchFaults: 1 },
     },
     nightly: {
       file: 'Tasks.nightly.cfg',
-      floors: { Tasks: 2, Workers: 2, MaxRounds: 3, MaxEnvReruns: 3, MaxLost: 3, MaxStageRetries: 2, MaxInputWaits: 2, MaxHumanActions: 3, MaxReassignments: 1, MaxLaunchFaults: 1 },
+      floors: { Tasks: 2, Workers: 2, MaxRounds: 3, MaxConflicts: 3, MaxEnvReruns: 3, MaxLost: 3, MaxStageRetries: 2, MaxInputWaits: 2, MaxHumanActions: 3, MaxReassignments: 1, MaxLaunchFaults: 1 },
     },
   },
   guards,
@@ -309,6 +315,9 @@ const tasksModel = defineModel({
     breaks('FailureParksTask', 'a failed stage stops the task', 'OnlyAPersonStops'),
     unsettled('RoundsAreCapped', 'verify rounds have no cap', loopsBetweenImplementAndVerify),
     breaks('RoundsAreCapped', 'verify rounds have no cap', 'RoundsCapped'),
+    unsettled('ConflictsAreCapped', 'conflicts have no cap', loopsFromLandToImplement),
+    breaks('ConflictsAreCapped', 'conflicts have no cap', 'RoundsCapped'),
+    breaks('ConflictsCountApart', 'a conflict spends a failed-check round', 'ConflictSparesCheckRounds'),
     unsettled('EnvRerunsAreCapped', 'environment reruns have no cap', rerunsVerifyForever),
     breaks('EnvRerunsAreCapped', 'environment reruns have no cap', 'EnvRerunsCapped'),
     unsettled('LostAttemptsAreCapped', 'lost attempts have no cap', losesAttemptsForever),
@@ -341,6 +350,7 @@ const tasksModel = defineModel({
     breaks('RetryKeepsApprovals', "a person's retry forgets the task's approvals", 'StoppedTaskCanResume'),
     breaks('RetryWaitsAtGate', 'Retry after a Stop at a gate reruns the gated step', 'GateStopResumesAtGate'),
     breaks('RetryReturnsWhenRoundsRunOut', 'Retry after the rounds run out reruns the step that failed', 'RetryStartsWhereTheFailureRoutes'),
+    breaks('UnmetReworkEndsTheStep', 'a rework that pushed nothing for what sent it back runs again with the same input', 'UnmetReworkWaitsForAPerson'),
     unsettled('VerifyPassKeepsLandRounds', 'a Verify pass clears the Land rounds of a task with no gate', loopsFromLandToImplement),
     unsettled('OutsideApprovalsAreFinite', 'outside approvals may never stop', approvesForever),
     breaks('OutsideApprovalNeedsAWait', 'an outside approval resumes a task that is not awaiting one', 'TaskChangesOnlyWithItsAttempt'),
@@ -459,7 +469,24 @@ async function profileChecks(postgres: TestPostgres, profile: ProfileName, optio
     ...(profile === 'jobs' ? [jobFaultsReached(runs)] : []),
     ...(profile === 'behavior' ? [checksParkAtTheirCap(runs, parks.rounds, 'every task that reached Verify waits after 3 rounds with the instruction for that wait, unless its attempts were lost first')] : []),
     ...(profile === 'environment' ? [checksParkAtTheirCap(runs, parks.reruns, 'every task that reached Verify parked at the rerun cap, unless its attempts were lost first, and no round was charged')] : []),
+    ...(profile === 'conflicts' ? [conflictsParkAtTheirCap(runs)] : []),
   ];
+}
+
+function conflictsParkAtTheirCap(runs: readonly Run[]): Check {
+  const name = 'conflicts: every task that reached Land waits there after 4 conflicts, past the 3 rounds a failed check may take, with the instruction for that wait, unless its attempts were lost first, and no conflict spent a failed-check round';
+  const settled = runs.flatMap(run => run.tasks.map(task => ({ seed: run.seed, ...task })));
+  const atLand = settled.filter(task => task.workflow === 'code-change' && task.step === 'land');
+  const lostThere = atLand.filter(task => task.reason === lostTooOften).length;
+  const wrong = atLand.filter(task => task.state !== 'waiting' || (task.reason !== parks.conflicts && task.reason !== lostTooOften));
+  const charged = settled.filter(task => typeof task.counts === 'object' && task.counts !== null && 'landRounds' in task.counts);
+  const problems = [
+    ...wrong.slice(0, 3).map(task => `seed ${String(task.seed)} task ${task.key} is ${task.state} at land: ${task.reason ?? 'no instruction'}`),
+    ...charged.slice(0, 3).map(task => `seed ${String(task.seed)} task ${task.key} was charged a failed-check round`),
+  ];
+  return atLand.length > lostThere && problems.length === 0
+    ? pass(name, `${String(atLand.length - lostThere)} tasks waited at land with: ${parks.conflicts} ${String(lostThere)} more parked there first because their attempts were lost.`)
+    : fail(name, problems.length === 0 ? 'no task waited at land for its conflicts' : problems.join('; '));
 }
 
 function laterReviewsReached(runs: readonly Run[]): Check {
@@ -765,7 +792,7 @@ const declaredSteps: readonly LiteralStep[] = [
     name: 'land',
     run_by: 'engine',
     requires: ['text'],
-    failures: { ...ends, red_check: { kind: 'return', to: 'implement' }, changes_requested: { kind: 'review', to: 'implement' }, review_required: { kind: 'await', to: null } },
+    failures: { ...ends, red_check: { kind: 'return', to: 'implement' }, conflict: { kind: 'return', to: 'implement' }, changes_requested: { kind: 'review', to: 'implement' }, review_required: { kind: 'await', to: null } },
   },
 ];
 
@@ -1003,7 +1030,8 @@ async function sigtermChecks(postgres: TestPostgres): Promise<readonly Check[]> 
     const claimedAt = new Date();
     const attempts: string[] = [];
     for (const [index, task] of tasks.entries()) {
-      const claimed = await claim(db, task.id, claimedAt, index < 8 ? 1_000 : 3_600_000, await coreRunAs(null)(db, task.id), null);
+      const runAs = await coreRunAs(null)(db, task.id);
+      const claimed = await claim(db, task.id, claimedAt, index < 8 ? 1_000 : 3_600_000, runAs, await beginFromNowhere(db, workflowsByName(workflows), task.id, runAs));
       if (!('attempt' in claimed)) throw new Error(`the lane could not claim task ${task.id}: ${claimed.refused}`);
       attempts.push(claimed.attempt);
     }
@@ -1161,7 +1189,7 @@ export const scenarios: readonly Scenario[] = [
   },
   {
     name: 'tasks-seed',
-    summary: "writes a past seed's story, done, expired, or failed-after-conflict, as task --key of the routine --routine in the database at --database, through the tasks feature's claim, advance, and handOff with earlier times, and checks it ends in the state the seed declares",
+    summary: "writes a past seed's story, done, expired, failed-after-conflict, or failed-after-red-check, as task --key of the routine --routine in the database at --database, through the tasks feature's begin, claim, advance, and handOff with earlier times, and checks it ends in the state the seed declares",
     run: seedChecks,
   },
   {

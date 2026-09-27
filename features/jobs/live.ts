@@ -712,6 +712,20 @@ const tamperer = ' && (nohup sh -c "while true; do for d in /tmp/autoworker-run.
 
 const fixingScript = ['test -f setup-ran.txt || { echo "setup did not run"; exit 2; }', 'grep -q new src/value.txt'].join('\n');
 
+const sharedTempScript = [
+  'if grep -q new src/value.txt; then',
+  '  seen=0',
+  '  if [ -e /var/tmp/autoworker-probe.base ]; then echo "saw the base side file"; seen=1; fi',
+  '  if ! echo change > /tmp/autoworker-probe.out; then seen=1; fi',
+  '  exit $((seen * 2))',
+  'fi',
+  'echo base > /var/tmp/autoworker-probe.base',
+  'if [ -f /dev/shm/autoworker-probe.verdict ]; then echo "trusted the agent verdict"; exit 0; fi',
+  'exit 1',
+].join('\n');
+
+const agentTempLeftovers = ' && echo agent > /tmp/autoworker-probe.out && echo pass > /dev/shm/autoworker-probe.verdict';
+
 const ranRecord = z.object({ exitCode: z.int().nullable(), output: z.string() }).nullable();
 
 const reproduced = z.object({ state: z.literal('ran'), base: z.object({ run: ranRecord }), change: z.object({ run: ranRecord }) });
@@ -759,11 +773,16 @@ async function reproduceLane(world: World): Promise<readonly Check[]> {
     const refusals = ['whoami reproduce', 'environment clean', 'pid 1 environ refused', 'bridge folder refused', 'bridge git refused', 'codex login refused', 'probe done'];
     const probeGood = probe.got !== undefined && refusals.every(marker => probeOutput.includes(marker)) && !probeOutput.includes('token readable') && leaked.length === 0;
     const editing = await runOne(editingScript, tamperer);
+    const temp = await runOne(sharedTempScript, agentTempLeftovers);
     const pushedBranch = await sh(`git -C ${bare} rev-parse --verify -q refs/heads/${editing.branch} || true`);
     const fixed = 'the Job runs the setup and the script in fresh checkouts of the base commit and the change, and records a failing base run and a passing change run';
     const sealed = "a planted script runs as the reproduce user and cannot read the bridge's environment, its git folder, or the Codex login";
     const edited = "a script that edits its checkout, the agent's workspace, and its own file, beside an agent process that keeps writing into the run folders, fails on both commits and pushes nothing (F2)";
+    const fresh =
+      "a script that writes and reads fixed paths in /tmp, /var/tmp, and /dev/shm passes on the change even when the agent's own run left those files, and neither side sees the agent's or the other side's files";
+    const tempOutput = `base: ${temp.got?.base.run?.output ?? ''} | change: ${temp.got?.change.run?.output ?? ''}`;
     return [
+      temp.got?.base.run?.exitCode === 1 && temp.got.change.run?.exitCode === 0 ? pass(fresh, exits(temp.got)) : fail(fresh, `${exits(temp.got)}: ${redact(tempOutput).slice(-800)}`),
       fixing.got?.base.run?.exitCode === 1 && fixing.got.change.run?.exitCode === 0 ? pass(fixed, exits(fixing.got)) : fail(fixed, `${exits(fixing.got)}: ${redact(fixing.log).slice(-800)}`),
       probeGood ? pass(sealed, refusals.join(', ')) : fail(sealed, `${leaked.length === 0 ? 'no secret in the log' : `${String(leaked.length)} secrets in the log`}: ${redact(probeOutput).slice(-800)}`),
       editing.got?.base.run?.exitCode === 1 && editing.got.change.run?.exitCode === 1 && pushedBranch === ''

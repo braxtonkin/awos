@@ -17,7 +17,7 @@ export type PersonAction =
 
 export type Person = { readonly id: string; readonly person: string; readonly at: Date };
 
-export type Report = { readonly output: unknown; readonly observed: Unasked | null };
+export type Report = { readonly output: unknown; readonly observed: Unasked | null } | { readonly output: unknown; readonly observed: 'fail'; readonly ends: Instruction };
 
 export type Advanced = { readonly state: Next['standing']['state']; readonly step: string } | { readonly finished: Verdict | null };
 
@@ -115,7 +115,7 @@ export async function advanceWithin(tx: Transacting, workflows: Workflows, attem
   const { held, workflow } = await hold(tx, workflows, found.task_id);
   const kind = workflow.steps.find(candidate => candidate.name === held.step);
   const verdict = report.observed ?? (kind === undefined ? 'fail' : kind.judge(report.output));
-  const next = decide(workflow, held, verdict, attempt);
+  const next = decide(workflow, held, verdict, attempt, 'ends' in report ? report.ends : null);
   await tx
     .with('finished', query =>
       query

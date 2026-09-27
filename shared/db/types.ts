@@ -51,7 +51,7 @@ export type TaskState = "done" | "ready" | "stopped" | "waiting";
 
 export type Timestamp = ColumnType<Date, Date | string, Date | string>;
 
-export type Verdict = "behavior_fail" | "changes_requested" | "environment_fail" | "fail" | "handed_off" | "lost" | "needs_input" | "not_launched" | "pass" | "red_check" | "review_required" | "stopped";
+export type Verdict = "behavior_fail" | "changes_requested" | "conflict" | "environment_fail" | "fail" | "handed_off" | "lost" | "needs_input" | "not_launched" | "pass" | "red_check" | "review_required" | "stopped";
 
 export type WaitingOn = "answer" | "approval" | "outside_approval" | "retry";
 
@@ -68,7 +68,7 @@ export interface Attempt {
   last_pushed: string | null;
   lease_until: Timestamp;
   live: Generated<boolean | null>;
-  merge_head: string | null;
+  obligation: Json | null;
   output: Json | null;
   routine_id: Int8;
   routine_version: number;

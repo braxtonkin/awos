@@ -2,16 +2,32 @@ import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { Page } from 'playwright-core';
 import { z } from 'zod';
+import type { Database } from '../../shared/db/client.ts';
+import { reduce } from '../../shared/items.ts';
 import { reproduction } from '../../shared/reproduction.ts';
+import { reworkObligation } from '../../shared/rework.ts';
 import { open, shoot } from '../../tools/verify/browser.ts';
 import { fail, pass, type Line } from '../../tools/verify/check.ts';
 import type { Lane } from '../../tools/verify/dashboard.ts';
 import { actingPerson } from '../../tools/verify/screens/screens.ts';
 import { keyOf, until, view, withDatabase } from './lanes.ts';
+import { reviewOf } from './now.ts';
 
 const unit = 'u8';
 const seed = 'waiting-gate';
 const conflictSeed = 'failed-after-conflict';
+const redCheckSeed = 'failed-after-red-check';
+const behaviorSeed = 'failed-behavior';
+const redCheckStory = 'pass pass pass handed_off red_check pass pass handed_off red_check fail fail fail';
+const redCheck = 'a check failed: check';
+const owedCheck = 'the failed check `check`';
+const pushedNothing = `Implement pushed nothing, though the task came back to fix ${owedCheck}.`;
+const foundNothing = 'found nothing to change';
+const stillRunning = 'Still running';
+const retryButton = '[data-retry="send"]';
+const claimMs = 120_000;
+const runsMs = 8 * 60_000;
+const catchUpMs = 10_000;
 const stepsList = 'ol[aria-label="Steps"] > li';
 const approveButton = '[aria-label="Open review"] [data-act="approve"]';
 const movesOnMs = 60_000;
@@ -139,6 +155,7 @@ const reasons: Lane = {
         const steps = await db.selectFrom('published_workflow_step').select('published_workflow_step.name').where('published_workflow_step.workflow', '=', task.workflow).orderBy('published_workflow_step.position').execute();
         const evidence = await db.selectFrom('evidence').select(['evidence.attempt_id', 'evidence.body']).where('evidence.task_id', '=', task.id).orderBy('evidence.attempt_id').execute();
         const reason = task.waiting_reason ?? '';
+        const reply = await replyOf(db, attempts.at(-1));
         const named = task.state === 'waiting' && task.waiting_on === 'retry' && reason.startsWith(failedThrice) && task.step === attempts.at(-1)?.step && attempts.map(each => each.verdict ?? 'live').join(' ') === story;
         const tried = new Set(attempts.map(each => each.step));
         const current = steps.findIndex(each => each.name === task.step);
@@ -162,7 +179,8 @@ const reasons: Lane = {
         const taken = shotPaths.join(', ');
         return [
           check(named, 'the seed reads back as named', `${key} ${task.state} at ${task.step}, waiting on ${task.waiting_on ?? 'nothing'}: ${reason}; attempts: ${attempts.map(each => `${each.step} ${each.verdict ?? 'live'}`).join(', ')}`),
-          check(card.toLowerCase().includes(noChange.toLowerCase()), 'the status card says the agent made no change', card),
+          check(headline.includes(foundNothing), 'the status card says the agent found nothing to change', card),
+          check(reply !== undefined && card.includes(`“${reply}”`), "the status card quotes the agent's own last message", `${card} | the agent said: ${reply ?? 'nothing'}`),
           check(card.includes(conflict), 'the status card names the conflict with the base branch', card),
           check(card !== '' && !/a check on the pull request/i.test(card), 'the status card does not call the conflict a red check', card),
           check(/^[^.]+\.$/.test(headline), "the status card's headline is one sentence", headline),
@@ -182,4 +200,137 @@ const reasons: Lane = {
   },
 };
 
-export const stateLanes: readonly Lane[] = [smoke, reasons];
+type Stored = { readonly id: string; readonly step: string; readonly verdict: string | null; readonly finished: boolean; readonly owes: string | null };
+
+const owedOf = (obligation: unknown): string | null => {
+  const owed = reworkObligation.safeParse(obligation).data;
+  if (owed === undefined) return null;
+  return owed.kind === 'check' ? `the failed check ${owed.checks.map(each => `\`${each.name}\``).join(', ')}` : `a ${owed.kind}`;
+};
+
+const storedAttempts = async (db: Database, key: string): Promise<readonly Stored[]> =>
+  (await db.selectFrom('attempt').innerJoin('task', 'task.id', 'attempt.task_id').select(['attempt.id', 'attempt.step', 'attempt.verdict', 'attempt.finished_at', 'attempt.obligation']).where('task.key', '=', key).orderBy('attempt.id').execute()).map(row => ({
+    id: row.id,
+    step: row.step,
+    verdict: row.verdict,
+    finished: row.finished_at !== null,
+    owes: owedOf(row.obligation),
+  }));
+
+const replyOf = async (db: Database, attempt: { readonly id: string } | undefined): Promise<string | undefined> => {
+  if (attempt === undefined) return undefined;
+  const lines = await db.selectFrom('attempt_event').select('body').where('attempt_event.attempt_id', '=', attempt.id).where('attempt_event.kind', '=', 'app').orderBy('attempt_event.seq').execute();
+  const text = reduce(lines).items.findLast(item => item.type === 'agentMessage' && item.status === 'completed')?.text;
+  return text === undefined ? undefined : reviewOf(text)?.summary;
+};
+
+const recordedEvidence = (db: Database, key: string) => db.selectFrom('evidence').innerJoin('task', 'task.id', 'evidence.task_id').select('evidence.attempt_id').where('task.key', '=', key).orderBy('evidence.attempt_id').execute();
+
+const rowsDisagree = (rows: ReadonlyMap<string, string>, stored: readonly Stored[]): readonly string[] => [
+  ...stored.filter(each => !rows.has(each.id)).map(each => `no row for attempt ${each.id}, ${each.step} ${each.verdict ?? 'running'}`),
+  ...stored.filter(each => each.finished && (rows.get(each.id) ?? '').includes(stillRunning)).map(each => `row ${each.id} says ${stillRunning}, though it ended ${each.verdict ?? 'without a verdict'}`),
+  ...[...rows.keys()].filter(id => !stored.some(each => each.id === id)).map(id => `row ${id} is not in Postgres`),
+];
+
+async function agreed(page: Page, db: Database, key: string): Promise<{ readonly rows: ReadonlyMap<string, string>; readonly stored: readonly Stored[] }> {
+  const read = async () => ({ rows: await textsOf(page, 'data-attempt-row'), stored: await storedAttempts(db, key) });
+  return until('the Attempts tab to match Postgres', async () => {
+    const seen = await read();
+    return rowsDisagree(seen.rows, seen.stored).length === 0 ? seen : undefined;
+  }, catchUpMs).catch(read);
+}
+
+const cardOf = async (page: Page): Promise<{ readonly headline: string; readonly text: string }> => ({
+  headline: oneLine((await page.locator('[data-card="headline"]').allInnerTexts()).join(' ')),
+  text: oneLine((await page.locator('[aria-label="Status"]').allInnerTexts()).join(' ')),
+});
+
+const live: Lane = {
+  unit,
+  id: 'live',
+  seeds: [redCheckSeed],
+  run: async (world, browser, shots) => {
+    const key = keyOf(world, redCheckSeed);
+    await mkdir(shots, { recursive: true });
+    return withDatabase(world, db =>
+      open(browser, view(world, `/tasks/${key}?tab=attempts`, 'light', true), async ({ page, errors }) => {
+        const saved = async (name: string): Promise<string> => {
+          const path = join(shots, name);
+          await shoot(page, path);
+          return path;
+        };
+        const shotPaths = [await saved('u8-live-seeded.png')];
+        const task = await db.selectFrom('task').select(['task.state', 'task.step', 'task.waiting_on', 'task.waiting_reason']).where('task.key', '=', key).executeTakeFirstOrThrow();
+        const seeded = await storedAttempts(db, key);
+        const seededReply = await replyOf(db, seeded.at(-1));
+        const before = await cardOf(page);
+        const repeats = before.headline === '' ? 0 : await page.locator('[aria-label="Agent"]').getByText(before.headline, { exact: true }).count();
+        await page.locator(retryButton).click();
+        await until('Retry to start Implement again', async () => (await storedAttempts(db, key)).find(each => !seeded.some(old => old.id === each.id)), claimMs);
+        const parked = await until('the task to wait for Retry again', async () => {
+          const now = await db.selectFrom('task').select(['task.state', 'task.waiting_reason']).where('task.key', '=', key).executeTakeFirstOrThrow();
+          return now.state === 'waiting' && (await storedAttempts(db, key)).every(each => each.finished) ? now : undefined;
+        }, runsMs);
+        const { rows, stored } = await agreed(page, db, key);
+        const ran = stored.filter(each => !seeded.some(old => old.id === each.id));
+        const newestReply = await replyOf(db, stored.at(-1));
+        const unshown = (await Promise.all(ran.map(async each => ((await page.locator(`[aria-label="Agent"] [data-attempt="${each.id}"]`).count()) === 0 ? [each.id] : [])))).flat();
+        const after = await cardOf(page);
+        await page.locator('[data-attempt-row]').last().scrollIntoViewIfNeeded();
+        shotPaths.push(await saved('u8-live-after-rows.png'));
+        await page.locator('[aria-label="Status"]').scrollIntoViewIfNeeded();
+        shotPaths.push(await saved('u8-live-after.png'));
+        const disagree = rowsDisagree(rows, stored);
+        const reworks = seeded.filter(each => each.owes !== null);
+        const retried = `${ran.map(each => `${each.step} ${each.id} ${each.verdict ?? 'live'} owes ${each.owes ?? 'nothing'}`).join(', ')}; waiting: ${parked.waiting_reason ?? ''}`;
+        const named = task.state === 'waiting' && task.waiting_on === 'retry' && (task.waiting_reason ?? '').startsWith(failedThrice) && seeded.map(each => each.verdict ?? 'live').join(' ') === redCheckStory;
+        const taken = shotPaths.join(', ');
+        return [
+          check(named, 'the seed reads back as SBX-60 did', `${key} ${task.state} at ${task.step}: ${task.waiting_reason ?? ''}; attempts: ${seeded.map(each => `${each.step} ${each.verdict ?? 'live'}`).join(', ')}`),
+          check(reworks.length > 0 && reworks.every(each => each.owes === owedCheck), 'each seeded rework owes the failed check that sent it back', reworks.map(each => `${each.step} ${each.id} owes ${each.owes ?? 'nothing'}`).join(', ')),
+          check(before.headline.includes(foundNothing), 'the status card says the agent found nothing to change', before.text),
+          check(seededReply !== undefined && before.text.includes(`“${seededReply}”`), "the status card quotes the agent's own last message", `${before.text} | the agent said: ${seededReply ?? 'nothing'}`),
+          check(before.text.includes(redCheck), "the status card names the send-back's reason", before.text),
+          check(/^[^.]+\.$/.test(before.headline), "the status card's headline is one sentence", before.headline),
+          check(before.headline !== '' && repeats === 0, 'the agent panel does not repeat the headline', `${String(repeats)} copies in the panel`),
+          check(ran.length === 1 && ran[0]?.owes === owedCheck && (parked.waiting_reason ?? '').startsWith(pushedNothing), 'Retry runs Implement once, owing the failed check, and the task waits again because it pushed nothing', retried),
+          check(ran.length > 0 && disagree.length === 0, 'the Attempts tab shows the attempt Retry started, without a reload', disagree.length === 0 ? ran.map(each => rows.get(each.id) ?? '').join(' | ') : disagree.join('; ')),
+          check(newestReply !== undefined && after.text.includes(`“${newestReply}”`) && after.text.includes(owedCheck), 'the status card quotes the newest attempt and names the failed check, without a reload', `${after.text} | the agent said: ${newestReply ?? 'nothing'}`),
+          check(ran.length > 0 && unshown.length === 0, 'the agent panel shows the attempt that ran while the page was open', unshown.length === 0 ? ran.map(each => each.id).join(', ') : `missing ${unshown.join(', ')}`),
+          check(errors.length === 0, 'the page raised no errors', errors.length === 0 ? taken : `${errors.join('; ')} (${taken})`),
+        ];
+      }),
+    );
+  },
+};
+
+const liveEvidence: Lane = {
+  unit,
+  id: 'live-evidence',
+  seeds: [behaviorSeed],
+  run: async (world, browser, shots) => {
+    const key = keyOf(world, behaviorSeed);
+    await mkdir(shots, { recursive: true });
+    return withDatabase(world, db =>
+      open(browser, view(world, `/tasks/${key}?tab=evidence`, 'light', true), async ({ page, errors }) => {
+        const seen = new Set((await recordedEvidence(db, key)).map(row => row.attempt_id));
+        await page.locator(retryButton).click();
+        const added = await until('a Verify attempt to record its evidence', async () => (await recordedEvidence(db, key)).find(row => !seen.has(row.attempt_id)), runsMs);
+        const shown = await until('the Evidence tab to show it', async () => ((await page.locator(`[data-evidence="${added.attempt_id}"]`).count()) > 0 ? true : undefined), catchUpMs).catch(() => false);
+        const path = join(shots, 'u8-live-evidence.png');
+        await page.locator('#panel-evidence').scrollIntoViewIfNeeded();
+        await shoot(page, path);
+        await showTab(page, 'attempts');
+        const { rows, stored } = await agreed(page, db, key);
+        const disagree = rowsDisagree(rows, stored);
+        return [
+          check(shown, 'the Evidence tab shows the evidence a Verify attempt recorded while the page was open', `attempt ${added.attempt_id} ${shown ? 'shows' : 'never showed'}; articles: ${[...(await textsOf(page, 'data-evidence')).keys()].join(', ')}`),
+          check(disagree.length === 0, 'the Attempts tab lists the attempts that ran while the page was open', disagree.length === 0 ? `${String(stored.length)} rows` : disagree.join('; ')),
+          check(errors.length === 0, 'the page raised no errors', errors.length === 0 ? path : errors.join('; ')),
+        ];
+      }),
+    );
+  },
+};
+
+export const stateLanes: readonly Lane[] = [smoke, reasons, live, liveEvidence];

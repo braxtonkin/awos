@@ -6,8 +6,9 @@ import { startEnvironment } from '../../features/environments/lifecycle.ts';
 import { describe, type Providers } from '../../features/environments/provider.ts';
 import { imageFor, jobName, launch, manifests } from '../../features/jobs/launch.ts';
 import { connectCluster } from '../../shared/cluster.ts';
-import { remoteHead, repositoryUrl } from '../../features/jobs/remote.ts';
+import { repositoryUrl } from '../../features/jobs/remote.ts';
 import { imageReference, type JobSettings } from '../../features/jobs/settings.ts';
+import type { Reads } from '../../features/tasks/begin.ts';
 import type { RunAsRule } from '../../features/tasks/run-as.ts';
 import type { StepRunner } from '../../features/tasks/step-runner.ts';
 import { worker, type Environment, type Launched, type Ready } from '../../features/tasks/worker.ts';
@@ -28,13 +29,14 @@ export type AttemptSettings = {
   readonly providers: Providers;
   readonly startDeadlineMs: number;
   readonly describeTicket: (key: string, actsAs: string) => Promise<string | null>;
+  readonly reads: Reads;
 };
 
 const isInstruction = (text: string): text is Instruction => /^[A-Z][\s\S]*\.$/.test(text);
 
 const unexplained: Instruction = 'The engine could not open a login for this attempt. Check the logins of the person it runs as, then press Retry.';
 
-const sentence = (text: string): Instruction => {
+export const sentence = (text: string): Instruction => {
   const trimmed = text.trim();
   const said = `${trimmed.charAt(0).toUpperCase()}${trimmed.slice(1)}${trimmed.endsWith('.') ? '' : '.'}`;
   return isInstruction(said) ? said : unexplained;
@@ -68,10 +70,7 @@ export function attempts(settings: AttemptSettings): Loop {
     startLeaseMs: settings.startLeaseMs,
     runner: settings.runner,
     runAs: settings.runAs,
-    branchHead: async (actsAs, github, branch) => {
-      const token = await githubToken(settings, actsAs);
-      return 'refused' in token ? token : { head: await remoteHead(repositoryUrl(settings.gitBaseUrl, github), branch, token.token) };
-    },
+    reads: settings.reads,
     startEnvironment: environmentOf(settings),
     describeTicket: settings.describeTicket,
     issueToken: (db, attempt) => issueToken(db, attemptId.parse(attempt)),

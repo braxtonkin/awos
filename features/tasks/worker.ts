@@ -2,10 +2,11 @@ import type { Database } from '../../shared/db/client.ts';
 import type { Loop } from '../../shared/loop.ts';
 import type { Instruction, JobPlan } from '../../shared/workflow.ts';
 import { abandon, advance } from './advance.ts';
-import { claim, claimable, holdingLaunch, jobCreated, park, renew, unlaunched, type Start } from './claim.ts';
-import { continuation } from './continuation.ts';
+import { begin, type Reads } from './begin.ts';
+import { claim, claimable, holdingLaunch, jobCreated, park, renew, unlaunched } from './claim.ts';
 import type { RunAsRule } from './run-as.ts';
-import { baseOf, baseToMerge, earlierOf, promptFor, stepOf, type Prompt, type StepRunner } from './step-runner.ts';
+import { earlierOf } from './history.ts';
+import { baseOf, promptFor, stepOf, type Prompt, type Step, type StepRunner } from './step-runner.ts';
 
 export type JobRequest = {
   readonly attempt: string;
@@ -31,7 +32,7 @@ export type WorkerSettings = {
   readonly startLeaseMs: number;
   readonly runner: StepRunner;
   readonly runAs: RunAsRule;
-  readonly branchHead: (actsAs: string, github: string, branch: string) => Promise<{ readonly head: string } | { readonly refused: Instruction }>;
+  readonly reads: Reads;
   readonly startEnvironment: (db: Database, attempt: string) => Promise<Environment>;
   readonly issueToken: (db: Database, attempt: string) => Promise<string | undefined>;
   readonly startTurn: (db: Database, attempt: string, prompt: Prompt, now: Date) => Promise<void>;
@@ -44,37 +45,10 @@ const noRepository: Instruction = 'This task has no repository, and its step run
 
 const reason = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
+const baseToMerge = ({ obligation, start }: Step): string | null => (obligation?.kind === 'conflict' && obligation.head !== start ? obligation.head : null);
+
 const turnStarted = async (db: Database, attempt: string): Promise<boolean> =>
   (await db.selectFrom('attempt_command').select('attempt_command.seq').where('attempt_command.attempt_id', '=', attempt).where('attempt_command.kind', '=', 'turn.start').executeTakeFirst()) !== undefined;
-
-export type StartReads = { readonly branchHead: WorkerSettings['branchHead']; readonly runner: Pick<StepRunner, 'workflows' | 'agents'> };
-
-type Begun = Omit<Start, 'merge'> | { readonly refused: Instruction } | null;
-
-async function begun(db: Database, branchHead: WorkerSettings['branchHead'], task: string, runAs: string): Promise<Begun> {
-  const found = await continuation(db, task);
-  switch (found.from) {
-    case 'lost':
-      return { commit: found.commit, inherited: true };
-    case 'task':
-      return { commit: found.commit, inherited: false };
-    case 'repository': {
-      const read = await branchHead(runAs, found.github, found.branch);
-      return 'refused' in read ? read : { commit: read.head, inherited: false };
-    }
-    case 'nowhere':
-      return null;
-  }
-}
-
-export async function startOf(db: Database, reads: StartReads, task: string, runAs: string): Promise<Start | { readonly refused: Instruction } | null> {
-  const start = await begun(db, reads.branchHead, task, runAs);
-  if (start === null || 'refused' in start) return start;
-  const base = await baseToMerge(db, reads.runner, task);
-  if (base === null) return { ...start, merge: null };
-  const read = await reads.branchHead(runAs, base.github, base.branch);
-  return 'refused' in read ? read : { ...start, merge: read.head === start.commit ? null : read.head };
-}
 
 async function launchHeld(db: Database, settings: WorkerSettings, attempt: string, now: Date): Promise<string> {
   const step = await stepOf(db, settings.runner, attempt);
@@ -114,7 +88,7 @@ async function launchHeld(db: Database, settings: WorkerSettings, attempt: strin
     image: step.repository.jobImage,
     repository: step.repository.github,
     startCommit: step.start,
-    plan: step.kind.afterTurn === 'reproduce' ? { kind: 'reproduce', base: (await baseOf(db, step.task)) ?? step.start, setup } : { kind: 'push', setup, merge: step.mergeHead },
+    plan: step.kind.afterTurn === 'reproduce' ? { kind: 'reproduce', base: (await baseOf(db, step.task)) ?? step.start, setup } : { kind: 'push', setup, merge: baseToMerge(step) },
     attemptToken: token,
     runAs: step.runAs,
   });
@@ -131,9 +105,9 @@ const launchAttempt = async (db: Database, settings: WorkerSettings, attempt: st
 
 async function take(db: Database, settings: WorkerSettings, task: string, now: Date): Promise<string> {
   const runAs = await settings.runAs(db, task);
-  const start = runAs === null ? null : await startOf(db, { branchHead: settings.branchHead, runner: settings.runner }, task, runAs);
-  if (start !== null && 'refused' in start) return `parked task ${task} before its claim: ${(await park(db, task, start.refused)) ? start.refused : 'it was no longer ready'}`;
-  const claimed = await claim(db, task, now, settings.startLeaseMs, runAs, start);
+  const begun = await begin(db, { reads: settings.reads, runner: settings.runner }, task, runAs);
+  if ('refused' in begun) return `parked task ${task} before its claim: ${(await park(db, task, begun.refused)) ? begun.refused : 'it was no longer ready'}`;
+  const claimed = await claim(db, task, now, settings.startLeaseMs, runAs, begun);
   if ('refused' in claimed) return `did not claim task ${task}: ${claimed.refused}${'parked' in claimed && claimed.parked ? ', and parked it' : ''}`;
   try {
     return await launchAttempt(db, settings, claimed.attempt, now);

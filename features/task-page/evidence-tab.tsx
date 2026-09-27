@@ -1,8 +1,7 @@
 import { clock } from '../../shared/ui/clock.ts';
 import { color } from '../../shared/ui/tokens.ts';
 import { Folded } from './folded.tsx';
-import type { AttemptSummary } from './protocol.ts';
-import type { Evidence, Field } from './read.ts';
+import type { AttemptSummary, Evidence, Field } from './protocol.ts';
 import { Reproduced } from './reproduction.tsx';
 import { stepName } from './time.ts';
 import { numbered } from './timeline.ts';

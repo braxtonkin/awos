@@ -126,7 +126,7 @@ function versionProblem(workflow: Workflow, task: Task): Instruction | undefined
   return undefined;
 }
 
-export function decide(workflow: Workflow, task: Task, verdict: StepVerdict, attempt: string): Next {
+export function decide(workflow: Workflow, task: Task, verdict: StepVerdict, attempt: string, ends: Instruction | null): Next {
   const kind = workflow.steps.find(candidate => candidate.name === task.step);
   if (kind === undefined) return park(kept(task), `Task ${task.key} is at ${titled(task.step)}, which ${workflow.name} no longer has. Stop the task, because AutoWorker cannot run a step its code lacks.`);
   const problem = versionProblem(workflow, task);
@@ -137,7 +137,7 @@ export function decide(workflow: Workflow, task: Task, verdict: StepVerdict, att
   }
   const failure = kind.failures[verdict];
   if (failure === undefined) throw new Error(`The ${kind.name} step of ${workflow.name} declares no verdict ${verdict}.`);
-  return judged(workflow, task, kind, failure, attempt);
+  return ends !== null && failure.kind === 'fail' ? park(kept(task), ends) : judged(workflow, task, kind, failure, attempt);
 }
 
 export function waitingOn(standing: Standing): WaitingOn | null {
