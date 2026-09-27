@@ -103,7 +103,7 @@ export const modulesListing = (files: readonly string[]): string => ['# Modules'
 
 export const checksPass = 'All mandated checks pass: typecheck, test, and build. The smoke test needs a browser, which this Job lacks.';
 
-export const stillWrongSign = 'Expected values to be strictly equal';
+export const stillWrongSign = 'Expected values to be strictly';
 
 export const coverageScript = (entry: Pick<Entry, 'name'>): string =>
   `grep -q ${entry.name} ${untouchable} || { echo "${untouchable} does not test ${entry.name}, and every export needs a test there"; exit 1; }\n`;
