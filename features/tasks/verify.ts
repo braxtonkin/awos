@@ -21,7 +21,8 @@ import { claim, lostTooOften } from './claim.ts';
 import { coreRunAs } from './run-as.ts';
 import { pastSeedNames, pastSeeds, seedPast } from './seed.ts';
 import { provePlants, type PlantProof } from './invariants.ts';
-import { stepMutantName, type StepMutantName } from './sim-jobs.ts';
+import { beginFromNowhere, stepMutantName, type StepMutantName } from './sim-jobs.ts';
+import { workflowsByName } from './start.ts';
 import {
   badEnd,
   engineMutantName,
@@ -204,6 +205,7 @@ const guards = [
   'FailedLaunchRelaunches',
   'RetryWaitsAtGate',
   'RetryReturnsWhenRoundsRunOut',
+  'UnmetReworkEndsTheStep',
 ] as const;
 
 const renewsLapsedLeaseForever: Shape = {
@@ -252,6 +254,7 @@ const properties = {
   MergeNeedsEveryGate: 'PROPERTIES',
   ReviewsOnlyGrow: 'PROPERTIES',
   LaterReviewWaitsForAPerson: 'PROPERTIES',
+  UnmetReworkWaitsForAPerson: 'PROPERTIES',
   EndStagePassIsDone: 'PROPERTIES',
   ReleasedOnlyAfterItsLease: 'PROPERTIES',
   LapsedLeaseNeverRenews: 'PROPERTIES',
@@ -341,6 +344,7 @@ const tasksModel = defineModel({
     breaks('RetryKeepsApprovals', "a person's retry forgets the task's approvals", 'StoppedTaskCanResume'),
     breaks('RetryWaitsAtGate', 'Retry after a Stop at a gate reruns the gated step', 'GateStopResumesAtGate'),
     breaks('RetryReturnsWhenRoundsRunOut', 'Retry after the rounds run out reruns the step that failed', 'RetryStartsWhereTheFailureRoutes'),
+    breaks('UnmetReworkEndsTheStep', 'a rework that pushed nothing for what sent it back runs again with the same input', 'UnmetReworkWaitsForAPerson'),
     unsettled('VerifyPassKeepsLandRounds', 'a Verify pass clears the Land rounds of a task with no gate', loopsFromLandToImplement),
     unsettled('OutsideApprovalsAreFinite', 'outside approvals may never stop', approvesForever),
     breaks('OutsideApprovalNeedsAWait', 'an outside approval resumes a task that is not awaiting one', 'TaskChangesOnlyWithItsAttempt'),
@@ -1003,7 +1007,8 @@ async function sigtermChecks(postgres: TestPostgres): Promise<readonly Check[]> 
     const claimedAt = new Date();
     const attempts: string[] = [];
     for (const [index, task] of tasks.entries()) {
-      const claimed = await claim(db, task.id, claimedAt, index < 8 ? 1_000 : 3_600_000, await coreRunAs(null)(db, task.id), null);
+      const runAs = await coreRunAs(null)(db, task.id);
+      const claimed = await claim(db, task.id, claimedAt, index < 8 ? 1_000 : 3_600_000, runAs, await beginFromNowhere(db, workflowsByName(workflows), new Map(), task.id, runAs));
       if (!('attempt' in claimed)) throw new Error(`the lane could not claim task ${task.id}: ${claimed.refused}`);
       attempts.push(claimed.attempt);
     }

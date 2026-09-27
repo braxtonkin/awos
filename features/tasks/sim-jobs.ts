@@ -6,11 +6,10 @@ import type { AgentSteps } from '../../shared/agent-step.ts';
 import { refusal, type Database } from '../../shared/db/client.ts';
 import { review } from '../../shared/review.ts';
 import { inTransaction, type Transacting } from '../../shared/transaction.ts';
-import type { Start } from './claim.ts';
-import { taskBranchHead } from './continuation.ts';
+import { begin, type Begun, type Reads } from './begin.ts';
+import { continuation, taskBranchHead, type Continuation } from './continuation.ts';
 import { finishStep, type StepRunner } from './step-runner.ts';
 import type { Workflows } from './start.ts';
-import { startOf } from './worker.ts';
 
 export const stepMutantName = z.enum(['owe-after-verdict', 'finish-before-end-line', 'late-push-lands', 'continue-from-task-head', 'bad-reply-passes']);
 
@@ -22,14 +21,30 @@ export type Posted = 'stored' | 'finished' | 'ended';
 
 export type Jobs = {
   readonly post: (db: Database, attempt: string, lines: readonly JobLine[], now: Date) => Promise<Posted>;
-  readonly start: (db: Database, task: string, runAs: string) => Promise<Start | null>;
+  readonly begin: (db: Database, task: string, runAs: string | null) => Promise<Begun>;
 };
 
 export const repositoryHead = (github: string, branch: string): string => createHash('sha256').update(`${github}@${branch}`).digest('hex').slice(0, 40);
 
 export const commitOf = (label: string): string => createHash('sha1').update(label).digest('hex');
 
-const branchHead = (_actsAs: string, github: string, branch: string): Promise<{ readonly head: string }> => Promise.resolve({ head: repositoryHead(github, branch) });
+const simulatedLog = 'FAIL test/simulated.test.ts: the simulated check failed.';
+
+const simReads: Reads = {
+  branchHead: (_actsAs, github, branch) => Promise.resolve({ head: repositoryHead(github, branch) }),
+  failedChecks: (_actsAs, _github, _head, [first, ...rest]) => {
+    const logged = (name: string) => ({ name, kind: 'logged', conclusion: 'failure', step: 'Run npm test', log: simulatedLog }) as const;
+    return Promise.resolve([logged(first), ...rest.map(logged)]);
+  },
+};
+
+const startsNowhere = (): Promise<Continuation> => Promise.resolve({ from: 'nowhere' });
+
+export async function beginFromNowhere(db: Database, workflows: Workflows, agents: ReadonlyMap<string, Pick<AgentSteps, 'sentBack'>>, task: string, runAs: string | null): Promise<Begun> {
+  const found = await begin(db, { reads: simReads, runner: { workflows, agents }, continuation: startsNowhere }, task, runAs);
+  if ('refused' in found) throw new Error(`the simulated reads refused task ${task}: ${found.refused}`);
+  return found;
+}
 
 const turnId = 'turn-1';
 
@@ -122,16 +137,18 @@ export function jobs(workflows: Workflows, plug: AgentSteps, mutant: StepMutantN
     await later.flush();
     return posted;
   };
-  const real = async (db: Database, task: string, runAs: string): Promise<Start | null> => {
-    const found = await startOf(db, { branchHead, runner: { workflows, agents: new Map([...workflows.keys()].map(name => [name, agent])) } }, task, runAs);
-    return found === null || 'refused' in found ? null : found;
-  };
-  const start = async (db: Database, task: string, runAs: string): Promise<Start | null> => {
-    if (mutant !== 'continue-from-task-head') return real(db, task, runAs);
+  const fromTaskHead = async (db: Database, task: string): Promise<Continuation> => {
     const head = await taskBranchHead(db, task);
-    return head === null ? real(db, task, runAs) : { commit: head, inherited: false, merge: null };
+    return head === null ? continuation(db, task) : { from: 'task', commit: head };
   };
-  return { post, start };
+  const runner = { workflows, agents: new Map([...workflows.keys()].map(name => [name, agent])) };
+  const beginning = mutant === 'continue-from-task-head' ? { reads: simReads, runner, continuation: fromTaskHead } : { reads: simReads, runner };
+  const started = async (db: Database, task: string, runAs: string | null): Promise<Begun> => {
+    const found = await begin(db, beginning, task, runAs);
+    if ('refused' in found) throw new Error(`the simulated reads refused task ${task}: ${found.refused}`);
+    return found;
+  };
+  return { post, begin: started };
 }
 
 export async function latePush(db: Database, attempt: string, branch: string, commit: string, now: Date): Promise<'applied' | 'refused'> {

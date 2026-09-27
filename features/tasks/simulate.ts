@@ -4,11 +4,12 @@ import { setImmediate, setTimeout as wait } from 'node:timers/promises';
 import { sql } from 'kysely';
 import { z } from 'zod';
 import { actionKinds, owe, type Owe } from '../../shared/actions.ts';
-import type { AgentSteps, Verdicted } from '../../shared/agent-step.ts';
+import type { AgentSteps, Reply, Verdicted } from '../../shared/agent-step.ts';
 import { connect, refusal, type Database } from '../../shared/db/client.ts';
 import type { TaskState } from '../../shared/db/types.ts';
 import { runLoop, type Clock, type Loop } from '../../shared/loop.ts';
 import { note, outcomes, review as reviewSchema, type Answer } from '../../shared/review.ts';
+import { demandsChange, type SendBack } from '../../shared/rework.ts';
 import { step, type Failure as StepFailure, type StepKind, type StepVerdict, type Workflow } from '../../shared/workflow.ts';
 import type { TestPostgres } from '../../tools/verify/postgres.ts';
 import { act, advance, noTurnToStop, approveFromOutside, type PersonAction, type Report } from './advance.ts';
@@ -16,7 +17,7 @@ import { claim, claimable, renew } from './claim.ts';
 import { logLostApprovals, loseApprovals, watch, type PropertyName, type Violation } from './invariants.ts';
 import { coreRunAs } from './run-as.ts';
 import { reaper } from './reaper.ts';
-import { commitOf, jobs, latePush, performNext, replyLines, unparsedReplies, type Jobs, type JobLine, type StepMutantName } from './sim-jobs.ts';
+import { beginFromNowhere, commitOf, jobs, latePush, performNext, replyLines, unparsedReplies, type Jobs, type JobLine, type StepMutantName } from './sim-jobs.ts';
 import { workflowsByName, type Workflows } from './start.ts';
 
 export const profileName = z.enum(['default', 'races', 'hangs', 'verdicts', 'people', 'reviews', 'needs-input', 'mixed', 'behavior', 'environment', 'crashes', 'db-pause', 'two-engines', 'jobs']);
@@ -207,10 +208,27 @@ const owes = (verdicted: Verdicted): readonly Owe[] => {
   }
 };
 
+const simulatedSendBacks: Readonly<Record<string, SendBack>> = {
+  behavior_fail: { kind: 'behavior', evidence: 'The simulated Verify found the behavior still wrong.' },
+  red_check: { kind: 'check', head: null, names: ['simulated'] },
+  changes_requested: { kind: 'review', review: 'A simulated review asked for changes.' },
+};
+
+const pushedNothing = (reply: Reply): boolean =>
+  reply.obligation !== null && demandsChange(reply.obligation) && reply.change.pushed === null && reply.change.carried === null && reviewSchema.safeParse(reply.output).data?.outcome !== 'needs_input';
+
 const simAgent: AgentSteps = {
-  workspace: () => ({ setup: false, mergesBase: false }),
+  workspace: () => ({ setup: false }),
+  sentBack: ({ step, verdict }) => {
+    const found = simulatedSendBacks[verdict];
+    if (found === undefined) throw new Error(`The simulated Code change never sends a task back from ${step} with ${verdict}.`);
+    return found;
+  },
   input: ({ ticket }) => `Ticket ${ticket.key}: ${ticket.title}`,
-  settle: ({ output }) => ({ output, evidence: null, observed: null }),
+  settle: reply =>
+    pushedNothing(reply)
+      ? { output: reply.output, evidence: null, observed: 'fail', ends: 'The simulated rework pushed nothing for what sent it back, so press Retry with a note.' }
+      : { output: reply.output, evidence: null, observed: null },
   owes,
 };
 
@@ -440,7 +458,7 @@ export const profiles: Readonly<Record<ProfileName, Profile>> = {
 
 const forcedAtChecks: Partial<Readonly<Record<ProfileName, StepVerdict>>> = { behavior: 'behavior_fail', environment: 'environment_fail' };
 
-const pushChance: Readonly<Record<string, number>> = { implement: 1 };
+const pushChance: Readonly<Record<string, number>> = { implement: 0.8 };
 
 export const fingerprint = createHash('sha256').update(JSON.stringify({ moves, profiles, assignees, forcedAtChecks, workflows, pushChance })).digest('hex').slice(0, 16);
 
@@ -790,8 +808,7 @@ async function personActs(turn: Turn, pool: Pool, action: (task: Offered) => Per
 
 async function claimFor({ db, profile, now, jobs: job }: Turn, task: string): Promise<Awaited<ReturnType<typeof claim>>> {
   const runAs = await runsAs(db, task);
-  const start = runAs === null ? null : await job.start(db, task, runAs);
-  return claim(db, task, now, profile.leaseMs, runAs, start);
+  return claim(db, task, now, profile.leaseMs, runAs, await job.begin(db, task, runAs));
 }
 
 function replyFor(random: Random, kind: StepKind, verdict: StepVerdict): string {
@@ -925,9 +942,9 @@ const rules: Readonly<Record<Move, Rule>> = {
       const task = pick(random, await claimable(db, byName));
       if (task === undefined) return 'nothing claimable';
       const runAs = await runsAs(db, task);
-      const start = runAs === null ? null : await turn.jobs.start(db, task, runAs);
+      const begun = await turn.jobs.begin(db, task, runAs);
       const started = performance.now();
-      const outcomes = await Promise.all(Array.from({ length: profile.burst }, () => claim(db, task, now, profile.leaseMs, runAs, start)));
+      const outcomes = await Promise.all(Array.from({ length: profile.burst }, () => claim(db, task, now, profile.leaseMs, runAs, begun)));
       const won = outcomes.flatMap(outcome => ('attempt' in outcome ? [outcome.attempt] : []));
       world.bursts.push({ winners: won.length, ms: performance.now() - started });
       count(world, 'burst');
@@ -1639,7 +1656,8 @@ export async function probeReaper(postgres: TestPostgres, expiring: number): Pro
   try {
     const world = await setUp(db, profile, expiring * profile.stepsPerTask, engines);
     for (const task of world.tasks.slice(0, expiring)) {
-      const outcome = await claim(db, task, new Date(epoch), profile.leaseMs, await runsAs(db, task), null);
+      const runAs = await runsAs(db, task);
+      const outcome = await claim(db, task, new Date(epoch), profile.leaseMs, runAs, await beginFromNowhere(db, byName, new Map(), task, runAs));
       if ('refused' in outcome) throw new Error(`the probe could not claim task ${task}: ${outcome.refused}`);
     }
     startEngine(engines, 0);

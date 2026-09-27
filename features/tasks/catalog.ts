@@ -72,11 +72,11 @@ export const noMutantYet: Readonly<Record<string, readonly string[]>> = {
     'setting_of_version',
     'routine_step_is_final',
   ],
-  'the claim names the branch from the task key and the count of its attempts, takes the start from continuation and the merge head from the base head git reports, and the simulated Job pushes only 40-character commits to its own branch, so no paved write reaches a row these refuse': [
+  'the claim names the branch from the task key and the count of its attempts, takes the start from continuation and the obligation from begin, which builds it only as the typed ReworkObligation with a conflict or check head that git or GitHub reports, and the simulated Job pushes only 40-character commits to its own branch, so no paved write reaches a row these refuse': [
     'attempt_branch_is_its_own',
     'start_is_a_commit',
     'push_is_a_commit',
-    'merge_head_is_a_commit',
+    'obligation_names_its_kind',
     'branch_starts_somewhere',
     'push_needs_a_branch',
   ],

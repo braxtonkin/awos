@@ -3,6 +3,7 @@ import { owesAction } from '../../shared/actions.ts';
 import { refusal, type Database, type Refusal } from '../../shared/db/client.ts';
 import type { DB, TaskState } from '../../shared/db/types.ts';
 import type { Instruction, StepKind } from '../../shared/workflow.ts';
+import type { Begun } from './begin.ts';
 import { nobodyToRunAs } from './run-as.ts';
 import type { Workflows } from './start.ts';
 
@@ -12,7 +13,7 @@ export const lostTooOften: Instruction = `Its last ${String(caps.lost)} attempts
 
 export type Claim =
   | { readonly attempt: string }
-  | { readonly refused: 'busy' | 'not-ready' }
+  | { readonly refused: 'busy' | 'not-ready' | 'moved' }
   | { readonly refused: 'nobody-to-run-as'; readonly parked: boolean };
 
 type Refused = Extract<Claim, { readonly refused: string }>['refused'];
@@ -30,13 +31,11 @@ const later = (now: Date, ms: number): Date => new Date(now.getTime() + ms);
 const hasLiveAttempt = (eb: ExpressionBuilder<DB, 'task'>) =>
   eb.exists(eb.selectFrom('attempt').select('attempt.id').whereRef('attempt.task_id', '=', 'task.id').where('attempt.finished_at', 'is', null));
 
-export type Start = { readonly commit: string; readonly inherited: boolean; readonly merge: string | null };
-
-export async function claim(db: Database, task: string, now: Date, leaseMs: number, runAs: string | null, start: Start | null): Promise<Claim> {
+export async function claim(db: Database, task: string, now: Date, leaseMs: number, runAs: string | null, { start, obligation, seen }: Begun): Promise<Claim> {
   try {
     const inserted = await db
       .insertInto('attempt')
-      .columns(['task_id', 'routine_id', 'routine_version', 'step', 'epoch', 'run_as_id', 'started_at', 'lease_until', 'branch', 'start_commit', 'last_pushed', 'merge_head'])
+      .columns(['task_id', 'routine_id', 'routine_version', 'step', 'epoch', 'run_as_id', 'started_at', 'lease_until', 'branch', 'start_commit', 'last_pushed', 'obligation'])
       .expression(
         db
           .selectFrom('task')
@@ -60,14 +59,15 @@ export async function claim(db: Database, task: string, now: Date, leaseMs: numb
             ).as('branch'),
             eb.cast<string | null>(eb.val(start?.commit ?? null), 'text').as('start_commit'),
             eb.cast<string | null>(eb.val(start?.inherited === true ? start.commit : null), 'text').as('last_pushed'),
-            eb.cast<string | null>(eb.val(start?.merge ?? null), 'text').as('merge_head'),
+            eb.cast<string | null>(eb.val(obligation === null ? null : JSON.stringify(obligation)), 'jsonb').as('obligation'),
           ])
-          .where('task.id', '=', task),
+          .where('task.id', '=', task)
+          .where('task.epoch', '=', seen.epoch)
+          .where(eb => eb(eb.selectFrom('attempt').select(latest => latest.fn.max('attempt.id').as('latest')).whereRef('attempt.task_id', '=', 'task.id'), 'is not distinct from', seen.latest)),
       )
       .returning('id')
       .executeTakeFirst();
-    if (inserted === undefined) throw new Error(`task ${task} does not exist`);
-    return { attempt: inserted.id };
+    return inserted === undefined ? { refused: 'moved' } : { attempt: inserted.id };
   } catch (error) {
     const found = refusal(error);
     const refused = found === undefined ? undefined : claimRefusals.find(entry => entry.is(found))?.refused;

@@ -6,6 +6,7 @@ import type { Instruction, StepKind, Unasked, Workflow } from '../../shared/work
 import { advance, handOff, type Then } from './advance.ts';
 import { claim } from './claim.ts';
 import { coreRunAs } from './run-as.ts';
+import { beginFromNowhere } from './sim-jobs.ts';
 import { workflowsByName } from './start.ts';
 import { workflows } from './simulate.ts';
 
@@ -87,6 +88,8 @@ const leaseMs = 60_000;
 
 const byName = workflowsByName(workflows);
 
+const sentBackForConflicts = new Map([...byName.keys()].map(name => [name, { sentBack: () => ({ kind: 'conflict' }) as const }]));
+
 const recording = (attempt: string, evidence: Reproduction | null, at: Date): Then => async (tx, standing) => {
   if (evidence !== null) await tx.insertInto('evidence').values({ attempt_id: attempt, task_id: standing.task, body: JSON.stringify(evidence), recorded_at: at }).execute();
 };
@@ -142,7 +145,7 @@ export async function seedPast(db: Database, seed: PastSeed, routineName: string
   for (const [index, turn] of turns.entries()) {
     const startedAt = new Date(foundAt.getTime() + (index + 1) * turnMs - turnMs / 2);
     const endedAt = index === turns.length - 1 ? finishedAt : new Date(startedAt.getTime() + turnMs / 2);
-    const claimed = await claim(db, task.id, startedAt, leaseMs, runAs, null);
+    const claimed = await claim(db, task.id, startedAt, leaseMs, runAs, await beginFromNowhere(db, byName, sentBackForConflicts, task.id, runAs));
     if (!('attempt' in claimed)) throw new Error(`The seed could not claim turn ${String(index + 1)} of ${key}: ${claimed.refused}.`);
     await play(db, workflow, claimed.attempt, turn, endedAt);
   }

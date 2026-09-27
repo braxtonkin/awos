@@ -1,7 +1,8 @@
 import type { Owe } from './actions.ts';
 import type { Verdict } from './db/types.ts';
 import type { Reproduction } from './reproduction.ts';
-import type { Unasked } from './workflow.ts';
+import type { ReworkObligation, SendBack } from './rework.ts';
+import type { Instruction, Unasked } from './workflow.ts';
 
 export type Evidence = Readonly<Record<string, unknown>>;
 
@@ -11,17 +12,17 @@ export type Ticket = { readonly key: string; readonly title: string; readonly de
 
 export type History = { readonly step: string; readonly earlier: readonly Earlier[] };
 
-export type Workspace = { readonly setup: boolean; readonly mergesBase: boolean };
+export type Workspace = { readonly setup: boolean };
 
-export type BaseMerge = { readonly branch: string; readonly head: string };
-
-export type StepInput = History & { readonly ticket: Ticket; readonly merge: BaseMerge | null };
+export type StepInput = History & { readonly ticket: Ticket; readonly obligation: ReworkObligation | null };
 
 export type Change = { readonly pushed: string | null; readonly carried: string | null; readonly declined: string | null };
 
-export type Reply = { readonly step: string; readonly output: unknown; readonly change: Change; readonly reproduction: Reproduction | null };
+export type Reply = { readonly step: string; readonly output: unknown; readonly change: Change; readonly reproduction: Reproduction | null; readonly obligation: ReworkObligation | null };
 
-export type Settled = { readonly output: unknown; readonly evidence: Evidence | null; readonly observed: Unasked | null };
+export type Settled =
+  | { readonly output: unknown; readonly evidence: Evidence | null; readonly observed: Unasked | null }
+  | { readonly output: unknown; readonly evidence: null; readonly observed: 'fail'; readonly ends: Instruction };
 
 export type PullRequestFact = { readonly kind: 'none' } | { readonly kind: 'owed' } | { readonly kind: 'opened'; readonly number: number };
 
@@ -44,6 +45,7 @@ export type Verdicted = {
 
 export type AgentSteps<K extends string = string> = {
   readonly workspace: (history: History) => Workspace;
+  readonly sentBack: (sender: Earlier) => SendBack;
   readonly input: (given: StepInput) => string;
   readonly settle: (reply: Reply) => Settled;
   readonly owes: (verdicted: Verdicted) => readonly Owe<K>[];

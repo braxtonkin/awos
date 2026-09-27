@@ -124,6 +124,21 @@ const plantedOutboxRow = (kind: string, payload: string) =>
 
 const finishLiveAttempt = sql`update attempt set finished_at = ${t0} + interval '12 seconds', verdict = 'pass', output = ${plantedReview} where finished_at is null`;
 
+const sentBackByVerify: readonly Statement[] = [
+  finishedAttempt('specify', 'pass'),
+  finishedAttempt('implement', 'pass'),
+  sql`insert into attempt (task_id, routine_id, routine_version, step, epoch, run_as_id, started_at, lease_until, finished_at, verdict, output)
+      values (1, 1, 1, 'verify', 0, 1, ${t0}, ${t0} + interval '30 seconds', ${t0} + interval '10 seconds', 'behavior_fail', ${plantedReview})`,
+  sql`update task set step = 'implement', approved = '{specify}', counts = '{"rounds": 1}' where id = 1`,
+];
+
+const reworkOwing = (obligation: string | null) => sql`insert into attempt (task_id, routine_id, routine_version, step, epoch, run_as_id, started_at, lease_until, obligation)
+  values (1, 1, 1, 'implement', 0, 1, ${t0} + interval '11 seconds', ${t0} + interval '41 seconds', ${obligation === null ? sql`null` : sql`${sql.lit(obligation)}::jsonb`})`;
+
+const behaviorOwed = '{"kind": "behavior", "evidence": "Planted.", "notes": []}';
+
+const checkOwed = `{"kind": "check", "head": "${'a'.repeat(40)}", "checks": [{"name": "planted", "kind": "unread", "why": "Planted."}], "notes": []}`;
+
 const record = sql`s.step, s.state, s.waiting_on, s.retries, s.lost, s.input_waits, s.counts, s.approved, s.outputs`;
 
 const wasRecord = sql`s.was_step, s.was_state, s.was_waiting_on, s.was_retries, s.was_lost, s.was_input_waits, s.was_counts, s.was_approved, s.was_outputs`;
@@ -647,6 +662,52 @@ export const properties = {
       },
     ],
   },
+  UnmetReworkWaitsForAPerson: {
+    moment: 'each-step',
+    breaks: sql`select j.id as attempt, j.task_id, a.obligation ->> 'kind' as owed, s.state, s.waiting_on
+      from judged j
+      join attempt a on a.id = j.id
+      join diff s on s.id = j.task_id
+      where j.verdict = 'fail' and a.last_pushed is null and a.obligation ->> 'kind' in ('check', 'behavior', 'review')
+        and not exists (select 1 from attempt l where l.task_id = a.task_id and l.step = a.step and l.verdict = 'lost' and l.last_pushed = a.start_commit)
+        and s.id not in (select task_id from acted)
+        and not (s.state = 'waiting' and s.waiting_on = 'retry')`,
+    plants: [{ setup: [...sentBackByVerify, reworkOwing(behaviorOwed)], violation: sql`update attempt set finished_at = ${t0} + interval '12 seconds', verdict = 'fail', output = ${plantedReview} where finished_at is null` }],
+  },
+  ReworkCarriesItsObligation: {
+    moment: 'each-step',
+    breaks: sql`select a.id as attempt, a.step, a.obligation ->> 'kind' as owed, sender.verdict as sent_back_by, notes.count as notes
+      from prior p
+      join attempt a on a.id > coalesce(p.max_attempt, 0)
+      join task t on t.id = a.task_id
+      join facts f on f.workflow = t.workflow and f.step = a.step and f.run_by = 'agent'
+      left join lateral (
+        select s.id, s.verdict::text as verdict from attempt s
+        join routes r on r.workflow = t.workflow and r.step = s.step and r.verdict = s.verdict::text and r.to_step = a.step
+        where s.task_id = a.task_id and s.id < a.id
+          and not exists (select 1 from attempt q where q.task_id = a.task_id and q.step = a.step and q.verdict = 'pass' and q.id > s.id and q.id < a.id)
+        order by s.id desc limit 1
+      ) sender on true
+      cross join lateral (
+        select count(*)::int as count from human_action h
+        where h.task_id = a.task_id and h.kind in ('retry_task', 'send_back') and h.detail ? 'note'
+          and h.at > coalesce((select b.started_at from attempt b where b.task_id = a.task_id and b.id < a.id and b.verdict not in ('lost', 'not_launched') order by b.id desc limit 1), '-infinity')
+      ) notes
+      where a.epoch = t.epoch
+        and (coalesce(jsonb_array_length(a.obligation -> 'notes'), 0) <> notes.count
+             or case
+                  when sender.id is null and notes.count = 0 then a.obligation is not null
+                  when sender.id is null then coalesce(a.obligation ->> 'kind', '') <> 'note'
+                  when sender.verdict = 'behavior_fail' then coalesce(a.obligation ->> 'kind', '') <> 'behavior'
+                  when sender.verdict = 'red_check' then coalesce(a.obligation ->> 'kind', '') not in ('conflict', 'check')
+                  when sender.verdict = 'changes_requested' then coalesce(a.obligation ->> 'kind', '') <> 'review'
+                  else true
+                end)`,
+    plants: [
+      { setup: sentBackByVerify, violation: reworkOwing(null) },
+      { setup: sentBackByVerify, violation: reworkOwing(checkOwed) },
+    ],
+  },
   EndStagePassIsDone: {
     moment: 'each-step',
     breaks: sql`select s.id, s.was_step, s.state from diff s
@@ -846,9 +907,18 @@ function workflowFacts(workflows: readonly Workflow[]): Statement {
     ),
   );
   const chargeRows = charges.length === 0 ? sql`select null::text, null::text, null::text, null::text, null::int, null::text where false` : sql`values ${sql.join(charges)}`;
+  const routes = workflows.flatMap(workflow =>
+    workflow.steps.flatMap(kind =>
+      Object.entries(kind.failures).flatMap(([verdict, failure]) =>
+        failure.kind === 'return' || failure.kind === 'review' ? [sql`(${sql.lit(workflow.name)}, ${sql.lit(kind.name)}, ${sql.lit(verdict)}, ${sql.lit(failure.to)})`] : [],
+      ),
+    ),
+  );
+  const routeRows = routes.length === 0 ? sql`select null::text, null::text, null::text, null::text where false` : sql`values ${sql.join(routes)}`;
   return sql`
     facts (workflow, step, position, is_last, irreversible, needs_repository, run_by, blocked) as (values ${sql.join(steps)}),
-    charges (workflow, step, kind, counter, cap, to_step) as (${chargeRows}),`;
+    charges (workflow, step, kind, counter, cap, to_step) as (${chargeRows}),
+    routes (workflow, step, verdict, to_step) as (${routeRows}),`;
 }
 
 const helpers = (workflows: readonly Workflow[], everyMs: number) => sql`

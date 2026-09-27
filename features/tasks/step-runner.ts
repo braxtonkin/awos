@@ -5,6 +5,7 @@ import type { AgentSteps, Change, Earlier, Evidence, PullRequestFact, Workspace 
 import type { Database } from '../../shared/db/client.ts';
 import { finalMessage, reduce } from '../../shared/items.ts';
 import { reproduction, setupLog } from '../../shared/reproduction.ts';
+import { reworkObligation, type ReworkObligation } from '../../shared/rework.ts';
 import type { Transacting } from '../../shared/transaction.ts';
 import { outputSchema, runByAgent, type AgentStepKind, type Workflow } from '../../shared/workflow.ts';
 import { advanceWithin, type Then } from './advance.ts';
@@ -33,7 +34,7 @@ export type Step = {
   readonly runAs: { readonly id: string; readonly name: string; readonly email: string };
   readonly branch: string | null;
   readonly start: string | null;
-  readonly mergeHead: string | null;
+  readonly obligation: ReworkObligation | null;
   readonly startedAt: Date;
 };
 
@@ -56,7 +57,7 @@ export async function stepOf(db: Database, runner: StepRunner, attempt: string):
       'attempt.routine_version',
       'attempt.branch',
       'attempt.start_commit',
-      'attempt.merge_head',
+      'attempt.obligation',
       'attempt.started_at',
       'task.key',
       'task.title',
@@ -103,53 +104,12 @@ export async function stepOf(db: Database, runner: StepRunner, attempt: string):
     runAs: { id: row.person_id, name: row.person_name, email: row.person_email },
     branch: row.branch,
     start: row.start_commit,
-    mergeHead: row.merge_head,
+    obligation: reworkObligation.nullable().parse(row.obligation),
     startedAt: row.started_at,
   };
 }
 
-const evidenceBody = z.record(z.string(), z.unknown());
-
 const declinedEnd = z.object({ declined: z.string() });
-
-export async function earlierOf(db: Database, task: string): Promise<readonly Earlier[]> {
-  const rows = await db
-    .selectFrom('attempt')
-    .leftJoin('evidence', 'evidence.attempt_id', 'attempt.id')
-    .select(['attempt.step', 'attempt.verdict', 'attempt.output', 'evidence.body'])
-    .where('attempt.task_id', '=', task)
-    .where('attempt.finished_at', 'is not', null)
-    .orderBy('attempt.id')
-    .execute();
-  return rows.flatMap(row => {
-    if (row.verdict === null) return [];
-    const evidence = evidenceBody.safeParse(row.body);
-    return [{ step: row.step, verdict: row.verdict, output: row.output, evidence: evidence.success ? evidence.data : null }];
-  });
-}
-
-async function notesFor(db: Database, step: Step): Promise<readonly string[]> {
-  const previous = await db
-    .selectFrom('attempt')
-    .select('attempt.started_at')
-    .where('attempt.task_id', '=', step.task)
-    .where('attempt.id', '<', step.attempt)
-    .where('attempt.verdict', 'not in', ['lost', 'not_launched'])
-    .orderBy('attempt.id', 'desc')
-    .limit(1)
-    .executeTakeFirst();
-  const rows = await db
-    .selectFrom('human_action')
-    .innerJoin('person', 'person.id', 'human_action.person_id')
-    .select(['person.name', sql<string>`human_action.detail ->> 'note'`.as('note')])
-    .where('human_action.task_id', '=', step.task)
-    .where('human_action.kind', 'in', ['retry_task', 'send_back'])
-    .where(sql<boolean>`human_action.detail ? 'note'`)
-    .where('human_action.at', '>', previous?.started_at ?? new Date(0))
-    .orderBy('human_action.at')
-    .execute();
-  return rows.map(row => section(`Note from ${row.name}`, row.note));
-}
 
 async function answersFor(db: Database, step: Step): Promise<readonly string[]> {
   const review = await db
@@ -215,20 +175,6 @@ export async function baseOf(db: Database, task: string): Promise<string | null>
   return row?.start_commit ?? null;
 }
 
-export async function baseToMerge(db: Database, runner: Pick<StepRunner, 'workflows' | 'agents'>, task: string): Promise<{ readonly github: string; readonly branch: string } | null> {
-  const row = await db
-    .selectFrom('task')
-    .leftJoin('repository', 'repository.id', 'task.repository_id')
-    .select(['task.workflow', 'task.step', 'repository.github', 'repository.branch'])
-    .where('task.id', '=', task)
-    .executeTakeFirst();
-  if (row?.github == null || row.branch == null) return null;
-  const kind = runner.workflows.get(row.workflow)?.steps.find(candidate => candidate.name === row.step);
-  const agent = runner.agents.get(row.workflow);
-  if (kind === undefined || agent === undefined || !runByAgent(kind) || kind.afterTurn !== 'push') return null;
-  return agent.workspace({ step: kind.name, earlier: await earlierOf(db, task) }).mergesBase ? { github: row.github, branch: row.branch } : null;
-}
-
 export type Prompt = { readonly prompt: string; readonly outputSchema: Readonly<Record<string, unknown>> };
 
 export type PromptParts = { readonly earlier: readonly Earlier[]; readonly workspace: Workspace; readonly environment: string | null; readonly description: string | null };
@@ -238,13 +184,12 @@ const ranBeforeTurn = (command: string): string =>
 
 export async function promptFor(db: Database, step: Step, { earlier, workspace, environment, description }: PromptParts): Promise<Prompt> {
   const { instructions, skills } = await routineStep(db, step);
-  const merge = step.mergeHead === null || step.repository === null ? null : { branch: step.repository.branch, head: step.mergeHead };
-  const input = step.agent.input({ step: step.kind.name, ticket: { key: step.key, title: step.title, description }, earlier, merge });
+  const input = step.agent.input({ step: step.kind.name, ticket: { key: step.key, title: step.title, description }, earlier, obligation: step.obligation });
   const setup = step.repository?.setupCommand ?? null;
   const sections = [
     step.kind.prompt.trim(),
     ...(instructions === '' ? [] : [section("The routine's instructions", instructions)]),
-    ...(await notesFor(db, step)),
+    ...(step.obligation?.notes ?? []).map(({ by, text }) => section(`Note from ${by}`, text)),
     ...(await answersFor(db, step)),
     section('Goal', step.goal),
     ...(step.repository?.fastTestCommand == null ? [] : [section('Fast test command', `\`${step.repository.fastTestCommand}\``)]),
@@ -355,6 +300,7 @@ export async function finishStep(runner: StepRunner, tx: Transacting, attempt: s
     output: replyOf(finalMessage(reduce(lines))),
     change: await changeOf(tx, step),
     reproduction: reproduced === undefined ? null : reproduction.parse(reproduced.body),
+    obligation: step.obligation,
   });
   if (settled.evidence !== null) {
     await tx
@@ -363,5 +309,5 @@ export async function finishStep(runner: StepRunner, tx: Transacting, attempt: s
       .onConflict(conflict => conflict.column('attempt_id').doNothing())
       .execute();
   }
-  await advanceWithin(tx, runner.workflows, attempt, { output: settled.output, observed: settled.observed }, now, owing(runner, step, settled.output, settled.evidence, now));
+  await advanceWithin(tx, runner.workflows, attempt, settled, now, owing(runner, step, settled.output, settled.evidence, now));
 }

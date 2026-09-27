@@ -18,11 +18,13 @@ import { open, writeBack } from '../../features/credentials/store.ts';
 import { providerProblems, reconcile } from '../../features/environments/lifecycle.ts';
 import { publishProviders } from '../../features/environments/provider.ts';
 import { clientsFrom, type OpenToken } from '../../features/github/client.ts';
+import { failedChecksReader } from '../../features/github/checks.ts';
 import { mergeStateReader } from '../../features/github/merge-state.ts';
 import { githubPerformers, outboxMergeRow } from '../../features/github/performers.ts';
 import type { JiraAccess } from '../../features/jira/client.ts';
 import { jiraPerformers } from '../../features/jira/performers.ts';
 import { currentAssignee, jiraSearch, ticketDescription } from '../../features/jira/source.ts';
+import { remoteHead, repositoryUrl } from '../../features/jobs/remote.ts';
 import { jobSettings } from '../../features/jobs/settings.ts';
 import { sweep } from '../../features/jobs/sweep.ts';
 import { enqueue } from '../../features/outbox/enqueue.ts';
@@ -33,6 +35,7 @@ import { pauseWithin, resumeWithin, runNowWithin, type RoutineAction } from '../
 import { requests, type Applied, type Applying, type Handlers } from '../../features/requests/apply.ts';
 import { sourcesByKind } from '../../features/routines/source.ts';
 import { actWithin, advance, approveFromOutside, handOff, refusalOf, steerWithin, type PersonAction, type SteerTurn, type StopTurn } from '../../features/tasks/advance.ts';
+import { begin, type Reads } from '../../features/tasks/begin.ts';
 import { claim, renew } from '../../features/tasks/claim.ts';
 import { reaper } from '../../features/tasks/reaper.ts';
 import { saveRepository, saveRoutine } from '../../features/tasks/setup.ts';
@@ -46,7 +49,7 @@ import { postgresNow } from '../../shared/db/now.ts';
 import { realClock, runLoop, type Loop } from '../../shared/loop.ts';
 import type { RequestKind } from '../../shared/requests.ts';
 import type { Transacting } from '../../shared/transaction.ts';
-import { attempts } from './attempts.ts';
+import { attempts, sentence } from './attempts.ts';
 import { providers } from './providers.ts';
 import { workflows, type ActionKind } from './workflows.ts';
 
@@ -167,7 +170,7 @@ const checkSettings = (given: Settings, key: SealingKey): CheckLoopSettings => (
   writeBack,
 });
 
-const workerLoops = (db: Database, given: Settings, key: SealingKey | undefined, runAs: RunAsRule, describeTicket: (ticket: string, actsAs: string) => Promise<string | null>): readonly Loop[] =>
+const workerLoops = (db: Database, given: Settings, key: SealingKey | undefined, runAs: RunAsRule, reads: Reads, describeTicket: (ticket: string, actsAs: string) => Promise<string | null>): readonly Loop[] =>
   key === undefined || given.JOB_IMAGE === undefined || given.JOB_ENGINE_URL === undefined
     ? []
     : [
@@ -184,6 +187,7 @@ const workerLoops = (db: Database, given: Settings, key: SealingKey | undefined,
           providers,
           startDeadlineMs: given.ENVIRONMENT_START_DEADLINE_MS,
           describeTicket,
+          reads,
         }),
       ];
 
@@ -205,6 +209,14 @@ const loopsFor = (given: Settings, key: SealingKey | undefined, db: Database): r
   } satisfies Performers<ActionKind>;
   const actions = registryOf(performers);
   const runAs = coreRunAs(given.JIRA_SITE === undefined ? null : currentAssignee(jira));
+  const token = githubToken(db, key);
+  const reads: Reads = {
+    branchHead: async (actsAs, github, branch) => {
+      const opened = await token(actsAs);
+      return 'failed' in opened ? { refused: sentence(opened.failed) } : { head: await remoteHead(repositoryUrl(given.GIT_BASE_URL, github), branch, opened.token) };
+    },
+    failedChecks: failedChecksReader(clientFor, given.LAND_READ_TIMEOUT_MS),
+  };
   return [
     reaper({ everyMs: given.REAPER_EVERY_MS, leaseMs: given.LEASE_MS }),
     requests({ everyMs: given.REQUESTS_EVERY_MS, timeoutMs: given.REQUEST_TIMEOUT_MS, handlers, now: () => new Date() }),
@@ -218,12 +230,22 @@ const loopsFor = (given: Settings, key: SealingKey | undefined, db: Database): r
       review: coreReview,
       enqueue,
       clock: realClock,
-      tasks: { claim: async (landDb, task, now, leaseMs) => claim(landDb, task, now, leaseMs, await runAs(landDb, task), null), renew, handOff, approveFromOutside, finish: (writer, attempt, report, now, then) => advance(writer, workflows, attempt, report, now, then) },
+      tasks: {
+        claim: async (landDb, task, now, leaseMs) => {
+          const actsAs = await runAs(landDb, task);
+          const begun = await begin(landDb, { reads, runner }, task, actsAs);
+          return 'refused' in begun ? begun : claim(landDb, task, now, leaseMs, actsAs, begun);
+        },
+        renew,
+        handOff,
+        approveFromOutside,
+        finish: (writer, attempt, report, now, then) => advance(writer, workflows, attempt, report, now, then),
+      },
     }),
     ...(given.JOB_IMAGE === undefined ? [] : [sweep({ everyMs: given.SWEEP_EVERY_MS, cluster: connectCluster(given.JOB_NAMESPACE) })]),
     ...outboxLoops({ everyMs: given.OUTBOX_EVERY_MS, leaseMs: given.OUTBOX_LEASE_MS, marginMs: given.OUTBOX_MARGIN_MS, maxTries: given.OUTBOX_MAX_TRIES, time: databaseTime, registry: actions }),
     ...(key === undefined ? [] : [checkLoop(checkSettings(given, key))]),
-    ...workerLoops(db, given, key, runAs, given.JIRA_SITE === undefined ? () => Promise.resolve(null) : ticketDescription(jira)),
+    ...workerLoops(db, given, key, runAs, reads, given.JIRA_SITE === undefined ? () => Promise.resolve(null) : ticketDescription(jira)),
   ];
 };
 

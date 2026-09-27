@@ -64,7 +64,8 @@ CONSTANTS
     RefusedLaunchIsNotLost,
     FailedLaunchRelaunches,
     RetryWaitsAtGate,
-    RetryReturnsWhenRoundsRunOut
+    RetryReturnsWhenRoundsRunOut,
+    UnmetReworkEndsTheStep
 
 CodeChangeSteps == <<"specify", "implement", "verify", "land">>
 
@@ -124,12 +125,6 @@ Settled == {"stopped", "done"} \cup Waiting
 
 NoRounds == [r \in Returning |-> 0]
 
-Outcomes(s) ==
-    {"pass"}
-      \cup (IF s \in Checks THEN {"behaviorFail", "environmentFail"} ELSE {"fail"})
-      \cup (IF s \in Asking THEN {"needsInput"} ELSE {})
-      \cup (IF s \in Merges THEN {"red", "changesRequested", "reviewRequired"} ELSE {})
-
 Min(a, b) == IF a < b THEN a ELSE b
 
 LiveOn(t) == {w \in Workers : attempt[w] = t}
@@ -162,6 +157,16 @@ TypeOK ==
     /\ runAs \in [Workers -> BOOLEAN]
     /\ reassignments \in 0..MaxReassignments
     /\ launchFaults \in 0..MaxLaunchFaults
+
+Reworking(current) == current.step = ReturnsTo /\ ReturnsTo \in current.outputs
+
+Outcomes(current) ==
+    LET s == current.step
+    IN {"pass"}
+         \cup (IF s \in Checks THEN {"behaviorFail", "environmentFail"} ELSE {"fail"})
+         \cup (IF s \in Asking THEN {"needsInput"} ELSE {})
+         \cup (IF s \in Merges THEN {"red", "changesRequested", "reviewRequired"} ELSE {})
+         \cup (IF Reworking(current) THEN {"unmet"} ELSE {})
 
 Init ==
     /\ \E ends \in [Tasks -> EndSteps] :
@@ -252,6 +257,7 @@ Judged(t, current, v) ==
       [] v = "red" -> RedChecked(t, current)
       [] v = "changesRequested" -> ChangesRequested(t, current)
       [] v = "reviewRequired" -> AwaitingApproval(current)
+      [] v = "unmet" -> IF UnmetReworkEndsTheStep THEN [current EXCEPT !.state = "waiting"] ELSE Failed(current)
 
 LostOnce(current) ==
     IF LostAttemptsAreCapped /\ current.lost + 1 >= MaxLost
@@ -345,14 +351,14 @@ Finishes(w, v) ==
     /\ runAs' = [runAs EXCEPT ![w] = FALSE]
     /\ UNCHANGED <<lateResults, humanActions, runnable, reassignments, launchFaults>>
 
-Finish(w) == worker[w] = "busy" /\ \E v \in Outcomes(task[attempt[w]].step) : Finishes(w, v)
+Finish(w) == worker[w] = "busy" /\ \E v \in Outcomes(task[attempt[w]]) : Finishes(w, v)
 
 LateResult(t) ==
     /\ t \in lateResults
     /\ lateResults' = lateResults \ {t}
     /\ IF LateResultIsRefused
        THEN UNCHANGED task
-       ELSE \E v \in Outcomes(task[t].step) : task' = [task EXCEPT ![t] = [Judged(t, @, v) EXCEPT !.passed = (v = "pass")]]
+       ELSE \E v \in Outcomes(task[t]) : task' = [task EXCEPT ![t] = [Judged(t, @, v) EXCEPT !.passed = (v = "pass")]]
     /\ UNCHANGED <<attempt, worker, humanActions, claimEpoch, runnable, runAs, reassignments, launchFaults>>
 
 Stop(t) ==
@@ -549,6 +555,9 @@ LaterReviewWaitsForAPerson ==
     [][\A w \in Workers : \A t \in Tasks :
           attempt[w] = t /\ task[t].step \in Merges /\ task[t].reviews >= MaxReviewReturns /\ Finishes(w, "changesRequested") =>
               (task'[t].state = "waiting" <=> t \notin IgnoreLaterReviews)]_vars
+
+UnmetReworkWaitsForAPerson ==
+    [][\A w \in Workers : \A t \in Tasks : attempt[w] = t /\ Reworking(task[t]) /\ Finishes(w, "unmet") => task'[t].state = "waiting"]_vars
 
 EndStagePassIsDone ==
     [][\A w \in Workers : \A t \in Tasks :
