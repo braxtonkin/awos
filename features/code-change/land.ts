@@ -73,7 +73,7 @@ export type Owing = 'mark-ready' | 'update-branch' | 'merge';
 export type Decision =
   | { readonly kind: 'merged' }
   | { readonly kind: 'fail'; readonly why: string; readonly answers: Answer | null }
-  | { readonly kind: 'send-back'; readonly why: string; readonly failing: readonly [string, ...string[]] | null }
+  | { readonly kind: 'send-back'; readonly verdict: Extract<Unasked, 'conflict' | 'red_check'>; readonly why: string; readonly failing: readonly [string, ...string[]] | null }
   | { readonly kind: 'owe'; readonly action: Owing }
   | { readonly kind: 'wait'; readonly why: string }
   | { readonly kind: 'answer-review'; readonly review: Extract<MergeState['value'], { readonly kind: 'changes-requested' }>['review'] }
@@ -137,7 +137,7 @@ export const rules: readonly Rule[] = [
       return { kind: 'fail', why: `the merge queue ejected the pull request${value.kind === 'ejected' ? `: ${value.reason}` : ''}`, answers: unansweredEjection(seen) };
     },
   },
-  { name: 'conflicting', when: seen => seen.guards.ConflictSendsBack && is('conflicting')(seen), then: () => ({ kind: 'send-back', why: conflictWhy, failing: null }) },
+  { name: 'conflicting', when: seen => seen.guards.ConflictSendsBack && is('conflicting')(seen), then: () => ({ kind: 'send-back', verdict: 'conflict', why: conflictWhy, failing: null }) },
   { name: 'ready at once', when: seen => atOnce(seen) && !seen.record.markedReady, then: oweAction('mark-ready') },
   {
     name: 'still a draft',
@@ -145,7 +145,7 @@ export const rules: readonly Rule[] = [
     then: () => ({ kind: 'fail', why: 'the pull request is still a draft after AutoWorker marked it ready', answers: null }),
   },
   { name: 'red at once', when: seen => atOnce(seen) && is('red')(seen), then: seen => ({ kind: 'fail', why: checksFailed(failingChecks(seen)), answers: null }) },
-  { name: 'red', when: seen => seen.guards.RedCheckSendsBack && is('red')(seen), then: seen => ({ kind: 'send-back', why: checksFailed(failingChecks(seen)), failing: failingChecks(seen) }) },
+  { name: 'red', when: seen => seen.guards.RedCheckSendsBack && is('red')(seen), then: seen => ({ kind: 'send-back', verdict: 'red_check', why: checksFailed(failingChecks(seen)), failing: failingChecks(seen) }) },
   {
     name: 'ready when green',
     when: seen => is('green-draft')(seen) || (!seen.guards.ReadyWaitsForGreen && is('waiting-for-checks')(seen) && !seen.record.markedReady),
@@ -207,8 +207,10 @@ const failedOutput = z.object({ failed: z.object({ head: z.string().regex(/^[0-9
 
 const checksIn = /^Land sent the task back, because a check failed: (.+)\.$/;
 
-export function landSentBack(output: unknown): SendBack {
-  if (isDeepStrictEqual(output, sentBack(conflictWhy))) return { kind: 'conflict' };
+const conflictAsRedCheck = sentBack(conflictWhy);
+
+export function redCheckSentBack(output: unknown): SendBack {
+  if (isDeepStrictEqual(output, conflictAsRedCheck)) return { kind: 'conflict' };
   const recorded = failedOutput.safeParse(output);
   if (recorded.success) return { kind: 'check', head: recorded.data.failed.head, names: recorded.data.failed.checks };
   const told = review.safeParse(output).data?.blocks.flatMap(block => (block.kind === 'text' ? [checksIn.exec(block.body)?.[1]] : [])).find(found => found !== undefined);
@@ -285,7 +287,7 @@ async function act(land: Land, task: AtLand, attempt: string, reading: Reading, 
       return done(await store.finish(attempt, 'fail', said('Land failed this attempt.', `Land failed the attempt, because ${decision.why}.`, decision.answers), nothingFollows), `failed the attempt, because ${decision.why}`);
     case 'send-back':
       return done(
-        await store.finish(attempt, 'red_check', sentBack(decision.why, decision.failing === null ? null : { head: reading.state.head, checks: decision.failing }), nothingFollows),
+        await store.finish(attempt, decision.verdict, sentBack(decision.why, decision.failing === null ? null : { head: reading.state.head, checks: decision.failing }), nothingFollows),
         `sent the task back, because ${decision.why}`,
       );
     case 'answer-review': {

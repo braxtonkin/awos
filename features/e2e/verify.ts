@@ -147,7 +147,7 @@ const e2e: Scenario = {
   summary:
     [
       'files an SBX ticket on a new e2e/run-* branch per run, lets a driver (AutoWorker by default) take it to merged and clean, checks the record, and posts a report;',
-      '--runs N runs in a row and stops at the first failure, --fault injects engine-restart, lost-job, or base-conflict, or has the stand-in rehearse red-check, still-wrong, ticket-conflict, or pushes-nothing, --world local runs offline against fakes on kind',
+      '--runs N runs in a row and stops at the first failure, --fault injects engine-restart, lost-job, base-conflict, base-conflicts, or base-churn, or has the stand-in rehearse red-check, still-wrong, ticket-conflict, pushes-nothing, or stays-red, --world local runs offline against fakes on kind',
     ].join(' '),
   run: async args => {
     const { values } = parseArgs({ args: [...args], options: seriesOptions, allowPositionals: true });
@@ -158,13 +158,13 @@ const e2e: Scenario = {
 
 const p7Lane: Scenario = {
   name: 'p7-lane',
-  summary: "runs one of P7's live lanes by number, 1 to 15, and passes on the checks that lane names; lanes 11 to 15 replay the rework census on the Codex stand-in; it takes e2e's --world, --repository, and --project",
+  summary: "runs one of P7's live lanes by number, 1 to 18, and passes on the checks that lane names; lanes 11 to 15 replay the rework census, and lanes 16 to 18 the Land round caps, on the Codex stand-in; it takes e2e's --world, --repository, and --project",
   run: async args => {
     const { values, positionals } = parseArgs({ args: [...args], options: seriesOptions, allowPositionals: true });
     const number = Number(positionals[0]);
     if (number === 10) return [fail('lane 10: run in the verify service', laneTen)];
     const lane = lanes.find(candidate => candidate.number === number);
-    if (lane === undefined) return [fail('lane named', `name a lane from 1 to 15; ${lanes.map(candidate => `${String(candidate.number)} ${candidate.slug}`).join(', ')}, 10 all`)];
+    if (lane === undefined) return [fail('lane named', `name a lane from 1 to 18; ${lanes.map(candidate => `${String(candidate.number)} ${candidate.slug}`).join(', ')}, 10 all`)];
     out(`lane ${String(lane.number)} ${lane.slug}: ${lane.procedure}`);
     if (lane.before !== undefined) out(`lane ${String(lane.number)} first needs: ${lane.before}`);
     const series = seriesFrom(

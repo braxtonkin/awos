@@ -1,0 +1,19 @@
+{
+  "why": "Lanes 16 to 18 replay SBX-66 on the Codex stand-in: a run branch that moves under three Implement attempts, so Land finds a new conflict after each rework, checks that stay red through three reworks, so Land parks for failed checks, and a run branch that never stops moving, so Land parks for conflicts. Then a conflict gets its own verdict, route, and count: the migration and one exhaustive verdict schema for the dashboard, Tasks.tla's conflict outcome with its counter, guards, and property, whose distinct states grow from 5,424,892 to 10,284,028 because every task at Land can now also conflict and carries its conflict count back through Implement and Verify, the simulator's copy of the route with its predicate, plants, and conflicts profile, and the Code change route, the plug, the checks, and the decision and feature map entries (D2, C5, C6, C3).",
+  "raise": {
+    "characters/docs": 4806,
+    "characters/e2e-harness": 7809,
+    "characters/feature-verification": 4217,
+    "characters/migrations": 1282,
+    "characters/product": 245,
+    "characters/tla-models": 1199,
+    "lines/docs": 10,
+    "lines/e2e-harness": 114,
+    "lines/feature-verification": 64,
+    "lines/migrations": 47,
+    "lines/product": 11,
+    "lines/tla-models": 28,
+    "states/Tasks": 4859136,
+    "structure/migrations": 1
+  }
+}

@@ -143,7 +143,7 @@ const writing = (path: string, content: string): Action => () => write(join(proc
 
 const firstWrites = ({ entry, solution }: Implementing, rehearsal: RehearsalName | undefined): readonly Action[] => [
   writing(entry.file, rehearsal === 'still-wrong' ? identity(entry) : solution.source),
-  ...(rehearsal === 'red-check' || rehearsal === 'pushes-nothing' ? [writing(smokeTest.path, smokeTest.source)] : []),
+  ...(rehearsal === 'red-check' || rehearsal === 'pushes-nothing' || rehearsal === 'stays-red' ? [writing(smokeTest.path, smokeTest.source)] : []),
 ];
 
 const added = ({ entry }: Implementing): Review =>
@@ -152,6 +152,8 @@ const added = ({ entry }: Implementing): Review =>
 type Rework = { readonly writes: readonly Action[]; readonly reply: Review };
 
 const unchangedRework: Rework = { writes: [], reply: review('All mandated checks pass.', checksPass) };
+
+const staysRedNotes = 'notes/stays-red.md';
 
 const conflictQuestion = (entry: Entry): Review => ({
   outcome: 'needs_input',
@@ -180,6 +182,11 @@ function rework(work: Implementing, rehearsal: RehearsalName, prompt: string): R
       return prompt.includes(askOnConflict) ? { writes: [], reply: conflictQuestion(work.entry) } : { writes: [], reply: review(`The stand-in left ${untouchable} alone.`, `Left \`${untouchable}\` alone, as the ticket says.`) };
     case 'pushes-nothing':
       return unchangedRework;
+    case 'stays-red':
+      return {
+        writes: [writing(staysRedNotes, `A rework at ${new Date().toISOString()} left ${smokeTest.path} failing.\n`)],
+        reply: review('The stand-in changed its notes and left the smoke test failing.', `Changed \`${staysRedNotes}\` and left \`${smokeTest.path}\` as it was.`),
+      };
   }
 }
 

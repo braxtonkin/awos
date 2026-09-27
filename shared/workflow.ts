@@ -102,7 +102,7 @@ export function shapeOf({ steps }: Workflow): Shape {
     steps: steps.map(kind => kind.name),
     endSteps: where(kind => kind.canEnd),
     checks: where(kind => declares(kind, ['behavior_fail', 'environment_fail'])),
-    merges: where(kind => declares(kind, ['red_check', 'changes_requested', 'review_required'])),
+    merges: where(kind => declares(kind, ['red_check', 'conflict', 'changes_requested', 'review_required'])),
     returnsTo: [...new Set(steps.flatMap(kind => Object.values(kind.failures).flatMap(failure => ('to' in failure ? [failure.to] : []))))],
     asking: where(kind => kind.failures.needs_input !== undefined),
   };

@@ -5,7 +5,7 @@ import { behaviorOf, evidenceText, type Reproduction } from '../../shared/reprod
 import { review, type Review } from '../../shared/review.ts';
 import { demandsChange, type Demanding, type FailedCheck, type ReworkObligation, type SendBack } from '../../shared/rework.ts';
 import type { Instruction } from '../../shared/workflow.ts';
-import { landSentBack, landStep } from './land.ts';
+import { landStep, redCheckSentBack } from './land.ts';
 import { workflow } from './workflow.ts';
 
 type Kind = OwedKinds<typeof workflow>;
@@ -39,7 +39,8 @@ function lastFailure(earlier: readonly Earlier[], step: string, verdict: Earlier
 const workspace = ({ step }: History): Workspace => ({ setup: step === 'implement' || step === 'verify' });
 
 function sentBack(sender: Earlier): SendBack {
-  if (sender.step === landStep && sender.verdict === 'red_check') return landSentBack(sender.output);
+  if (sender.step === landStep && sender.verdict === 'conflict') return { kind: 'conflict' };
+  if (sender.step === landStep && sender.verdict === 'red_check') return redCheckSentBack(sender.output);
   if (sender.step === landStep && sender.verdict === 'changes_requested') return { kind: 'review', review: reportOf(sender) };
   if (sender.step === 'verify' && sender.verdict === 'behavior_fail') return { kind: 'behavior', evidence: reportOf(sender) };
   throw new Error(`Code change never sends a task back from ${sender.step} with ${sender.verdict}.`);

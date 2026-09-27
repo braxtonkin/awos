@@ -1,3 +1,4 @@
+import { z } from 'zod';
 import type { TaskState, Verdict, WaitingOn } from './db/types.ts';
 
 export type TaskFacts = { readonly state: TaskState; readonly waitingOn: WaitingOn | null; readonly newestVerdict: Verdict | null };
@@ -14,12 +15,17 @@ export const failing: Readonly<Record<Verdict, boolean>> = {
   not_launched: true,
   red_check: true,
   changes_requested: false,
+  conflict: false,
   handed_off: false,
   needs_input: false,
   pass: false,
   review_required: false,
   stopped: false,
 };
+
+const isVerdict = (value: unknown): value is Verdict => typeof value === 'string' && Object.hasOwn(failing, value);
+
+export const verdict = z.custom<Verdict>(isVerdict);
 
 export const isRunning = (task: TaskFacts): boolean => task.state === 'ready';
 

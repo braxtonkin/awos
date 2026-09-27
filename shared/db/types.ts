@@ -51,7 +51,7 @@ export type TaskState = "done" | "ready" | "stopped" | "waiting";
 
 export type Timestamp = ColumnType<Date, Date | string, Date | string>;
 
-export type Verdict = "behavior_fail" | "changes_requested" | "environment_fail" | "fail" | "handed_off" | "lost" | "needs_input" | "not_launched" | "pass" | "red_check" | "review_required" | "stopped";
+export type Verdict = "behavior_fail" | "changes_requested" | "conflict" | "environment_fail" | "fail" | "handed_off" | "lost" | "needs_input" | "not_launched" | "pass" | "red_check" | "review_required" | "stopped";
 
 export type WaitingOn = "answer" | "approval" | "outside_approval" | "retry";
 
