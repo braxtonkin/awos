@@ -98,8 +98,10 @@ async function resolved(owed: SendBack, { db, reads, runAs, task, repository, st
     case 'check': {
       const head = owed.head ?? (await taskBranchHead(db, task)) ?? start?.commit;
       if (repository === null || head === undefined) return { refused: noRepositoryToRead };
+      const base = await reads.branchHead(runAs, repository.github, repository.branch);
+      if ('refused' in base) return base;
       const [first, ...rest] = await reads.failedChecks(runAs, repository.github, head, owed.names);
-      return { kind: 'check', head, checks: [first, ...rest], notes: [] };
+      return { kind: 'check', head, branch: repository.branch, base: base.head, checks: [first, ...rest], notes: [] };
     }
   }
 }

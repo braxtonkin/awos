@@ -155,6 +155,8 @@ const unchanged: Change = { pushed: null, carried: null, declined: null };
 const failedSandbox: ReworkObligation = {
   kind: 'check',
   head: 'c'.repeat(40),
+  branch: 'main',
+  base: 'f'.repeat(40),
   checks: [{ name: 'check', kind: 'logged', conclusion: 'failure', step: 'npm run smoke', log: 'FAIL console error: Failed to load resource: the server responded with a status of 404 (Not Found)' }],
   notes: [],
 };
@@ -312,6 +314,13 @@ function reworkChecks(): readonly Check[] {
       [...passedOnce, entry('land', 'red_check', sbx60Land)],
       failedSandbox,
       ['checks failed on `' + 'c'.repeat(40) + '`', 'The check `check` ended failure at the step `npm run smoke`.', 'Failed to load resource: the server responded with a status of 404'],
+      [],
+    ],
+    [
+      "SBX-93's check rework is told that CI tested the merge, and which base commit AutoWorker started merging",
+      [...passedOnce, entry('land', 'red_check', sbx60Land)],
+      failedSandbox,
+      ['CI ran them on the pull request merged into `main`', 'AutoWorker started merging `' + 'f'.repeat(40) + '`, the head of `main` when this attempt started', 'Finish that merge first'],
       [],
     ],
     ["a behavior rework holds Verify's evidence", [...passedOnce.slice(0, 2), entry('verify', 'behavior_fail')], stillWrong, ['found the behavior still wrong', 'Property "level" is missing in type GameState'], []],

@@ -790,6 +790,17 @@ Rejected options:
 - **One count with a higher cap.** A task whose checks keep failing would run more rounds before a person sees it.
 - **A per-repository setting.** See above.
 
+### A check rework starts from the tree CI tested
+
+Decided 27 Sep 2026 after SBX-93 on braxtonkin/awos-game. Three tests in `test/catch-up.test.ts` failed in CI and passed in the agent's workspace and in a fresh checkout of the branch head. GitHub runs a pull request's checks on the pull request merged into its base branch, and main had gained machines, perks, and achievements from sibling tickets after the branch saved its fixtures. The check rework started from the branch head, found everything passing, pushed nothing, and the task waited for a person.
+
+Now the obligation for a failed check records the base branch's head that `begin` reads at claim time, as a conflict's does, and the Job starts merging it before the turn on the same path a conflict rework uses, with `pushStep`'s rules about when a merge commit may be pushed. When the start commit already holds that head, there is nothing to merge. Implement's input says that CI tested the merge and that the merge is left uncommitted. A migration records the failed head as the base of each earlier check obligation, which merges nothing, and the constraint `obligation_names_its_kind` now requires the base. `Tasks.tla` needed no change: the merge is a step inside the Job, not a task transition, and a rework that pushes a merge commit has pushed something, as a conflict rework's merge already had. Lane 19 of `p7-lane` replays SBX-93 on the Codex stand-in, and the local world's fake GitHub now runs CI on the merge as GitHub does.
+
+Rejected options:
+
+- **Let the agent fetch the base.** Only the bridge holds the token, and a push stays the bridge's alone.
+- **Merge only when Land's check log names a file the base changed.** A log cannot say which base change broke the merge, and SBX-93's did not.
+
 ## Open
 
 Each open question names the current lean or default. A lean is not a decision.
