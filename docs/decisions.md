@@ -384,7 +384,7 @@ Decided 24 Sep 2026 while building Land (L1), to fit `features/code-change/Land.
 - An attempt that owes `pr.mark-ready`, `pr.update-branch`, or `pr.merge` ends with the verdict `handed_off` in the transaction that owes the action, and its task stays at Land. The store refuses to owe an action while its task has a live attempt, and refuses to claim a task that owes one, so the attempt has to end first. The next pass claims a fresh attempt once the row settles.
 - Land keeps its memory in the store it already has. An attempt that answered a review or a queue ejection records the id in its output as `answers`, and the head of a refused merge is the refused row's result.
 - Merged ends the attempt with a pass, and the same transaction owes a comment on the ticket and `branch.delete`. A required approval ends it with `review_required`, and the same transaction writes the review step's note and owes what the step returns. The core's step returns nothing, because approval comes from the repository's rules and a fork's plug-in (G).
-- A conflict returns the task to Implement with the verdict `red_check`, counted in `landRounds`, because Code change declares no other route back from Land.
+- A conflict returns the task to Implement with the verdict `conflict`, counted in `conflicts` apart from a red check's `landRounds`. Until 27 Sep it used `red_check`, because Code change declared no other route back from Land (see [a conflict has its own verdict and its own count](#a-conflict-has-its-own-verdict-and-its-own-count)).
 - Land reads its record again after the claim, because a second engine can finish an attempt between the pass's list and the claim. While the attempt is live the store holds no owed row for the task, so that record stays true until the decision commits.
 - Land renews an attempt only after a good read. A read that keeps failing lets the lease lapse, and the reaper's cap on lost attempts parks the task, so a closed pull request or a revoked token reaches a person.
 - Land answers each refused merge once, as `Land.tla` clears `refusedAt` when an attempt fails, so a refusal a second try can clear costs one retry. A draft that stays a draft after AutoWorker marked it ready, and a branch still behind after an update at the same head, fail the attempt, so neither action is owed without end.
@@ -513,7 +513,7 @@ Rejected options:
 
 Decided 25 Sep 2026 by the owner. When Verify finds the behavior still wrong, the task goes back to Implement on its own, up to 3 rounds, and after the third it waits at Verify for a person. Retry used to run Verify again on the same code, so the verdict repeated, and only then did the task go back to Implement. The person's note reached only that wasted Verify run, because an attempt's prompt carries the notes made after the previous attempt started. Implement never saw what the person asked to change.
 
-Now Retry starts again at the step that the failure returns to. That is the `to` of the `return` failure whose counter reached its cap, and the counts the task saved when it parked record which counter that was. For Code change, Retry starts at Implement after Verify's 3 rounds and after Land's 3 rounds of red checks, and the person's note reaches Implement. Each waiting message says so. Every other stop keeps its meaning. A task stopped at a gate returns to waiting for Approve, a `rerun` failure such as Verify's environment runs the same step again, and a step that failed its own retries runs again. Send back is unchanged. The task model checks the rule as `RetryStartsWhereTheFailureRoutes`, and the simulator checks the same property after every step.
+Now Retry starts again at the step that the failure returns to. That is the `to` of the `return` failure whose counter reached its cap, and the counts the task saved when it parked record which counter that was. For Code change, Retry starts at Implement after Verify's 3 rounds, after Land's 3 rounds of red checks, and after its 10 conflicts, and the person's note reaches Implement. Each waiting message says so. Every other stop keeps its meaning. A task stopped at a gate returns to waiting for Approve, a `rerun` failure such as Verify's environment runs the same step again, and a step that failed its own retries runs again. Send back is unchanged. The task model checks the rule as `RetryStartsWhereTheFailureRoutes`, and the simulator checks the same property after every step.
 
 Rejected options:
 
@@ -756,7 +756,7 @@ Rejected options:
 - **The worker reads the base head at launch and stores nothing.** The prompt is stored once, but a retried launch rebuilds the Secret, so the two could name different commits.
 - **The Job reads the base itself.** The prompt, stored before the Job runs, could not name the commit.
 - **The agent runs the merge, and the bridge always adds the base as a parent.** After an aborted merge that publishes a commit that reverts the base.
-- **A verdict or route of its own for a conflict.** It needs an enum migration and every record of verdicts, and `red_check` already returns to Implement.
+- **A verdict or route of its own for a conflict.** It needs an enum migration and every record of verdicts, and `red_check` already returns to Implement. Reversed on 27 Sep, when SBX-66 showed that a shared route also shares its cap and its reason (see [a conflict has its own verdict and its own count](#a-conflict-has-its-own-verdict-and-its-own-count)).
 
 ### A rework owes what sent it back
 
@@ -773,6 +773,22 @@ Rejected options:
 - **Read the failed check's log when Land sends the task back.** A task that parked before this change has no such record, so the claim must read it anyway.
 - **Notes read at launch, outside the obligation.** The prompt, a relaunch, and the dashboard would read the note from different rows.
 - **A trigger that derives the obligation in SQL.** It would repeat, in SQL, the plug's reading of Land's output.
+
+### A conflict has its own verdict and its own count
+
+Decided 27 Sep 2026 after SBX-66 on braxtonkin/awos-game, one of nine tickets that ran at once, many of them editing `src/page.ts` and `test/page.test.ts`. Land found a conflict with main three times, because each time a sibling had merged while the task was in Implement or Verify. Each conflict rework resolved its conflict, and each Verify passed. The third conflict still reached Land's cap of 3 rounds, which counted conflicts and failed checks alike, and the task waited with "Retry starts again at Implement, because checks on the pull request failed three times." Land's cap exists so that a task whose checks keep failing stops for a person. A conflict that other merges cause is progress, and a busy wave can cause several.
+
+Now Land ends a conflict with the verdict `conflict`, and Code change routes it back to Implement on its own counter, `conflicts`, with a cap of 10. A red check keeps `red_check`, `landRounds`, and its cap of 3. Each cap parks the task with a reason that names its cause and its count. A ticket in a nine-ticket wave meets at most eight conflicts from its siblings' merges. The cap parks the task at its tenth conflict, which leaves room for one outside merge, and constant churn still ends in a wait for a person. `decide` needed no change, because each route already owns its counter, its cap, and its reason. The plug reads a `conflict` sender as a conflict. It still reads Land's exact conflict output under `red_check` as a conflict, because the tasks that ran before this change hold that output. A task that the conflict cap parks shows Needs you and not Failed, because nothing failed. `Tasks.tla` gains the outcome conflict at a merge step, the counter `conflicts` under `RoundsCapped`, the guards `ConflictsAreCapped` and `ConflictsCountApart`, and the property `ConflictSparesCheckRounds`, which the simulator checks after every step. Lanes 16 to 18 of `p7-lane` replay SBX-66, a check that stays red, and constant churn on the Codex stand-in.
+
+The cap belongs to Code change, like its other round caps, and is not a repository setting. Repository settings hold a repository's own customs, such as when a draft leaves draft and which reviews to ignore. A round cap bounds AutoWorker's own loop. It lives in the workflow's declaration, where the task model and the simulator check it. The conflicts in SBX-66's wave came from AutoWorker's own tasks, and how many a task meets grows with how many of those change the same files at once. A person who sees a task wait at the cap presses Retry, which clears the count. A per-repository cap would be the first cap that `decide`, the model, and the simulator read from a repository row. If a repository shows the need, the cap can become a setting then.
+
+Rejected options:
+
+- **One route with two counters.** Land would keep `red_check` for both causes, and the route would pick its counter from Land's output. It adds a second way to route a verdict, and the model, the simulator's charges, and the published steps would each need to learn it.
+- **Count conflicts from each rework's obligation.** The obligation is written when the next rework is claimed, after the send-back has been counted, and every other cap counts in `task.counts` when the attempt ends.
+- **No cap on conflicts.** Constant churn on the same files would send the task around Implement, Verify, and Land without end, and each round spends agent time.
+- **One count with a higher cap.** A task whose checks keep failing would run more rounds before a person sees it.
+- **A per-repository setting.** See above.
 
 ## Open
 

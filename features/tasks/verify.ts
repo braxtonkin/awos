@@ -792,7 +792,7 @@ const declaredSteps: readonly LiteralStep[] = [
     name: 'land',
     run_by: 'engine',
     requires: ['text'],
-    failures: { ...ends, red_check: { kind: 'return', to: 'implement' }, changes_requested: { kind: 'review', to: 'implement' }, review_required: { kind: 'await', to: null } },
+    failures: { ...ends, red_check: { kind: 'return', to: 'implement' }, conflict: { kind: 'return', to: 'implement' }, changes_requested: { kind: 'review', to: 'implement' }, review_required: { kind: 'await', to: null } },
   },
 ];
 

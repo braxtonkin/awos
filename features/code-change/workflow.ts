@@ -95,6 +95,13 @@ export const workflow = {
           cap: 3,
           parks: 'Retry starts again at Implement, because checks on the pull request failed three times. Read the failing checks on the pull request, then press Retry with a note that says what to change, and Implement gets your note.',
         },
+        conflict: {
+          kind: 'return',
+          to: 'implement',
+          counter: 'conflicts',
+          cap: 10,
+          parks: 'Retry starts again at Implement, because the pull request conflicted with its base branch ten times, as other merges kept changing the files it changes. Press Retry once those merges slow down, and Implement merges the base branch again.',
+        },
         changes_requested: {
           kind: 'review',
           to: 'implement',

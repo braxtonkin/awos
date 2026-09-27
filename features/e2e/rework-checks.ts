@@ -10,8 +10,6 @@ type Fact = { readonly holds: boolean; readonly said: string };
 
 type Attempt = { readonly id: string; readonly step: string; readonly verdict: string | null; readonly output: unknown; readonly pushed: string | null; readonly prompt: string };
 
-const conflictSentBack = 'the pull request conflicts with its base branch';
-
 export const reworkCheckNames: Readonly<Record<RehearsalName, string>> = {
   'red-check': 'red check fixed from its log',
   'still-wrong': 'behavior fixed from its evidence',
@@ -43,7 +41,7 @@ const listed = (attempts: readonly Attempt[]): string => attempts.map(attempt =>
 
 const after = (attempts: readonly Attempt[], sender: Attempt): readonly Attempt[] => attempts.filter(attempt => attempt.step === 'implement' && Number(attempt.id) > Number(sender.id));
 
-const sentBackForRed = (attempt: Attempt): boolean => attempt.step === 'land' && attempt.verdict === 'red_check' && !JSON.stringify(attempt.output).includes(conflictSentBack);
+const sentBackForRed = (attempt: Attempt): boolean => attempt.step === 'land' && attempt.verdict === 'red_check';
 
 const redSendBack = (attempts: readonly Attempt[]): Attempt | undefined => attempts.find(sentBackForRed);
 

@@ -412,8 +412,7 @@ const baseMovedNotes = 'notes/base-moved.md';
 
 const conflictSentBack = 'the pull request conflicts with its base branch';
 
-const sentBackForConflict = (attempt: { readonly step: string; readonly verdict: string | null; readonly output: unknown }): boolean =>
-  attempt.step === 'land' && attempt.verdict === 'red_check' && JSON.stringify(attempt.output).includes(conflictSentBack);
+const sentBackForConflict = (attempt: { readonly step: string; readonly verdict: string | null }): boolean => attempt.step === 'land' && attempt.verdict === 'conflict';
 
 const baseMoves = 3;
 
@@ -472,7 +471,7 @@ async function churnParkedCheck(drive: Drive, db: Database, moves: readonly stri
   const name = faultCheckNames['base-churn'];
   const attempts = await attemptsWithOutput(db, drive.ticket);
   const lands = attempts.filter(sentBackForConflict);
-  const red = attempts.filter(attempt => attempt.step === 'land' && attempt.verdict === 'red_check' && !sentBackForConflict(attempt));
+  const red = attempts.filter(attempt => attempt.step === 'land' && attempt.verdict === 'red_check');
   const task = await db.selectFrom('task').select(['state', 'step', 'waiting_on', 'waiting_reason', 'counts']).where('key', '=', drive.ticket).executeTakeFirst();
   const reason = task?.waiting_reason ?? '';
   return factsCheck(name, [

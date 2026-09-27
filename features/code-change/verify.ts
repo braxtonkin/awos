@@ -233,7 +233,7 @@ const entry = (step: string, verdict: Earlier['verdict'], output: unknown = done
 
 const passedOnce = [entry('specify', 'pass'), entry('implement', 'pass'), entry('verify', 'pass')];
 
-const conflicted = [...passedOnce, entry('land', 'red_check', waitingTasksLand)];
+const conflicted = [...passedOnce, entry('land', 'conflict', waitingTasksLand)];
 
 const redAt = 'e'.repeat(40);
 
@@ -242,22 +242,22 @@ const failedReproduction = ranBoth(side(base, ran(1)), side(head, said(1, 'Asser
 function sentBackChecks(): readonly Check[] {
   const reading = (value: MergeValue) => ({ number: 7, state: { head: redAt, value }, draft: 'when-green' as const });
   const record = { draftLeaves: 'when-green' as const, answered: [], markedReady: false, refused: null, updatedAt: null, gatesApproved: true, evidence: '' };
-  const written = (value: MergeValue): unknown => {
+  const landed = (value: MergeValue): Earlier => {
     const { decision } = decideLand(reading(value), record, guarded);
-    return decision.kind === 'send-back' ? sentBack(decision.why, decision.failing === null ? null : { head: reading(value).state.head, checks: decision.failing }) : decision;
+    return decision.kind === 'send-back' ? entry('land', decision.verdict, sentBack(decision.why, decision.failing === null ? null : { head: reading(value).state.head, checks: decision.failing })) : entry('land', 'fail', decision);
   };
   const cases: readonly (readonly [string, Earlier, SendBack])[] = [
-    ["Land's conflict send-back, whose output is the exact one the five waiting tasks hold", entry('land', 'red_check', waitingTasksLand), { kind: 'conflict' }],
-    ["Land's conflict send-back as Land writes it now", entry('land', 'red_check', written({ kind: 'conflicting' })), { kind: 'conflict' }],
+    ["Land's conflict send-back as the five waiting tasks and SBX-66 hold it, a red check with the conflict's exact output", entry('land', 'red_check', waitingTasksLand), { kind: 'conflict' }],
+    ["Land's conflict send-back as Land writes it now, with its own verdict", landed({ kind: 'conflicting' }), { kind: 'conflict' }],
     ["Land's red check as SBX-60's task holds it, which names the check and no head", entry('land', 'red_check', sbx60Land), { kind: 'check', head: null, names: ['check'] }],
-    ["Land's red check as Land writes it now, with the head and every failing check", entry('land', 'red_check', written({ kind: 'red', failing: ['build', 'lint'] })), { kind: 'check', head: redAt, names: ['build', 'lint'] }],
+    ["Land's red check as Land writes it now, with the head and every failing check", landed({ kind: 'red', failing: ['build', 'lint'] }), { kind: 'check', head: redAt, names: ['build', 'lint'] }],
     ["Verify's behavior still wrong, with its evidence", entry('verify', 'behavior_fail', doneReview, failedReproduction), { kind: 'behavior', evidence: evidenceText(failedReproduction) ?? '' }],
     ['a review that asked for changes', entry('land', 'changes_requested', { ...doneReview, blocks: [{ kind: 'text', title: null, body: 'ada asked for changes.\nRename the helper.' }] }), { kind: 'review', review: 'ada asked for changes.\nRename the helper.' }],
   ];
-  const landName = "Land's conflict send-back still writes the exact output the five waiting tasks hold";
-  const conflictWritten = written({ kind: 'conflicting' });
+  const verdictName = 'Land ends a conflict with the verdict conflict, which its own route counts, and a red check with red_check';
+  const verdicts = [landed({ kind: 'conflicting' }).verdict, landed({ kind: 'red', failing: ['build'] }).verdict].join(', ');
   return [
-    isDeepStrictEqual(conflictWritten, waitingTasksLand) ? pass(landName, JSON.stringify(conflictWritten)) : fail(landName, JSON.stringify(conflictWritten)),
+    verdicts === 'conflict, red_check' ? pass(verdictName, verdicts) : fail(verdictName, verdicts),
     ...cases.map(([what, sender, expected]) => {
       const name = `the plug reads what a rework owes from the attempt that sent the task back: ${what}`;
       const got = agentSteps.sentBack(sender);
