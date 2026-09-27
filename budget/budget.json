@@ -27,8 +27,8 @@
       "files": [
         "features/e2e/**"
       ],
-      "lines": 6405,
-      "characters": 323192,
+      "lines": 6478,
+      "characters": 327177,
       "longest-line": 471
     },
     {
@@ -72,8 +72,8 @@
         "tools/**",
         "eslint.config.ts"
       ],
-      "lines": 7257,
-      "characters": 332244,
+      "lines": 7288,
+      "characters": 334318,
       "longest-line": 547
     },
     {
@@ -84,7 +84,7 @@
         "*.md"
       ],
       "lines": 731,
-      "characters": 204397
+      "characters": 206159
     },
     {
       "name": "product",

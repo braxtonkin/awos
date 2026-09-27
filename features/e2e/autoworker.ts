@@ -502,19 +502,26 @@ async function podNames(core: CoreV1Api, namespace: string, attempt: string): Pr
   return (await core.listNamespacedPod({ namespace, labelSelector: `${labels.attempt}=${attempt}` })).items.flatMap(pod => (pod.metadata?.name === undefined ? [] : [pod.metadata.name]));
 }
 
-export async function inJobNamespace<T>(world: EngineWorld, namespace: string, log: (line: string) => void, work: (cluster: { readonly core: CoreV1Api; readonly image: string; readonly address: string }) => Promise<T>): Promise<T> {
+export type JobCluster = { readonly core: CoreV1Api; readonly image: string; readonly address: string };
+
+export async function jobCluster(world: EngineWorld, log: (line: string) => void): Promise<JobCluster> {
   const up = checksOf(await kind.run(['up']));
   const broken = up.find(check => !check.passed);
   if (broken !== undefined) throw new Error(`kind did not come up: ${broken.name}, ${broken.detail}`);
   log(await ensureRegistry());
   const image = await world.image(await buildAttemptImage(`${registry.host}/autoworker-job:e2e`));
-  const address = await kindAddress();
-  const core = kubernetes();
-  await jobNamespace(core, namespace, e2eServiceAccount);
+  return { core: kubernetes(), image, address: await kindAddress() };
+}
+
+export const makeJobNamespace = (core: CoreV1Api, namespace: string): Promise<void> => jobNamespace(core, namespace, e2eServiceAccount);
+
+async function inJobNamespace<T>(world: EngineWorld, namespace: string, log: (line: string) => void, work: (cluster: JobCluster) => Promise<T>): Promise<T> {
+  const cluster = await jobCluster(world, log);
+  await makeJobNamespace(cluster.core, namespace);
   try {
-    return await work({ core, image, address });
+    return await work(cluster);
   } finally {
-    await core.deleteNamespace({ name: namespace });
+    await cluster.core.deleteNamespace({ name: namespace });
   }
 }
 
