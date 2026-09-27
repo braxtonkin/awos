@@ -1,0 +1,10 @@
+{
+  "why": "The e2e hold now keeps its database, credential key, and namespace across restarts, so the owner's game run keeps every task, and its teardown fits docker stop and prints each step, which the leaked hold namespaces needed. tools/verify/postgres.ts gains keptPostgres for a database kept on a named volume, and the feature map and AGENTS.md describe both.",
+  "raise": {
+    "characters/docs": 1762,
+    "characters/e2e-harness": 3985,
+    "characters/tools": 2074,
+    "lines/e2e-harness": 73,
+    "lines/tools": 31
+  }
+}
