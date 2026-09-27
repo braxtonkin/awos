@@ -8,7 +8,7 @@ import { evidenceText } from '../../shared/reproduction.ts';
 import { review } from '../../shared/review.ts';
 import { fail, info, pass, type Check, type Line } from '../../tools/verify/check.ts';
 import { withPostgres } from '../../tools/verify/postgres.ts';
-import { endStatus, teamAccount, type Fault, type RunAs } from './autoworker.ts';
+import { endStatus, teamAccount, ticketDescription, type Fault, type RunAs } from './autoworker.ts';
 import type { Entry } from './catalog.ts';
 import type { CleanSources } from './clean.ts';
 import { drivers, type DriverName } from './driver.ts';
@@ -210,7 +210,7 @@ export async function runEndToEnd(world: World, options: Options, out: (line: st
     out(`run branch ${branch}`);
     const label = `e2e-run-${id}`;
     const assignee = options.assigned ? accountId : null;
-    const ticket = await timed(() => jira.fileTicket({ project: options.project, summary: options.entry.summary, description: options.entry.description, label, assignee }));
+    const ticket = await timed(() => jira.fileTicket({ project: options.project, summary: options.entry.summary, description: ticketDescription(options.entry.description, options.fault), label, assignee }));
     out(`ticket ${ticket} ${jira.browse(ticket)}, entry ${options.entry.name}, driver ${options.driver}, world ${world.name}`);
     const workdir = join(homedir(), '.e2e', id);
     await mkdir(workdir, { recursive: true, mode: 0o700 });

@@ -8,6 +8,12 @@ import { json, refusal, serve, type Answer, type Asked, type Route, type Served 
 
 const sandboxCheck = 'sandbox';
 
+const installStep = 'Run npm ci';
+
+const testStep = 'Run npm test';
+
+const jobSteps = ['Set up job', installStep, testStep] as const;
+
 const ciWaitMs = 900_000;
 const gitWaitMs = 60_000;
 const kept = 64_000;
@@ -51,6 +57,7 @@ type CheckRun = {
   conclusion: 'success' | 'failure' | null;
   completedAt: string | null;
   log: string;
+  failedStep: string | null;
 };
 
 type Status = { readonly state: 'error' | 'failure' | 'pending' | 'success'; readonly context: string; readonly description: string; readonly createdAt: string };
@@ -161,12 +168,15 @@ export async function startFakeGitHub(settings: FakeGitHubSettings): Promise<Fak
       await gitOut(['archive', '--format=tar', `--output=${archive}`, run.sha]);
       const env = { PATH: process.env['PATH'] ?? '/usr/bin:/bin', HOME: npmHome, CI: 'true', LANG: 'C.UTF-8' };
       const untar = await runProcess('tar', ['-xf', archive, '-C', folder], { cwd: scratch, env, timeoutMs: gitWaitMs, signal: stopping.signal });
-      const ran = untar.code === 0 ? await runProcess('sh', ['-c', 'npm ci --no-audit --no-fund && npm test'], { cwd: folder, env, timeoutMs: ciWaitMs, signal: stopping.signal }) : untar;
-      run.log = `${ran.out}${ran.err}`;
-      run.conclusion = ran.code === 0 ? 'success' : 'failure';
+      const installed = untar.code === 0 ? await runProcess('sh', ['-c', 'npm ci --no-audit --no-fund'], { cwd: folder, env, timeoutMs: ciWaitMs, signal: stopping.signal }) : untar;
+      const tested = installed.code === 0 ? await runProcess('sh', ['-c', 'npm test'], { cwd: folder, env, timeoutMs: ciWaitMs, signal: stopping.signal }) : undefined;
+      run.log = [installed, ...(tested === undefined ? [] : [tested])].map(ran => `${ran.out}${ran.err}`).join('');
+      run.conclusion = tested?.code === 0 ? 'success' : 'failure';
+      run.failedStep = tested === undefined ? installStep : tested.code === 0 ? null : testStep;
     } catch (error) {
       run.log = error instanceof Error ? error.message : String(error);
       run.conclusion = 'failure';
+      run.failedStep = installStep;
     } finally {
       run.status = 'completed';
       run.completedAt = now();
@@ -179,7 +189,7 @@ export async function startFakeGitHub(settings: FakeGitHubSettings): Promise<Fak
     const found = state.runs.get(commit);
     if (found !== undefined) return found;
     serial += 1;
-    const run: CheckRun = { id: serial, sha: commit, startedAt: now(), status: 'in_progress', conclusion: null, completedAt: null, log: '' };
+    const run: CheckRun = { id: serial, sha: commit, startedAt: now(), status: 'in_progress', conclusion: null, completedAt: null, log: '', failedStep: null };
     state.runs.set(commit, run);
     const tested = test(run).finally(() => testing.delete(tested));
     testing.add(tested);
@@ -421,8 +431,40 @@ export async function startFakeGitHub(settings: FakeGitHubSettings): Promise<Fak
     const runs = wanted === null || wanted === sandboxCheck ? [runOf(commit)] : [];
     return json({
       total_count: runs.length,
-      check_runs: runs.map(run => ({ id: run.id, name: sandboxCheck, head_sha: run.sha, status: run.status, conclusion: run.conclusion, started_at: run.startedAt, completed_at: run.completedAt, html_url: runLink(run) })),
+      check_runs: runs.map(run => ({
+        id: run.id,
+        name: sandboxCheck,
+        head_sha: run.sha,
+        status: run.status,
+        conclusion: run.conclusion,
+        started_at: run.startedAt,
+        completed_at: run.completedAt,
+        html_url: runLink(run),
+        details_url: runLink(run),
+        app: { slug: 'github-actions' },
+        output: { title: null, summary: null },
+      })),
     });
+  }
+
+  const runNumbered = (id: string): CheckRun | undefined => [...state.runs.values()].find(entry => String(entry.id) === id);
+
+  const conclusionAt = (run: CheckRun, index: number): string | null => {
+    if (run.status !== 'completed') return null;
+    const failed = run.failedStep === null ? jobSteps.length : jobSteps.findIndex(step => step === run.failedStep);
+    return index < failed ? 'success' : index === failed ? 'failure' : 'skipped';
+  };
+
+  function job(id: string): Answer {
+    const run = runNumbered(id);
+    if (run === undefined) return refusal(404, 'Not Found');
+    const steps = jobSteps.map((name, index) => ({ name, number: index + 1, status: run.status, conclusion: conclusionAt(run, index) }));
+    return json({ id: run.id, run_id: run.id, name: sandboxCheck, head_sha: run.sha, status: run.status, conclusion: run.conclusion, html_url: runLink(run), steps });
+  }
+
+  function jobLog(id: string): Answer {
+    const run = runNumbered(id);
+    return run === undefined || run.status !== 'completed' ? refusal(404, 'Not Found') : { status: 200, text: run.log };
   }
 
   async function listPulls(asked: Asked): Promise<Answer> {
@@ -524,6 +566,8 @@ export async function startFakeGitHub(settings: FakeGitHubSettings): Promise<Fak
     { method: 'PATCH', path: at('/git/refs/heads/(.+)'), answer: (asked, [branch = '']) => moveRef(asked, branch) },
     { method: 'DELETE', path: at('/git/refs/heads/(.+)'), answer: (_asked, [branch = '']) => deleteRef(branch) },
     { method: 'GET', path: at('/commits/([0-9a-f]{40})/check-runs'), answer: (asked, [commit = '']) => checkRuns(asked, commit) },
+    { method: 'GET', path: at('/actions/jobs/(\\d+)'), answer: (_asked, [id = '']) => job(id) },
+    { method: 'GET', path: at('/actions/jobs/(\\d+)/logs'), answer: (_asked, [id = '']) => jobLog(id) },
     { method: 'GET', path: at('/commits/([^/]+)'), answer: (_asked, [ref = '']) => readCommit(ref) },
     { method: 'GET', path: at('/pulls'), answer: listPulls },
     { method: 'POST', path: at('/pulls'), answer: openPull },

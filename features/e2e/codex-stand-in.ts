@@ -8,7 +8,22 @@ import type { Review as StepReview } from '../../shared/review.ts';
 import { catalog, scriptOf, type Entry, type Script, type ScriptName } from './catalog.ts';
 import { execute } from './process.ts';
 import { tokenUsageMethod } from './report.ts';
-import { reproductionScript, solutions, type Solution } from './solutions.ts';
+import {
+  askOnConflict,
+  checksPass,
+  coverageScript,
+  favicon,
+  forbidden,
+  identity,
+  rehearsalOf,
+  reproductionScript,
+  smokeTest,
+  solutions,
+  stillWrongSign,
+  untouchable,
+  type RehearsalName,
+  type Solution,
+} from './solutions.ts';
 
 export const standInPlan = 'Stand-in plan: change src/words.ts so titleCase capitalizes each word, then prove it with one reproduction script.';
 
@@ -124,23 +139,71 @@ type Implementing = { readonly entry: Entry; readonly solution: Solution };
 
 type Action = (work: Implementing) => Promise<unknown>;
 
-const implementActions: ReadonlyMap<number, Action> = new Map<number, Action>([
-  [2, () => run('ls src test')],
-  [8, ({ entry, solution }) => write(join(process.cwd(), entry.file), solution.source)],
-  [14, ({ entry, solution }) => run(reproductionScript(entry, solution))],
-  [18, () => run('git status --short')],
-]);
+const writing = (path: string, content: string): Action => () => write(join(process.cwd(), path), content);
 
-async function implement(work: Implementing): Promise<Review | undefined> {
+const firstWrites = ({ entry, solution }: Implementing, rehearsal: RehearsalName | undefined): readonly Action[] => [
+  writing(entry.file, rehearsal === 'still-wrong' ? identity(entry) : solution.source),
+  ...(rehearsal === 'red-check' || rehearsal === 'pushes-nothing' ? [writing(smokeTest.path, smokeTest.source)] : []),
+];
+
+const added = ({ entry }: Implementing): Review =>
+  review(`The stand-in added ${entry.name} in ${entry.file}.`, `Added \`${entry.name}\` in \`${entry.file}\`, exported by name, and checked it against the ticket's acceptance criteria.`);
+
+type Rework = { readonly writes: readonly Action[]; readonly reply: Review };
+
+const unchangedRework: Rework = { writes: [], reply: review('All mandated checks pass.', checksPass) };
+
+const conflictQuestion = (entry: Entry): Review => ({
+  outcome: 'needs_input',
+  summary: `The ticket says not to edit ${untouchable}, and Verify's evidence says the fix needs it.`,
+  blocks: [
+    {
+      kind: 'choice',
+      title: 'The ticket against what sent the task back',
+      question: `The ticket says "${forbidden}" Verify's evidence says ${untouchable} does not test ${entry.name}, so the fix needs that file. Should Implement edit ${untouchable} anyway?`,
+      options: [
+        { id: 'edit', label: `Edit ${untouchable}` },
+        { id: 'keep', label: `Keep ${untouchable} and change Verify's script` },
+      ],
+      recommended: null,
+    },
+  ],
+});
+
+function rework(work: Implementing, rehearsal: RehearsalName, prompt: string): Rework {
+  switch (rehearsal) {
+    case 'red-check':
+      return prompt.includes('favicon.ico') ? { writes: [writing(favicon, 'icon\n')], reply: review(`The stand-in added ${favicon}.`, `Added \`${favicon}\`, which the smoke test's log said the page could not load.`) } : unchangedRework;
+    case 'still-wrong':
+      return prompt.includes(stillWrongSign) ? { writes: [writing(work.entry.file, work.solution.source)], reply: added(work) } : { writes: [], reply: review('The stand-in found nothing to change.', 'The change already does what the plan says.') };
+    case 'ticket-conflict':
+      return prompt.includes(askOnConflict) ? { writes: [], reply: conflictQuestion(work.entry) } : { writes: [], reply: review(`The stand-in left ${untouchable} alone.`, `Left \`${untouchable}\` alone, as the ticket says.`) };
+    case 'pushes-nothing':
+      return unchangedRework;
+  }
+}
+
+async function implement(work: Implementing, prompt: string): Promise<Review | undefined> {
+  const rehearsal = rehearsalOf(prompt);
+  const again = rehearsal !== undefined && existsSync(join(process.cwd(), work.entry.file)) ? rework(work, rehearsal, prompt) : undefined;
+  const writes = again?.writes ?? firstWrites(work, rehearsal);
+  const actions: ReadonlyMap<number, Action> = new Map<number, Action>([
+    [2, () => run('ls src test')],
+    [8, async () => {
+      for (const action of writes) await action(work);
+    }],
+    [14, ({ entry, solution }) => run(reproductionScript(entry, solution))],
+    [18, () => run('git status --short')],
+  ]);
   for (let at = 1; at <= implementPace.progressItems; at += 1) {
     await wait(implementPace.everyMs);
     if (stopped()) return undefined;
     answerSteers();
     item(nextId('progress'), { type: 'agentMessage', text: `progress ${String(at)} of ${String(implementPace.progressItems)}: ${work.entry.name}` });
-    await implementActions.get(at)?.(work);
+    await actions.get(at)?.(work);
     if (stopped()) return undefined;
   }
-  return review(`The stand-in added ${work.entry.name} in ${work.entry.file}.`, `Added \`${work.entry.name}\` in \`${work.entry.file}\`, exported by name, and checked it against the ticket's acceptance criteria.`);
+  return again?.reply ?? added(work);
 }
 
 async function reproducing(prompt: string, content: string, summary: string, body: string): Promise<Review | undefined> {
@@ -153,12 +216,14 @@ async function reproducing(prompt: string, content: string, summary: string, bod
 }
 
 const verify = (work: Implementing, prompt: string): Promise<Review | undefined> =>
-  reproducing(
-    prompt,
-    reproductionScript(work.entry, work.solution),
-    `The stand-in wrote a script that checks ${work.entry.name}.`,
-    `The script imports \`${work.entry.name}\` from \`${work.entry.file}\` and checks the ticket's examples.`,
-  );
+  rehearsalOf(prompt) === 'ticket-conflict'
+    ? reproducing(prompt, coverageScript(work.entry), `The stand-in wrote a script that checks ${untouchable} tests ${work.entry.name}.`, `The script fails while \`${untouchable}\` does not test \`${work.entry.name}\`.`)
+    : reproducing(
+        prompt,
+        reproductionScript(work.entry, work.solution),
+        `The stand-in wrote a script that checks ${work.entry.name}.`,
+        `The script imports \`${work.entry.name}\` from \`${work.entry.file}\` and checks the ticket's examples.`,
+      );
 
 export const answeredHeading = '## Your last review, and the answers to it';
 
@@ -236,7 +301,7 @@ async function work(prompt: string): Promise<Review | undefined> {
   if (entry === undefined || (step !== 'implement' && step !== 'verify')) return unchanged(step);
   const solution = solutions[entry.name];
   if (solution === undefined) return { ...review(`The stand-in has no solution for ${entry.name}.`, `Add one to the stand-in's solutions.`, 'blocked'), ...(step === 'verify' ? { behavior: null } : {}) };
-  return step === 'implement' ? implement({ entry, solution }) : verify({ entry, solution }, prompt);
+  return step === 'implement' ? implement({ entry, solution }, prompt) : verify({ entry, solution }, prompt);
 }
 
 export const tickPrefix = 'stand-in-tick-';

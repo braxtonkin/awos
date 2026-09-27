@@ -19,7 +19,8 @@ import { setupProbe } from './codex-stand-in.ts';
 import type { GitHub } from './github.ts';
 import { taskFor } from './record.ts';
 import { sandboxCommands } from './sandbox-seed.ts';
-import { identity } from './solutions.ts';
+import { reworkCheckNames, reworkChecks } from './rework-checks.ts';
+import { identity, rehearsalNames, rehearsedTicket, type RehearsalName } from './solutions.ts';
 import type { EngineWorld } from './world.ts';
 
 const run = promisify(execFile);
@@ -223,9 +224,14 @@ export async function runRecord(db: Database, key: string): Promise<readonly Run
 export const describeRecord = (record: RunRecord): string =>
   `attempt ${record.attempt} ${record.step} ${record.verdict ?? 'live'} as ${record.runAs} on ${record.branch ?? 'no branch'} pushed ${record.pushed ?? 'nothing'} owed [${record.owed.join(', ')}] input tokens ${record.inputTokens === null ? 'unknown' : String(record.inputTokens)}`;
 
-export const faultNames = ['engine-restart', 'lost-job', 'base-conflict'] as const;
+export const faultNames = ['engine-restart', 'lost-job', 'base-conflict', ...rehearsalNames] as const;
 
 export type Fault = (typeof faultNames)[number];
+
+export const ticketDescription = (description: string, fault: Fault | undefined): string => {
+  const rehearsal = rehearsalNames.find(name => name === fault);
+  return rehearsal === undefined ? description : rehearsedTicket(description, rehearsal);
+};
 
 export const runAsNames = ['assignee', 'team'] as const;
 
@@ -382,9 +388,9 @@ async function attemptsAt(db: Database, ticket: string, steps: readonly string[]
 const promptOf = async (db: Database, attempt: string): Promise<string> =>
   (await db.selectFrom('attempt_command').select('input').where('attempt_id', '=', attempt).where('kind', '=', 'turn.start').executeTakeFirst())?.input ?? '';
 
-const faultCheckNames: Readonly<Record<Fault, string>> = { 'engine-restart': 'attempt continued', 'lost-job': 'lost attempt replaced', 'base-conflict': 'conflict resolved by a merge' };
+const faultCheckNames: Readonly<Record<Fault, string>> = { 'engine-restart': 'attempt continued', 'lost-job': 'lost attempt replaced', 'base-conflict': 'conflict resolved by a merge', ...reworkCheckNames };
 
-async function continuedCheck(db: Database, ticket: string, fault: Exclude<Fault, 'base-conflict'>, hit: Implementing | undefined): Promise<Check> {
+async function continuedCheck(db: Database, ticket: string, fault: 'engine-restart' | 'lost-job', hit: Implementing | undefined): Promise<Check> {
   const name = faultCheckNames[fault];
   if (hit === undefined) return fail(name, 'the fault never fired, because no Implement event was stored');
   const implement = await attemptsAt(db, ticket, ['implement']);
@@ -581,10 +587,15 @@ async function driveInNamespace(drive: Drive, core: CoreV1Api, image: string, ad
         await wait(watchEveryMs, undefined, { signal: drive.signal }).catch(() => undefined);
       }
       if (park !== undefined) drive.check(fail('task never parked after the fault', parkedText(drive.ticket, park)));
+      const rehearsed = (name: RehearsalName) => () => reworkChecks[name]({ db: store.db, ticket: drive.ticket, github: drive.github, branch: drive.branch });
       const endChecks: Readonly<Record<Fault, () => Promise<Check>>> = {
         'engine-restart': () => continuedCheck(store.db, drive.ticket, 'engine-restart', hit),
         'lost-job': () => continuedCheck(store.db, drive.ticket, 'lost-job', hit),
         'base-conflict': () => resolvedCheck(drive, store.db, movedBase),
+        'red-check': rehearsed('red-check'),
+        'still-wrong': rehearsed('still-wrong'),
+        'ticket-conflict': rehearsed('ticket-conflict'),
+        'pushes-nothing': rehearsed('pushes-nothing'),
       };
       if (drive.fault !== undefined) drive.check(await endChecks[drive.fault]());
       if (drive.world.agent === 'stand-in') drive.check(await setupCheck(store.db, drive.ticket));

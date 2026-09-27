@@ -52,6 +52,44 @@ export const solutions: Readonly<Record<string, Solution>> = {
 
 export const identity = (entry: Pick<Entry, 'name'>): string => `export function ${entry.name}(value: unknown): unknown {\n  return value;\n}\n`;
 
+export const rehearsalNames = ['red-check', 'still-wrong', 'ticket-conflict', 'pushes-nothing'] as const;
+
+export type RehearsalName = (typeof rehearsalNames)[number];
+
+const rehearsalLine = (name: RehearsalName): string => `The Codex stand-in rehearses ${name} on this ticket.`;
+
+export const rehearsalOf = (text: string): RehearsalName | undefined => rehearsalNames.find(name => text.includes(rehearsalLine(name)));
+
+export const untouchable = 'test/words.test.ts';
+
+export const forbidden = `Do not edit \`${untouchable}\`.`;
+
+export const rehearsedTicket = (description: string, name: RehearsalName): string => [description, rehearsalLine(name), ...(name === 'ticket-conflict' ? [forbidden] : [])].join('\n\n');
+
+export const favicon = 'public/favicon.ico';
+
+export const smokeTest = {
+  path: 'test/smoke.test.ts',
+  source: [
+    "import { existsSync } from 'node:fs';",
+    "import { expect, test } from 'vitest';",
+    '',
+    "test('the page loads every resource it links', () => {",
+    `  expect(existsSync('${favicon}'), 'console error: Failed to load resource: the server responded with a status of 404 (Not Found) /favicon.ico').toBe(true);`,
+    '});',
+    '',
+  ].join('\n'),
+} as const;
+
+export const checksPass = 'All mandated checks pass: typecheck, test, and build. The smoke test needs a browser, which this Job lacks.';
+
+export const stillWrongSign = 'Expected values to be strictly equal';
+
+export const coverageScript = (entry: Pick<Entry, 'name'>): string =>
+  `grep -q ${entry.name} ${untouchable} || { echo "${untouchable} does not test ${entry.name}, and every export needs a test there"; exit 1; }\n`;
+
+export const askOnConflict = "the ticket's own words";
+
 export const reproductionScript = (entry: Entry, solution: Solution): string =>
   [
     `test -f ${entry.file} || { echo "${entry.file} does not exist"; exit 1; }`,

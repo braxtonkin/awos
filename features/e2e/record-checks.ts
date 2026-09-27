@@ -16,6 +16,10 @@ const faultStepOrders: Readonly<Record<Fault, readonly string[]>> = {
   'engine-restart': stepOrder,
   'lost-job': stepOrder,
   'base-conflict': ['specify', 'implement', 'verify', 'implement', 'verify', 'land'],
+  'red-check': ['specify', 'implement', 'verify', 'implement', 'verify', 'land'],
+  'still-wrong': ['specify', 'implement', 'implement', 'verify', 'land'],
+  'ticket-conflict': ['specify', 'implement'],
+  'pushes-nothing': ['specify', 'implement', 'verify'],
 };
 
 export const agentSteps: ReadonlySet<string> = new Set<string>(['specify', 'implement', 'verify']);

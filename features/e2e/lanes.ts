@@ -125,6 +125,46 @@ export const lanes: readonly Lane[] = [
     procedure: 'After a passing run, plant a Secret labeled for a finished attempt and rerun the clean check. Pass when the check fails and names the Secret.',
     deciders: named({ exactly: ['clean', 'the clean check fails on a planted Secret and names it'] }),
   },
+  {
+    ...run,
+    number: 11,
+    slug: 'red-check',
+    fault: 'red-check',
+    procedure: "The stand-in's first Implement adds a smoke test that fails in CI with a log line about favicon.ico, and its rework adds the file only when its prompt holds that line, as SBX-60 needed. Pass when the rework's prompt names the check, its failing step, and the log line, and the run reaches clean.",
+    deciders: named({ exactly: ['red check fixed from its log', 'clean'] }),
+  },
+  {
+    ...run,
+    number: 12,
+    slug: 'still-wrong',
+    fault: 'still-wrong',
+    procedure: "The stand-in's first Implement returns its input, so Verify finds the behavior still wrong, and its rework fixes the entry only when its prompt holds Verify's failing assertion. Pass when the rework's prompt holds it and the run reaches clean.",
+    deciders: named({ exactly: ['behavior fixed from its evidence', 'clean'] }),
+  },
+  {
+    ...run,
+    number: 13,
+    slug: 'ticket-conflict',
+    fault: 'ticket-conflict',
+    procedure: "The ticket says not to edit test/words.test.ts, and Verify's script needs that file changed, as in SBX-57. The stand-in's rework asks when its prompt says to ask about a clash with the ticket's own words, and otherwise obeys the ticket and pushes nothing. Pass when one rework asks a question that names the file and the ticket's words, and the task waits for its answer.",
+    deciders: named({ exactly: ['rework asked about the ticket'] }),
+  },
+  {
+    ...run,
+    number: 14,
+    slug: 'pushes-nothing',
+    fault: 'pushes-nothing',
+    procedure: "The stand-in's first Implement adds a smoke test that fails in CI, and every rework says all mandated checks pass and pushes nothing, as in SBX-60. Pass when one rework ends and the task waits with a reason that names the check and quotes the agent.",
+    deciders: named({ exactly: ['rework ended once'] }),
+  },
+  {
+    ...run,
+    number: 15,
+    slug: 'base-conflict',
+    fault: 'base-conflict',
+    procedure: 'Move the run branch forward at the first stored Implement event, so the pull request conflicts. Pass when Land sends the task back, Implement merges the new base, and the run reaches clean.',
+    deciders: named({ exactly: ['base moved under the pull request', 'conflict resolved by a merge', 'clean'] }),
+  },
 ];
 
 export const allCommands = ['npm run check', 'npm run verify -- guardrails', 'npm run verify -- models', 'npm test'] as const;
