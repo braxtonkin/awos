@@ -1,29 +1,23 @@
 'use client';
 
-import { useState } from 'react';
 import { failing, isFailed } from '../../shared/task-status.ts';
-import { clock } from '../../shared/ui/clock.ts';
+import { between, clock } from '../../shared/ui/clock.ts';
 import { StatusMarks } from '../../shared/ui/status.tsx';
 import { color } from '../../shared/ui/tokens.ts';
-import { useFrames, type Stream } from '../../shared/ui/use-frames.ts';
 import { failureOf, whyOf } from './ending.ts';
-import { frame, type AttemptSummary, type TaskLive } from './protocol.ts';
+import type { AttemptSummary, TaskLive } from './protocol.ts';
 import { stepName } from './time.ts';
 import { numbered } from './timeline.ts';
 
-export function useLive(initial: TaskLive, stream: Stream): TaskLive {
-  const [task, setTask] = useState(initial);
-  useFrames(stream, frame, next => {
-    if (next.kind === 'task') setTask(next.task);
-  });
-  return task;
-}
-
 type Card = { readonly headline: string; readonly reason: string | null; readonly instruction: string | null; readonly notes: readonly string[] };
 
-type Landing = { readonly mergeQueued: boolean; readonly took: string | null };
-
 const mergeQueueNote = 'Stop does not recall a pull request from the merge queue.';
+
+const tookOf = (attempts: readonly AttemptSummary[]): string | null => {
+  const first = attempts[0];
+  const last = attempts.findLast(each => each.finishedAt !== null)?.finishedAt;
+  return first === undefined || last === undefined || last === null ? null : between(first.startedAt, last);
+};
 
 const leadUpOf = (task: TaskLive, failed: AttemptSummary): string | null => {
   const before = task.attempts.findLast(each => each.step !== failed.step);
@@ -60,8 +54,8 @@ function stoppedNext(task: TaskLive): string {
   return verdict !== null && failing[verdict] ? 'Retry starts the agent again.' : `Retry starts the agent again at ${step}.`;
 }
 
-function cardOf(task: TaskLive, landing: Landing, zone: string): Card {
-  const notes = landing.mergeQueued && task.state !== 'done' ? [mergeQueueNote] : [];
+function cardOf(task: TaskLive, zone: string): Card {
+  const notes = task.mergeQueued && task.state !== 'done' ? [mergeQueueNote] : [];
   const newest = task.attempts.at(-1);
   switch (task.state) {
     case 'ready': {
@@ -78,16 +72,17 @@ function cardOf(task: TaskLive, landing: Landing, zone: string): Card {
       return waitingCard(task, notes);
     case 'stopped':
       return { headline: task.stoppedBy === null ? `This task stopped during ${stepName(task.step)}.` : `${task.stoppedBy.name} stopped this task at ${clock(task.stoppedBy.at, zone)}.`, reason: null, instruction: stoppedNext(task), notes };
-    case 'done':
-      return { headline: 'The task landed.', reason: null, instruction: null, notes: landing.took === null ? [] : [`It took ${landing.took} from start to merge.`] };
+    case 'done': {
+      const took = tookOf(task.attempts);
+      return { headline: 'The task landed.', reason: null, instruction: null, notes: took === null ? [] : [`It took ${took} from start to merge.`] };
+    }
   }
 }
 
-type StatusCardProps = { readonly initial: TaskLive; readonly landing: Landing; readonly stream: Stream; readonly zone: string };
+type StatusCardProps = { readonly task: TaskLive; readonly zone: string };
 
-export function StatusCard({ initial, landing, stream, zone }: StatusCardProps) {
-  const task = useLive(initial, stream);
-  const card = cardOf(task, landing, zone);
+export function StatusCard({ task, zone }: StatusCardProps) {
+  const card = cardOf(task, zone);
   return (
     <section data-status={task.state} aria-label="Status" style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 8, padding: '20px 24px', borderRadius: 12, background: color('surface'), border: `1px solid ${color('rule')}` }}>
       <StatusMarks marks={task.marks} />

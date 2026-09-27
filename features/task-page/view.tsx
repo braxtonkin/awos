@@ -1,21 +1,24 @@
-import { between, clock } from '../../shared/ui/clock.ts';
+'use client';
+
+import { useCallback, useState } from 'react';
+import type { Said } from '../../shared/said.ts';
+import { clock } from '../../shared/ui/clock.ts';
 import { color } from '../../shared/ui/tokens.ts';
-import type { Stream } from '../../shared/ui/use-frames.ts';
+import { useFrames } from '../../shared/ui/use-frames.ts';
 import { AgentPanel, type PanelActions } from './agent-panel.tsx';
 import { AttemptsTab } from './attempts-tab.tsx';
 import { EvidenceTab } from './evidence-tab.tsx';
 import { OpenReviews } from './open-reviews.tsx';
-import { textOf, type AttemptSummary, type Cursor } from './protocol.ts';
+import { frame, textOf, type Evidence, type Frame, type Live } from './protocol.ts';
 import type { Header, TaskPageData } from './read.ts';
 import { StatusCard } from './status-card.tsx';
 import { Stepper } from './stepper.tsx';
 import type { Tab } from './tab.ts';
 import { Tabs } from './tabs.tsx';
+import { extend, runsAsOf } from './timeline.ts';
 
-const streamOf = (key: string, cursor: Cursor | undefined): Stream => ({ path: `/tasks/${encodeURIComponent(key)}/stream`, after: cursor === undefined ? undefined : textOf(cursor) });
-
-function Facts({ header, zone }: { readonly header: Header; readonly zone: string }) {
-  const facts = [header.repository, header.runsAs === null ? 'Runs as nobody yet' : `Runs as ${header.runsAs}`, `Found at ${clock(header.foundAt, zone)}`];
+function Facts({ header, runsAs, zone }: { readonly header: Header; readonly runsAs: string | null; readonly zone: string }) {
+  const facts = [header.repository, runsAs === null ? 'Runs as nobody yet' : `Runs as ${runsAs}`, `Found at ${clock(header.foundAt, zone)}`];
   return (
     <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px 16px', fontSize: 13, color: color('muted') }}>
       {facts.flatMap(fact => (fact === null ? [] : [<span key={fact}>{fact}</span>]))}
@@ -23,19 +26,37 @@ function Facts({ header, zone }: { readonly header: Header; readonly zone: strin
   );
 }
 
-const tookOf = (attempts: readonly AttemptSummary[]): string | null => {
-  const first = attempts[0];
-  const last = attempts.findLast(each => each.finishedAt !== null)?.finishedAt;
-  return first === undefined || last === undefined || last === null ? null : between(first.startedAt, last);
-};
+const withEvidence = (known: readonly Evidence[], added: readonly Evidence[]): readonly Evidence[] => [...known, ...added.filter(row => !known.some(each => each.attempt === row.attempt))];
+
+const withSaid = (known: readonly Said[], entry: Said): readonly Said[] => (known.some(each => each.request === entry.request) ? known : [...known, entry]);
+
+function followed(live: Live, next: Frame): Live {
+  switch (next.kind) {
+    case 'task':
+      return { ...live, task: next.task };
+    case 'line':
+      return { ...live, attempts: extend(live.attempts, [next]) };
+    case 'said':
+      return { ...live, said: next.said };
+    case 'evidence':
+      return { ...live, evidence: withEvidence(live.evidence, next.evidence) };
+  }
+}
 
 type TaskPageProps = { readonly page: TaskPageData; readonly actions: PanelActions; readonly tab: Tab; readonly zone: string };
 
 export function TaskPage({ page, actions, tab, zone }: TaskPageProps) {
-  const { header, live, record } = page;
-  const stream = streamOf(header.key, page.cursor);
+  const { header, steps, cursor, kept } = page;
+  const [live, setLive] = useState(page.live);
+  useFrames({ path: `/tasks/${encodeURIComponent(header.key)}/stream`, after: cursor === undefined ? undefined : textOf(cursor) }, frame, next => {
+    setLive(known => followed(known, next));
+  });
+  const sent = useCallback((entry: Said) => {
+    setLive(known => ({ ...known, said: withSaid(known.said, entry) }));
+  }, []);
+  const { task, attempts, said, evidence } = live;
   return (
-    <div key={header.key} style={{ flex: 1, display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 520px', alignItems: 'start' }}>
+    <div style={{ flex: 1, display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 520px', alignItems: 'start' }}>
       <main style={{ padding: '32px 32px 64px', display: 'flex', flexDirection: 'column', gap: 24, minWidth: 0 }}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 16, minHeight: 28 }}>
@@ -44,14 +65,14 @@ export function TaskPage({ page, actions, tab, zone }: TaskPageProps) {
             </span>
           </div>
           <h1 style={{ margin: 0, fontSize: 24, lineHeight: '32px', fontWeight: 600 }}>{header.title}</h1>
-          <Facts header={header} zone={zone} />
+          <Facts header={header} runsAs={runsAsOf(task.attempts)} zone={zone} />
         </div>
-        <StatusCard initial={live} landing={{ mergeQueued: record.mergeQueued, took: live.state === 'done' ? tookOf(live.attempts) : null }} stream={stream} zone={zone} />
-        <Stepper initial={live} steps={record.steps} stream={stream} />
-        <OpenReviews task={header.id} live={live} said={page.said} stream={stream} act={actions.review} zone={zone} />
-        <Tabs initial={tab} panels={{ evidence: <EvidenceTab evidence={record.evidence} attempts={live.attempts} zone={zone} />, attempts: <AttemptsTab attempts={live.attempts} runsAs={header.runsAs} /> }} />
+        <StatusCard task={task} zone={zone} />
+        <Stepper task={task} steps={steps} />
+        <OpenReviews task={header.id} live={task} said={said} onSent={sent} act={actions.review} zone={zone} />
+        <Tabs initial={tab} panels={{ evidence: <EvidenceTab evidence={evidence} attempts={task.attempts} zone={zone} />, attempts: <AttemptsTab attempts={task.attempts} /> }} />
       </main>
-      <AgentPanel task={header.id} initial={page.attempts} live={live} said={page.said} kept={page.kept} stream={stream} actions={actions} zone={zone} />
+      <AgentPanel task={header.id} attempts={attempts} live={task} said={said} onSent={sent} kept={kept} actions={actions} zone={zone} />
     </div>
   );
 }

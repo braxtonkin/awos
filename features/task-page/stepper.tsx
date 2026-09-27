@@ -2,10 +2,8 @@
 
 import { isFailed } from '../../shared/task-status.ts';
 import { color, type ColorName } from '../../shared/ui/tokens.ts';
-import type { Stream } from '../../shared/ui/use-frames.ts';
 import type { TaskLive } from './protocol.ts';
 import type { Step } from './read.ts';
-import { useLive } from './status-card.tsx';
 import { stepName } from './time.ts';
 
 type StepState = 'done' | 'running' | 'waiting' | 'failed' | 'stopped' | 'passed' | 'sent-back' | 'next';
@@ -49,10 +47,9 @@ function statesOf(task: TaskLive, steps: readonly Step[]): readonly StepState[] 
   });
 }
 
-type StepperProps = { readonly initial: TaskLive; readonly steps: readonly Step[]; readonly stream: Stream };
+type StepperProps = { readonly task: TaskLive; readonly steps: readonly Step[] };
 
-export function Stepper({ initial, steps, stream }: StepperProps) {
-  const task = useLive(initial, stream);
+export function Stepper({ task, steps }: StepperProps) {
   const states = statesOf(task, steps);
   return (
     <ol aria-label="Steps" style={{ listStyle: 'none', margin: 0, padding: 0, display: 'flex', flexWrap: 'wrap', gap: 8 }}>

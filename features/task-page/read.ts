@@ -3,12 +3,12 @@ import { jsonArrayFrom } from 'kysely/helpers/postgres';
 import { z } from 'zod';
 import type { Database } from '../../shared/db/client.ts';
 import { emptyTranscript } from '../../shared/items.ts';
-import { reproduction, type Reproduction } from '../../shared/reproduction.ts';
+import { reproduction } from '../../shared/reproduction.ts';
 import { answerFrom, payloads } from '../../shared/requests.ts';
 import { review, type Answer, type Review } from '../../shared/review.ts';
 import { saidKinds, type Said } from '../../shared/said.ts';
 import { marksOf } from '../../shared/task-status.ts';
-import { taskState, verdict, waitingOn, type AttemptSummary, type AttemptTranscript, type Cursor, type Kept, type Line, type TaskLive } from './protocol.ts';
+import { taskState, verdict, waitingOn, type AttemptSummary, type Cursor, type Evidence, type Field, type Kept, type Line, type Live, type Shown, type TaskLive } from './protocol.ts';
 import { extend } from './timeline.ts';
 
 export type Header = {
@@ -17,35 +17,20 @@ export type Header = {
   readonly title: string;
   readonly routine: string;
   readonly repository: string | null;
-  readonly runsAs: string | null;
   readonly foundAt: string;
 };
 
 export type Step = { readonly name: string; readonly gate: boolean };
 
-export type Field = { readonly name: string; readonly text: string };
-
-export type Shown = { readonly kind: 'reproduction'; readonly reproduction: Reproduction } | { readonly kind: 'fields'; readonly blocks: readonly Field[]; readonly facts: readonly Field[] };
-
-export type Evidence = { readonly attempt: string; readonly step: string; readonly recordedAt: string; readonly shown: Shown };
-
-export type TaskRecord = {
-  readonly steps: readonly Step[];
-  readonly evidence: readonly Evidence[];
-  readonly mergeQueued: boolean;
-};
-
 export type TaskPageData = {
   readonly header: Header;
-  readonly record: TaskRecord;
-  readonly live: TaskLive;
-  readonly said: readonly Said[];
-  readonly attempts: readonly AttemptTranscript[];
+  readonly steps: readonly Step[];
+  readonly live: Live;
   readonly cursor: Cursor | undefined;
   readonly kept: Kept;
 };
 
-export type Snapshot = { readonly live: TaskLive; readonly lines: readonly Line[]; readonly said: readonly Said[] };
+export type Snapshot = { readonly live: TaskLive; readonly lines: readonly Line[]; readonly said: readonly Said[]; readonly evidence: readonly Evidence[] };
 
 const moment = z.union([z.date(), z.string()]).transform(value => new Date(value).toISOString());
 
@@ -94,6 +79,8 @@ const snapshotRow = z.object({
     }),
   ),
   commands: z.array(z.object({ attempt: id, kind: z.enum(['turn.start', 'turn.steer', 'turn.stop']), action_id: z.string().nullable(), client_message_id: z.string().nullable(), received_at: moment.nullable(), acted_at: moment.nullable() })),
+  evidence: z.array(z.object({ attempt: id, step: z.string(), recorded_at: moment, body: z.unknown() })),
+  merge_queued: z.boolean(),
 });
 
 type Row = z.infer<typeof snapshotRow>;
@@ -170,10 +157,12 @@ function saidOf(row: Row): readonly Said[] {
   });
 }
 
-export type Range = { readonly after: Cursor | undefined; readonly limit: number };
+const mergeKind = 'pr.merge';
+
+export type Range = { readonly after: Cursor | undefined; readonly limit: number; readonly evidenceAfter: string | undefined };
 
 export async function snapshot(db: Database, task: string, range: Range): Promise<Snapshot | undefined> {
-  const { after } = range;
+  const { after, evidenceAfter } = range;
   const row = await db
     .selectFrom('task')
     .leftJoin('human_action as stop', 'stop.id', 'task.stopped_by')
@@ -223,6 +212,16 @@ export async function snapshot(db: Database, task: string, range: Range): Promis
           .orderBy('attempt_command.attempt_id')
           .orderBy('attempt_command.seq'),
       ).as('commands'),
+      jsonArrayFrom(
+        eb
+          .selectFrom('evidence')
+          .innerJoin('attempt', 'attempt.id', 'evidence.attempt_id')
+          .select(['evidence.attempt_id as attempt', 'attempt.step', 'evidence.recorded_at', 'evidence.body'])
+          .whereRef('evidence.task_id', '=', 'task.id')
+          .where(inner => (evidenceAfter === undefined ? inner.lit(true) : inner('evidence.attempt_id', '>', evidenceAfter)))
+          .orderBy('evidence.attempt_id'),
+      ).as('evidence'),
+      eb.exists(eb.selectFrom('outbox').select('outbox.kind').whereRef('outbox.task_id', '=', 'task.id').where('outbox.kind', '=', mergeKind).where('outbox.state', 'in', ['owed', 'done'])).as('merge_queued'),
     ])
     .where('task.id', '=', task)
     .executeTakeFirst();
@@ -241,14 +240,16 @@ export async function snapshot(db: Database, task: string, range: Range): Promis
       stoppedBy: parsed.stopped_by_name === null || parsed.stopped_at === null ? null : { name: parsed.stopped_by_name, at: parsed.stopped_at },
       attempts: parsed.attempts.map(each => ({ id: each.id, step: each.step, person: each.person, startedAt: each.started_at, finishedAt: each.finished_at, verdict: each.verdict, ...wordsOf(each.output) })),
       review: waitingReview === undefined || asked === null ? null : { attempt: waitingReview.id, review: asked },
+      mergeQueued: parsed.merge_queued,
     },
     lines: parsed.lines,
     said: saidOf(parsed),
+    evidence: parsed.evidence.map(row => ({ attempt: row.attempt, step: row.step, recordedAt: row.recorded_at, shown: shownOf(row.body) })),
   };
 }
 
 export async function heard(db: Database, task: string, request: string): Promise<Said | undefined> {
-  return (await snapshot(db, task, { after: undefined, limit: 0 }))?.said.find(entry => entry.request === request);
+  return (await snapshot(db, task, { after: undefined, limit: 0, evidenceAfter: undefined }))?.said.find(entry => entry.request === request);
 }
 
 const everyLine = 100_000;
@@ -305,25 +306,9 @@ const shownOf = (body: unknown): Shown => {
   return parsed.success ? { kind: 'reproduction', reproduction: parsed.data } : fieldsOf(body);
 };
 
-const mergeKind = 'pr.merge';
-
-async function recordOf(db: Database, task: { readonly id: string; readonly workflow: string; readonly gates: readonly string[] }): Promise<TaskRecord> {
-  const [steps, evidence, merge] = await Promise.all([
-    db.selectFrom('published_workflow_step').select('published_workflow_step.name').where('published_workflow_step.workflow', '=', task.workflow).orderBy('published_workflow_step.position').execute(),
-    db
-      .selectFrom('evidence')
-      .innerJoin('attempt', 'attempt.id', 'evidence.attempt_id')
-      .select(['evidence.attempt_id', 'attempt.step', 'evidence.recorded_at', 'evidence.body'])
-      .where('evidence.task_id', '=', task.id)
-      .orderBy('evidence.attempt_id')
-      .execute(),
-    db.selectFrom('outbox').select('outbox.kind').where('outbox.task_id', '=', task.id).where('outbox.kind', '=', mergeKind).where('outbox.state', 'in', ['owed', 'done']).executeTakeFirst(),
-  ]);
-  return {
-    steps: steps.map(step => ({ name: step.name, gate: task.gates.includes(step.name) })),
-    evidence: evidence.map(row => ({ attempt: row.attempt_id, step: row.step, recordedAt: row.recorded_at.toISOString(), shown: shownOf(row.body) })),
-    mergeQueued: merge !== undefined,
-  };
+async function stepsOf(db: Database, task: { readonly workflow: string; readonly gates: readonly string[] }): Promise<readonly Step[]> {
+  const steps = await db.selectFrom('published_workflow_step').select('published_workflow_step.name').where('published_workflow_step.workflow', '=', task.workflow).orderBy('published_workflow_step.position').execute();
+  return steps.map(step => ({ name: step.name, gate: task.gates.includes(step.name) }));
 }
 
 export async function readTask(db: Database, key: string, now: Date = new Date()): Promise<TaskPageData | undefined> {
@@ -345,7 +330,7 @@ export async function readTask(db: Database, key: string, now: Date = new Date()
     .where('task.key', '=', key)
     .executeTakeFirst();
   if (header === undefined) return undefined;
-  const [found, record] = await Promise.all([snapshot(db, header.id, { after: undefined, limit: everyLine }), recordOf(db, header)]);
+  const [found, steps] = await Promise.all([snapshot(db, header.id, { after: undefined, limit: everyLine, evidenceAfter: undefined }), stepsOf(db, header)]);
   if (found === undefined) return undefined;
   const last = found.lines.at(-1);
   return {
@@ -355,16 +340,18 @@ export async function readTask(db: Database, key: string, now: Date = new Date()
       title: header.title,
       routine: header.routine,
       repository: header.github === null || header.branch === null ? null : `${header.github} → ${header.branch}`,
-      runsAs: found.live.attempts.at(-1)?.person ?? null,
       foundAt: header.found_at.toISOString(),
     },
-    record,
-    live: found.live,
-    said: found.said,
-    attempts: extend(
-      found.live.attempts.map(each => ({ attempt: each.id, transcript: emptyTranscript, times: {}, actions: {} })),
-      found.lines,
-    ),
+    steps,
+    live: {
+      task: found.live,
+      attempts: extend(
+        found.live.attempts.map(each => ({ attempt: each.id, transcript: emptyTranscript, times: {}, actions: {} })),
+        found.lines,
+      ),
+      said: found.said,
+      evidence: found.evidence,
+    },
     cursor: last === undefined ? undefined : { attempt: last.attempt, line: last.seq },
     kept: keptOf(found.live, now),
   };

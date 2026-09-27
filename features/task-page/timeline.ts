@@ -32,6 +32,8 @@ export function extend(attempts: readonly AttemptTranscript[], lines: readonly L
   return [...known, ...fresh].toSorted((a, b) => Number(a.attempt) - Number(b.attempt));
 }
 
+export const runsAsOf = (attempts: readonly AttemptSummary[]): string | null => attempts.at(-1)?.person ?? null;
+
 export const numbered = (attempts: readonly AttemptSummary[], id: string): number => {
   const found = attempts.find(each => each.id === id);
   return found === undefined ? 0 : attempts.filter(each => each.step === found.step && Number(each.id) <= Number(id)).length;
