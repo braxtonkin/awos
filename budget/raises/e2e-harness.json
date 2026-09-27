@@ -1,6 +1,0 @@
-{
-  "why": "merge of main: PR 3's fold lowered e2e-harness by characters its kind fix saved in openWorld, which this branch moves to open-world.ts",
-  "raise": {
-    "characters/e2e-harness": 13
-  }
-}

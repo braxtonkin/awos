@@ -1,8 +1,0 @@
-{
-  "why": "The base-conflict fault reproduces the 26 Sep live failure, where Land sent a conflicting pull request back and Implement could not merge its base, and it proves the conflict rework and the setup before Implement end to end in a local world.",
-  "raise": {
-    "characters/docs": 441,
-    "characters/e2e-harness": 10232,
-    "lines/e2e-harness": 186
-  }
-}
