@@ -1,0 +1,14 @@
+{
+  "why": "A check rework records the base head it read and merges it before the turn, which adds a migration that backfills and tightens obligation_names_its_kind, the rework's merge text, and its check; the rework's evidence holds Verify's whole script; the seed's conflict story records conflict; the feature map and decisions describe them.",
+  "raise": {
+    "characters/docs": 1885,
+    "characters/feature-verification": 394,
+    "characters/migrations": 1389,
+    "characters/product": 663,
+    "lines/docs": 6,
+    "lines/feature-verification": 9,
+    "lines/migrations": 30,
+    "lines/product": 10,
+    "structure/migrations": 1
+  }
+}
