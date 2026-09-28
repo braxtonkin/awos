@@ -1,6 +1,6 @@
 # autoworker-oss
 
-AutoWorker takes a ticket all the way to a merged change without a person driving it. A person decides what should happen and reviews the result. The full behavior is specified in [docs/spec.md](docs/spec.md).
+AutoWorker takes a ticket all the way to a merged change without a person driving it. A person decides what should happen and reviews the result. The full behavior is specified in [docs/spec.md](docs/spec.md), and [docs/handbook/](docs/handbook/README.md) explains how it works and how to extend, verify, and run it.
 
 ## Rules
 
