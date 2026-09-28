@@ -1,6 +1,0 @@
-{
-  "why": "AGENTS.md and the README point agents and people to the handbook, and the drift fixes replace stale statements in AGENTS.md and the feature map with longer true ones.",
-  "raise": {
-    "characters/docs": 334
-  }
-}
