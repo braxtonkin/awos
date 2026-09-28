@@ -77,6 +77,15 @@
       "longest-line": 547
     },
     {
+      "name": "handbook",
+      "why": "The handbook explains the system to whoever extends or reworks it next, one page per need, and an agent opens a page only when its task needs it, so unlike the docs every run reads, its size costs a run only when used. It has its own ceiling so it cannot crowd out those docs, and it grows by linking to the code and the decisions rather than copying them, because a copied value goes stale.",
+      "files": [
+        "docs/handbook/**"
+      ],
+      "lines": 1948,
+      "characters": 189361
+    },
+    {
       "name": "docs",
       "why": "Agents read AGENTS.md on every task and the spec and decisions on most, so every docs line is paid for on every run. Growth should replace text, not add beside it.",
       "files": [
