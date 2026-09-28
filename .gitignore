@@ -31,5 +31,8 @@ desktop.ini
 # Local CI results
 /ci-local/
 
+# Per-machine compose settings, such as a core cap
+compose.override.yaml
+
 # Screenshots, videos, and review packets from the verify tool
 .shots/
